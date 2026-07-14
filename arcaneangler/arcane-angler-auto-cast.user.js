@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      1.3.2
+// @version      1.4.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -47,9 +47,6 @@
         mouseDownMin: 35,
         mouseDownMax: 90,
 
-        // 安全评估 PoC 的滑块动画和提交等待时间
-        captchaDragDuration: 700,
-        captchaSubmitDelay: 450,
     };
 
     const STORAGE_KEY = 'arcane-angler-auto-cast-enabled-v1';
@@ -347,43 +344,6 @@
         return null;
     }
 
-    async function waitForCaptchaSlider(timeout = 3000) {
-        const endTime = Date.now() + timeout;
-
-        while (Date.now() < endTime) {
-            const container = findHumanVerificationContainer();
-
-            if (container?.querySelector('input[type="range"]')) {
-                return container;
-            }
-
-            await sleep(50);
-        }
-
-        return null;
-    }
-
-    function decodeSvgDataUrl(dataUrl) {
-        const prefix = 'data:image/svg+xml';
-
-        if (!String(dataUrl).startsWith(prefix)) {
-            throw new Error('验证码背景不是 SVG Data URL');
-        }
-
-        const separatorIndex = dataUrl.indexOf(',');
-
-        if (separatorIndex === -1) {
-            throw new Error('验证码背景 Data URL 格式无效');
-        }
-
-        const metadata = dataUrl.slice(0, separatorIndex);
-        const payload = dataUrl.slice(separatorIndex + 1);
-
-        return metadata.includes(';base64')
-            ? window.atob(payload)
-            : decodeURIComponent(payload);
-    }
-
     function parseSvgNumber(value, fieldName) {
         const number = Number.parseFloat(value);
 
@@ -400,10 +360,11 @@
      * 当前题面使用带 stroke-dasharray 的矩形标记缺口边界；该坐标与
      * 滑块答案一起下发到了浏览器，因此无需图像识别即可还原答案。
      */
-    function readExposedCaptchaAnswer(backgroundImage) {
-        const source = decodeSvgDataUrl(
-            backgroundImage.currentSrc || backgroundImage.src,
-        );
+    function readExposedCaptchaAnswer(source) {
+        if (typeof source !== 'string' || !source.includes('<svg')) {
+            throw new Error('服务端未返回有效的验证码 SVG');
+        }
+
         const svg = new DOMParser().parseFromString(
             source,
             'image/svg+xml',
@@ -450,151 +411,68 @@
         };
     }
 
-    function setNativeRangeValue(range, value, commit = false) {
-        const valueSetter = Object.getOwnPropertyDescriptor(
-            HTMLInputElement.prototype,
-            'value',
-        )?.set;
-
-        if (!valueSetter) {
-            throw new Error('浏览器不支持设置滑块值');
-        }
-
-        valueSetter.call(range, String(value));
-        range.dispatchEvent(new Event('input', {
-            bubbles: true,
-        }));
-
-        if (commit) {
-            range.dispatchEvent(new Event('change', {
-                bubbles: true,
-            }));
-        }
-    }
-
-    function animateRangeValue(range, target, duration) {
-        const initialValue = Number.parseFloat(range.value);
-        const startValue = Number.isFinite(initialValue)
-            ? initialValue
-            : Number.parseFloat(range.min || '0');
-        const startTime = window.performance.now();
-
-        return new Promise((resolve, reject) => {
-            function moveFrame(currentTime) {
-                if (!range.isConnected) {
-                    reject(new Error('拖动过程中滑块已从页面移除'));
-                    return;
-                }
-
-                const progress = Math.min(
-                    (currentTime - startTime) / duration,
-                    1,
-                );
-                // 缓出曲线让滑块接近目标位置时自然减速。
-                const easedProgress = 1 - Math.pow(1 - progress, 3);
-                const value =
-                    startValue + (target - startValue) * easedProgress;
-
-                if (progress < 1) {
-                    setNativeRangeValue(range, value);
-                    window.requestAnimationFrame(moveFrame);
-                    return;
-                }
-
-                setNativeRangeValue(range, target, true);
-                resolve();
-            }
-
-            window.requestAnimationFrame(moveFrame);
-        });
-    }
-
     async function runCaptchaAuditPoc() {
-        let container = findHumanVerificationContainer();
+        const container = findHumanVerificationContainer();
 
         if (!container) {
             throw new Error('当前页面没有可见的人机验证');
         }
 
-        if (!container.querySelector('input[type="range"]')) {
-            const continueButton = Array.from(
-                container.querySelectorAll('button'),
-            ).find(button =>
-                normalizeText(button.textContent).includes('点击验证'),
-            );
+        const api = window.ApiService;
 
-            if (
-                !continueButton ||
-                continueButton.disabled ||
-                !isDisplayed(continueButton)
-            ) {
-                throw new Error('未找到第一步的“点击验证”按钮');
-            }
-
-            setStatus('PoC 已识别第一步，正在点击验证入口');
-            setNextDelay('等待滑块题面');
-            console.warn(
-                '[安全评估 PoC] 已识别验证码第一步，正在继续。',
-                continueButton,
-            );
-
-            continueButton.click();
-            container = await waitForCaptchaSlider();
-
-            if (!container) {
-                throw new Error('点击第一步后未出现滑块题面');
-            }
+        if (
+            typeof api?.getCaptchaChallenge !== 'function' ||
+            typeof api?.notifyCaptchaVerified !== 'function'
+        ) {
+            throw new Error('页面验证码 API 不可用');
         }
 
-        const range = container.querySelector('input[type="range"]');
-        const backgroundImage = Array.from(
-            container.querySelectorAll('img'),
-        ).find(image =>
-            String(image.currentSrc || image.src).startsWith(
-                'data:image/svg+xml',
-            ),
-        );
-        const verifyButton = Array.from(
-            container.querySelectorAll('button'),
-        ).find(button => normalizeText(button.textContent) === '验证');
+        setStatus('PoC 正在请求新的验证码 challenge');
+        setNextDelay('读取服务端题面');
 
-        if (!range || !backgroundImage || !verifyButton) {
-            throw new Error('验证码结构与安全评估样本不一致');
+        const challenge = await api.getCaptchaChallenge();
+
+        if (!challenge?.token || typeof challenge.bgSvg !== 'string') {
+            throw new Error('验证码 challenge 数据不完整');
         }
 
-        const answer = readExposedCaptchaAnswer(backgroundImage);
-        const min = Number.parseFloat(range.min || '0');
-        const max = Number.parseFloat(range.max || '100');
-        const target = min + answer.ratio * (max - min);
+        const answer = readExposedCaptchaAnswer(challenge.bgSvg);
+        const rangeValue = Math.round(answer.ratio * 100);
 
-        setStatus(`PoC 已解析缺口 x=${answer.gapX}，正在拖动`);
-        setNextDelay('模拟滑块移动');
-
-        await animateRangeValue(
-            range,
-            target,
-            CONFIG.captchaDragDuration,
-        );
+        setStatus(`PoC 已解析缺口 x=${answer.gapX}，正在提交`);
+        setNextDelay(`直接提交滑块值：${rangeValue}`);
 
         console.warn('[安全评估 PoC] 客户端已暴露验证码答案：', {
             ...answer,
-            rangeValue: Number(range.value),
+            rangeValue,
         });
 
-        setStatus(
-            `PoC 已拖动至 x=${answer.gapX}，等待提交`,
-        );
-        setNextDelay(
-            `滑块值：${range.value}，${CONFIG.captchaSubmitDelay}ms 后提交`,
+        await api.notifyCaptchaVerified(
+            challenge.token,
+            String(rangeValue),
         );
 
-        await sleep(CONFIG.captchaSubmitDelay);
+        const verifiedAt = Date.now();
+        const nextInterval = randomInt(900000, 1200000);
 
-        if (!verifyButton.isConnected || verifyButton.disabled) {
-            throw new Error('验证按钮当前不可用');
-        }
+        localStorage.setItem(
+            'fishingCaptchaLastVerified',
+            String(verifiedAt),
+        );
+        localStorage.setItem(
+            'fishingCaptchaInterval',
+            String(nextInterval),
+        );
 
-        verifyButton.click();
+        setStatus('PoC 服务端验证通过，即将刷新页面');
+        setNextDelay('验证成功');
+        console.warn(
+            '[安全评估 PoC] 服务端接受了由客户端题面计算出的答案。',
+        );
+
+        await sleep(800);
+
+        window.location.reload();
     }
 
     function stopIfHumanVerificationFound() {
