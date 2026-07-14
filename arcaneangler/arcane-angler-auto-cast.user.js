@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      1.4.0
+// @version      1.5.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -50,6 +50,8 @@
     };
 
     const STORAGE_KEY = 'arcane-angler-auto-cast-enabled-v1';
+    const CAPTCHA_BYPASS_STORAGE_KEY =
+        'arcane-angler-captcha-bypass-enabled-v1';
     const PUSH_KEY_STORAGE_KEY = 'arcane-angler-push-key-v1';
     const PANEL_COLLAPSED_STORAGE_KEY =
         'arcane-angler-panel-collapsed-v1';
@@ -59,11 +61,14 @@
         'Arcane Angler 出现验证码了，自动抛竿已停止';
 
     let enabled = loadEnabled();
+    let captchaBypassEnabled = loadCaptchaBypassEnabled();
     let pushKey = loadPushKey();
     let panelCollapsed = loadPanelCollapsed();
     let loopId = 0;
     let clickCount = 0;
     let ui = null;
+    let captchaBypassInProgress = false;
+    let captchaBypassAttemptId = 0;
 
     /**
      * 包装页面的 fetch，在抛竿请求发出前修改并打印 payload。
@@ -225,6 +230,29 @@
         }
     }
 
+    function loadCaptchaBypassEnabled() {
+        try {
+            const savedValue = localStorage.getItem(
+                CAPTCHA_BYPASS_STORAGE_KEY,
+            );
+
+            return savedValue === null ? true : savedValue === '1';
+        } catch {
+            return true;
+        }
+    }
+
+    function saveCaptchaBypassEnabled(value) {
+        try {
+            localStorage.setItem(
+                CAPTCHA_BYPASS_STORAGE_KEY,
+                value ? '1' : '0',
+            );
+        } catch (error) {
+            console.warn('[自动抛竿] 无法保存自动过验证设置：', error);
+        }
+    }
+
     function loadPushKey() {
         try {
             return localStorage.getItem(PUSH_KEY_STORAGE_KEY)?.trim() ?? '';
@@ -327,23 +355,6 @@
         return null;
     }
 
-    /**
-     * 定位包含验证码标题和操作按钮的容器。
-     */
-    function findHumanVerificationContainer() {
-        let current = findHumanVerification();
-
-        while (current && current !== document.body) {
-            if (current.querySelector('button')) {
-                return current;
-            }
-
-            current = current.parentElement;
-        }
-
-        return null;
-    }
-
     function parseSvgNumber(value, fieldName) {
         const number = Number.parseFloat(value);
 
@@ -411,10 +422,8 @@
         };
     }
 
-    async function runCaptchaAuditPoc() {
-        const container = findHumanVerificationContainer();
-
-        if (!container) {
+    async function runCaptchaBypass(isAttemptActive) {
+        if (!findHumanVerification()) {
             throw new Error('当前页面没有可见的人机验证');
         }
 
@@ -427,10 +436,14 @@
             throw new Error('页面验证码 API 不可用');
         }
 
-        setStatus('PoC 正在请求新的验证码 challenge');
+        setStatus('正在请求新的验证码 challenge');
         setNextDelay('读取服务端题面');
 
         const challenge = await api.getCaptchaChallenge();
+
+        if (!isAttemptActive()) {
+            return;
+        }
 
         if (!challenge?.token || typeof challenge.bgSvg !== 'string') {
             throw new Error('验证码 challenge 数据不完整');
@@ -439,10 +452,10 @@
         const answer = readExposedCaptchaAnswer(challenge.bgSvg);
         const rangeValue = Math.round(answer.ratio * 100);
 
-        setStatus(`PoC 已解析缺口 x=${answer.gapX}，正在提交`);
+        setStatus(`已解析验证缺口 x=${answer.gapX}，正在提交`);
         setNextDelay(`直接提交滑块值：${rangeValue}`);
 
-        console.warn('[安全评估 PoC] 客户端已暴露验证码答案：', {
+        console.warn('[自动过验证] 客户端已暴露验证码答案：', {
             ...answer,
             rangeValue,
         });
@@ -451,6 +464,10 @@
             challenge.token,
             String(rangeValue),
         );
+
+        if (!isAttemptActive()) {
+            return;
+        }
 
         const verifiedAt = Date.now();
         const nextInterval = randomInt(900000, 1200000);
@@ -464,24 +481,25 @@
             String(nextInterval),
         );
 
-        setStatus('PoC 服务端验证通过，即将刷新页面');
+        setStatus('服务端验证通过，即将刷新页面');
         setNextDelay('验证成功');
         console.warn(
-            '[安全评估 PoC] 服务端接受了由客户端题面计算出的答案。',
+            '[自动过验证] 服务端接受了由客户端题面计算出的答案。',
         );
 
         await sleep(800);
 
-        window.location.reload();
+        if (isAttemptActive()) {
+            window.location.reload();
+        }
     }
 
-    function stopIfHumanVerificationFound() {
-        const verification = findHumanVerification();
+    function cancelCaptchaBypass() {
+        captchaBypassAttemptId += 1;
+        captchaBypassInProgress = false;
+    }
 
-        if (!verification) {
-            return false;
-        }
-
+    function stopForHumanVerification(verification) {
         setEnabled(false);
         setStatus('检测到人机验证，已停止');
         setNextDelay('请手动完成验证');
@@ -492,6 +510,73 @@
         );
 
         void sendHumanVerificationNotification();
+    }
+
+    /**
+     * 自动尝试绕过人机验证。
+     *
+     * 成功时 runCaptchaBypass 会直接刷新页面，脚本随页面重新启动。
+     * 失败时才停止脚本并发送消息推送通知。
+     */
+    async function autoBypassCaptcha(verification) {
+        if (!captchaBypassEnabled || captchaBypassInProgress) {
+            return;
+        }
+
+        const attemptId = captchaBypassAttemptId + 1;
+
+        captchaBypassAttemptId = attemptId;
+        captchaBypassInProgress = true;
+        console.warn(
+            '[自动抛竿] 检测到人机验证，尝试自动绕过。',
+            verification,
+        );
+
+        try {
+            await runCaptchaBypass(() =>
+                enabled &&
+                captchaBypassEnabled &&
+                attemptId === captchaBypassAttemptId,
+            );
+            // runCaptchaBypass 成功后会执行 window.location.reload()
+        } catch (error) {
+            if (
+                !enabled ||
+                !captchaBypassEnabled ||
+                attemptId !== captchaBypassAttemptId
+            ) {
+                return;
+            }
+
+            setEnabled(false);
+            setStatus('人机验证绕过失败，已停止');
+            setNextDelay('请手动完成验证');
+            console.warn(
+                '[自动抛竿] 人机验证自动绕过失败：',
+                error,
+            );
+
+            void sendHumanVerificationNotification();
+        } finally {
+            if (attemptId === captchaBypassAttemptId) {
+                captchaBypassInProgress = false;
+            }
+        }
+    }
+
+    function stopIfHumanVerificationFound() {
+        const verification = findHumanVerification();
+
+        if (!verification) {
+            return false;
+        }
+
+        if (captchaBypassEnabled) {
+            // 触发自动过验证（异步，不阻塞当前循环退出）
+            void autoBypassCaptcha(verification);
+        } else {
+            stopForHumanVerification(verification);
+        }
 
         return true;
     }
@@ -891,6 +976,14 @@
                 // 给页面一点时间处理状态变化
                 await sleep(150);
             } else {
+                // 如果验证码导致未点击，按当前过验证设置处理后退出。
+                if (
+                    captchaBypassInProgress ||
+                    stopIfHumanVerificationFound()
+                ) {
+                    return;
+                }
+
                 setStatus('本次未点击，重新等待');
                 await sleep(500);
             }
@@ -903,6 +996,10 @@
     function setEnabled(nextEnabled) {
         enabled = Boolean(nextEnabled);
         saveEnabled(enabled);
+
+        if (!enabled) {
+            cancelCaptchaBypass();
+        }
 
         // 令旧循环失效，避免出现多个循环同时运行
         loopId += 1;
@@ -925,6 +1022,23 @@
         } else {
             setStatus('已停止');
             setNextDelay('—');
+        }
+    }
+
+    function setCaptchaBypassEnabled(nextEnabled) {
+        captchaBypassEnabled = Boolean(nextEnabled);
+        saveCaptchaBypassEnabled(captchaBypassEnabled);
+
+        if (!captchaBypassEnabled) {
+            cancelCaptchaBypass();
+        }
+
+        renderCaptchaBypassToggle();
+
+        const verification = findHumanVerification();
+
+        if (!captchaBypassEnabled && enabled && verification) {
+            stopForHumanVerification(verification);
         }
     }
 
@@ -1108,26 +1222,63 @@
           background: #d34848;
         }
 
-        .audit-poc {
-          width: 100%;
-          margin-top: 8px;
-          padding: 8px 10px;
-          border: 1px solid rgba(251, 191, 36, 0.7);
-          border-radius: 8px;
-          background: rgba(251, 191, 36, 0.12);
-          color: #fde68a;
+        .option-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+          margin-top: 10px;
+          color: rgba(255, 255, 255, 0.88);
           font-size: 12px;
-          font-weight: 700;
           cursor: pointer;
         }
 
-        .audit-poc:hover {
-          background: rgba(251, 191, 36, 0.2);
+        .switch {
+          position: relative;
+          width: 38px;
+          height: 22px;
+          flex-shrink: 0;
         }
 
-        .audit-poc:disabled {
-          cursor: wait;
-          opacity: 0.6;
+        .switch input {
+          position: absolute;
+          width: 1px;
+          height: 1px;
+          opacity: 0;
+        }
+
+        .switch-track {
+          display: block;
+          width: 100%;
+          height: 100%;
+          border-radius: 999px;
+          background: rgba(255, 255, 255, 0.2);
+          transition: background 0.15s ease;
+        }
+
+        .switch-track::after {
+          position: absolute;
+          top: 3px;
+          left: 3px;
+          width: 16px;
+          height: 16px;
+          border-radius: 50%;
+          background: #ffffff;
+          content: '';
+          transition: transform 0.15s ease;
+        }
+
+        .switch input:checked + .switch-track {
+          background: #6d5dfc;
+        }
+
+        .switch input:checked + .switch-track::after {
+          transform: translateX(16px);
+        }
+
+        .switch input:focus-visible + .switch-track {
+          outline: 2px solid #9ea5ff;
+          outline-offset: 2px;
         }
 
         .hint {
@@ -1191,12 +1342,21 @@
             >Server酱官网</a>，登录后按页面提示获取 SendKey。
           </div>
 
+          <label class="option-row">
+            <span>自动过验证</span>
+            <span class="switch">
+              <input
+                id="captcha-bypass-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="自动过验证"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
           <button id="toggle" class="toggle" type="button">
             启动
-          </button>
-
-          <button id="audit-poc" class="audit-poc" type="button">
-            安全评估：演示验证缺陷
           </button>
 
           <div class="hint">快捷键：Alt + A</div>
@@ -1213,9 +1373,11 @@
             clickCount: shadowRoot.querySelector('#click-count'),
             pushKeyInput: shadowRoot.querySelector('#push-key'),
             pushKeyHelp: shadowRoot.querySelector('#push-key-help'),
+            captchaBypassToggle: shadowRoot.querySelector(
+                '#captcha-bypass-toggle',
+            ),
             collapseToggle: shadowRoot.querySelector('#collapse-toggle'),
             toggle: shadowRoot.querySelector('#toggle'),
-            auditPoc: shadowRoot.querySelector('#audit-poc'),
         };
 
         ui.pushKeyInput.value = pushKey;
@@ -1234,21 +1396,12 @@
             setEnabled(!enabled);
         });
 
-        ui.auditPoc.addEventListener('click', async () => {
-            ui.auditPoc.disabled = true;
-
-            try {
-                await runCaptchaAuditPoc();
-            } catch (error) {
-                setStatus(`PoC 失败：${error.message}`);
-                setNextDelay('—');
-                console.error('[安全评估 PoC] 演示失败：', error);
-            } finally {
-                ui.auditPoc.disabled = false;
-            }
+        ui.captchaBypassToggle.addEventListener('change', event => {
+            setCaptchaBypassEnabled(event.currentTarget.checked);
         });
 
         renderToggle();
+        renderCaptchaBypassToggle();
         renderPanelCollapsed();
         renderPushKeyHelp();
         updateClickCount();
@@ -1311,6 +1464,18 @@
 
         ui.toggle.textContent = enabled ? '停止' : '启动';
         ui.toggle.dataset.enabled = enabled ? 'true' : 'false';
+    }
+
+    function renderCaptchaBypassToggle() {
+        if (!ui?.captchaBypassToggle) {
+            return;
+        }
+
+        ui.captchaBypassToggle.checked = captchaBypassEnabled;
+        ui.captchaBypassToggle.setAttribute(
+            'aria-checked',
+            captchaBypassEnabled ? 'true' : 'false',
+        );
     }
 
     /**
