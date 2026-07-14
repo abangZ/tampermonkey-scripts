@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      1.2.1
+// @version      1.3.2
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -46,6 +46,10 @@
         // 模拟鼠标按下持续时间
         mouseDownMin: 35,
         mouseDownMax: 90,
+
+        // 安全评估 PoC 的滑块动画和提交等待时间
+        captchaDragDuration: 700,
+        captchaSubmitDelay: 450,
     };
 
     const STORAGE_KEY = 'arcane-angler-auto-cast-enabled-v1';
@@ -324,6 +328,273 @@
         }
 
         return null;
+    }
+
+    /**
+     * 定位包含验证码标题和操作按钮的容器。
+     */
+    function findHumanVerificationContainer() {
+        let current = findHumanVerification();
+
+        while (current && current !== document.body) {
+            if (current.querySelector('button')) {
+                return current;
+            }
+
+            current = current.parentElement;
+        }
+
+        return null;
+    }
+
+    async function waitForCaptchaSlider(timeout = 3000) {
+        const endTime = Date.now() + timeout;
+
+        while (Date.now() < endTime) {
+            const container = findHumanVerificationContainer();
+
+            if (container?.querySelector('input[type="range"]')) {
+                return container;
+            }
+
+            await sleep(50);
+        }
+
+        return null;
+    }
+
+    function decodeSvgDataUrl(dataUrl) {
+        const prefix = 'data:image/svg+xml';
+
+        if (!String(dataUrl).startsWith(prefix)) {
+            throw new Error('验证码背景不是 SVG Data URL');
+        }
+
+        const separatorIndex = dataUrl.indexOf(',');
+
+        if (separatorIndex === -1) {
+            throw new Error('验证码背景 Data URL 格式无效');
+        }
+
+        const metadata = dataUrl.slice(0, separatorIndex);
+        const payload = dataUrl.slice(separatorIndex + 1);
+
+        return metadata.includes(';base64')
+            ? window.atob(payload)
+            : decodeURIComponent(payload);
+    }
+
+    function parseSvgNumber(value, fieldName) {
+        const number = Number.parseFloat(value);
+
+        if (!Number.isFinite(number)) {
+            throw new Error(`无法读取验证码的 ${fieldName}`);
+        }
+
+        return number;
+    }
+
+    /**
+     * 从背景 SVG 中提取直接暴露的缺口坐标。
+     *
+     * 当前题面使用带 stroke-dasharray 的矩形标记缺口边界；该坐标与
+     * 滑块答案一起下发到了浏览器，因此无需图像识别即可还原答案。
+     */
+    function readExposedCaptchaAnswer(backgroundImage) {
+        const source = decodeSvgDataUrl(
+            backgroundImage.currentSrc || backgroundImage.src,
+        );
+        const svg = new DOMParser().parseFromString(
+            source,
+            'image/svg+xml',
+        );
+        const parserError = svg.querySelector('parsererror');
+
+        if (parserError) {
+            throw new Error('验证码背景 SVG 解析失败');
+        }
+
+        const root = svg.documentElement;
+        const gap = Array.from(svg.querySelectorAll('rect')).find(rect =>
+            rect.hasAttribute('stroke-dasharray'),
+        );
+
+        if (!gap) {
+            throw new Error('未找到验证码缺口标记');
+        }
+
+        const viewBox = root.getAttribute('viewBox')
+            ?.trim()
+            .split(/\s+/)
+            .map(Number);
+        const canvasWidth =
+            viewBox?.length === 4 && Number.isFinite(viewBox[2])
+                ? viewBox[2]
+                : parseSvgNumber(root.getAttribute('width'), '画布宽度');
+        const gapX = parseSvgNumber(gap.getAttribute('x'), '缺口横坐标');
+        const gapWidth = parseSvgNumber(
+            gap.getAttribute('width'),
+            '拼图宽度',
+        );
+        const travelWidth = canvasWidth - gapWidth;
+
+        if (travelWidth <= 0 || gapX < 0 || gapX > travelWidth) {
+            throw new Error('验证码缺口坐标超出可移动范围');
+        }
+
+        return {
+            canvasWidth,
+            gapX,
+            gapWidth,
+            ratio: gapX / travelWidth,
+        };
+    }
+
+    function setNativeRangeValue(range, value, commit = false) {
+        const valueSetter = Object.getOwnPropertyDescriptor(
+            HTMLInputElement.prototype,
+            'value',
+        )?.set;
+
+        if (!valueSetter) {
+            throw new Error('浏览器不支持设置滑块值');
+        }
+
+        valueSetter.call(range, String(value));
+        range.dispatchEvent(new Event('input', {
+            bubbles: true,
+        }));
+
+        if (commit) {
+            range.dispatchEvent(new Event('change', {
+                bubbles: true,
+            }));
+        }
+    }
+
+    function animateRangeValue(range, target, duration) {
+        const initialValue = Number.parseFloat(range.value);
+        const startValue = Number.isFinite(initialValue)
+            ? initialValue
+            : Number.parseFloat(range.min || '0');
+        const startTime = window.performance.now();
+
+        return new Promise((resolve, reject) => {
+            function moveFrame(currentTime) {
+                if (!range.isConnected) {
+                    reject(new Error('拖动过程中滑块已从页面移除'));
+                    return;
+                }
+
+                const progress = Math.min(
+                    (currentTime - startTime) / duration,
+                    1,
+                );
+                // 缓出曲线让滑块接近目标位置时自然减速。
+                const easedProgress = 1 - Math.pow(1 - progress, 3);
+                const value =
+                    startValue + (target - startValue) * easedProgress;
+
+                if (progress < 1) {
+                    setNativeRangeValue(range, value);
+                    window.requestAnimationFrame(moveFrame);
+                    return;
+                }
+
+                setNativeRangeValue(range, target, true);
+                resolve();
+            }
+
+            window.requestAnimationFrame(moveFrame);
+        });
+    }
+
+    async function runCaptchaAuditPoc() {
+        let container = findHumanVerificationContainer();
+
+        if (!container) {
+            throw new Error('当前页面没有可见的人机验证');
+        }
+
+        if (!container.querySelector('input[type="range"]')) {
+            const continueButton = Array.from(
+                container.querySelectorAll('button'),
+            ).find(button =>
+                normalizeText(button.textContent).includes('点击验证'),
+            );
+
+            if (
+                !continueButton ||
+                continueButton.disabled ||
+                !isDisplayed(continueButton)
+            ) {
+                throw new Error('未找到第一步的“点击验证”按钮');
+            }
+
+            setStatus('PoC 已识别第一步，正在点击验证入口');
+            setNextDelay('等待滑块题面');
+            console.warn(
+                '[安全评估 PoC] 已识别验证码第一步，正在继续。',
+                continueButton,
+            );
+
+            continueButton.click();
+            container = await waitForCaptchaSlider();
+
+            if (!container) {
+                throw new Error('点击第一步后未出现滑块题面');
+            }
+        }
+
+        const range = container.querySelector('input[type="range"]');
+        const backgroundImage = Array.from(
+            container.querySelectorAll('img'),
+        ).find(image =>
+            String(image.currentSrc || image.src).startsWith(
+                'data:image/svg+xml',
+            ),
+        );
+        const verifyButton = Array.from(
+            container.querySelectorAll('button'),
+        ).find(button => normalizeText(button.textContent) === '验证');
+
+        if (!range || !backgroundImage || !verifyButton) {
+            throw new Error('验证码结构与安全评估样本不一致');
+        }
+
+        const answer = readExposedCaptchaAnswer(backgroundImage);
+        const min = Number.parseFloat(range.min || '0');
+        const max = Number.parseFloat(range.max || '100');
+        const target = min + answer.ratio * (max - min);
+
+        setStatus(`PoC 已解析缺口 x=${answer.gapX}，正在拖动`);
+        setNextDelay('模拟滑块移动');
+
+        await animateRangeValue(
+            range,
+            target,
+            CONFIG.captchaDragDuration,
+        );
+
+        console.warn('[安全评估 PoC] 客户端已暴露验证码答案：', {
+            ...answer,
+            rangeValue: Number(range.value),
+        });
+
+        setStatus(
+            `PoC 已拖动至 x=${answer.gapX}，等待提交`,
+        );
+        setNextDelay(
+            `滑块值：${range.value}，${CONFIG.captchaSubmitDelay}ms 后提交`,
+        );
+
+        await sleep(CONFIG.captchaSubmitDelay);
+
+        if (!verifyButton.isConnected || verifyButton.disabled) {
+            throw new Error('验证按钮当前不可用');
+        }
+
+        verifyButton.click();
     }
 
     function stopIfHumanVerificationFound() {
@@ -959,6 +1230,28 @@
           background: #d34848;
         }
 
+        .audit-poc {
+          width: 100%;
+          margin-top: 8px;
+          padding: 8px 10px;
+          border: 1px solid rgba(251, 191, 36, 0.7);
+          border-radius: 8px;
+          background: rgba(251, 191, 36, 0.12);
+          color: #fde68a;
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .audit-poc:hover {
+          background: rgba(251, 191, 36, 0.2);
+        }
+
+        .audit-poc:disabled {
+          cursor: wait;
+          opacity: 0.6;
+        }
+
         .hint {
           margin-top: 9px;
           text-align: center;
@@ -1024,6 +1317,10 @@
             启动
           </button>
 
+          <button id="audit-poc" class="audit-poc" type="button">
+            安全评估：演示验证缺陷
+          </button>
+
           <div class="hint">快捷键：Alt + A</div>
         </div>
       </div>
@@ -1040,6 +1337,7 @@
             pushKeyHelp: shadowRoot.querySelector('#push-key-help'),
             collapseToggle: shadowRoot.querySelector('#collapse-toggle'),
             toggle: shadowRoot.querySelector('#toggle'),
+            auditPoc: shadowRoot.querySelector('#audit-poc'),
         };
 
         ui.pushKeyInput.value = pushKey;
@@ -1056,6 +1354,20 @@
 
         ui.toggle.addEventListener('click', () => {
             setEnabled(!enabled);
+        });
+
+        ui.auditPoc.addEventListener('click', async () => {
+            ui.auditPoc.disabled = true;
+
+            try {
+                await runCaptchaAuditPoc();
+            } catch (error) {
+                setStatus(`PoC 失败：${error.message}`);
+                setNextDelay('—');
+                console.error('[安全评估 PoC] 演示失败：', error);
+            } finally {
+                ui.auditPoc.disabled = false;
+            }
         });
 
         renderToggle();
