@@ -1,0 +1,1169 @@
+// ==UserScript==
+// @name         Arcane Angler 自动抛竿
+// @namespace    arcane-angler-auto-cast
+// @version      1.2.1
+// @author       Codex
+// @description  自动点击“抛竿线”按钮，带随机等待和启停控制
+// @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
+// @downloadURL  https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
+// @match        https://arcaneangler.com/*
+// @match        https://www.arcaneangler.com/*
+// @run-at       document-idle
+// @grant        none
+// ==/UserScript==
+
+/**
+ * 免责声明：
+ * 本脚本仅供学习与个人研究使用。使用者应自行遵守目标网站的服务条款、
+ * 使用规则及所在地法律法规。因使用本脚本产生的账号限制、数据损失或
+ * 其他直接、间接后果，均由使用者自行承担，脚本作者不承担相关责任。
+ */
+
+(() => {
+    'use strict';
+
+    /**
+     * 配置
+     */
+    const CONFIG = {
+        // 目标按钮文字，按钮实际显示为：🎣 抛竿线
+        buttonText: '抛竿线',
+
+        // 正常等待时间：1～2 秒
+        normalDelayMin: 500,
+        normalDelayMax: 2000,
+
+        // 长等待时间：5～10 秒
+        longDelayMin: 5000,
+        longDelayMax: 10000,
+
+        // 长等待概率：0.08 = 8%
+        longDelayChance: 0.08,
+
+        // 按钮未出现时的检查间隔
+        buttonPollInterval: 250,
+
+        // 模拟鼠标按下持续时间
+        mouseDownMin: 35,
+        mouseDownMax: 90,
+    };
+
+    const STORAGE_KEY = 'arcane-angler-auto-cast-enabled-v1';
+    const PUSH_KEY_STORAGE_KEY = 'arcane-angler-push-key-v1';
+    const PANEL_COLLAPSED_STORAGE_KEY =
+        'arcane-angler-panel-collapsed-v1';
+    const PANEL_ID = 'arcane-angler-auto-cast-panel-host';
+    const HUMAN_VERIFICATION_TEXT = '人机验证';
+    const HUMAN_VERIFICATION_MESSAGE =
+        'Arcane Angler 出现验证码了，自动抛竿已停止';
+
+    let enabled = loadEnabled();
+    let pushKey = loadPushKey();
+    let panelCollapsed = loadPanelCollapsed();
+    let loopId = 0;
+    let clickCount = 0;
+    let ui = null;
+
+    /**
+     * 包装页面的 fetch，在抛竿请求发出前修改并打印 payload。
+     */
+    function installFetchInterceptor() {
+        const originalFetch = window.fetch;
+
+        window.fetch = async function(input, init) {
+            const request = input instanceof Request ? input : null;
+            const method = String(
+                init?.method ?? request?.method ?? 'GET',
+            ).toUpperCase();
+
+            let url = null;
+
+            try {
+                url = new URL(
+                    request?.url ?? String(input),
+                    window.location.href,
+                );
+            } catch {
+                // URL 无法解析时保持原 fetch 行为。
+            }
+
+            if (
+                method === 'POST' &&
+                url?.pathname === '/api/game/cast'
+            ) {
+                const modifiedRequest = await modifyCastRequest(
+                    input,
+                    request,
+                    init,
+                );
+
+                if (modifiedRequest) {
+                    return originalFetch.call(
+                        this,
+                        modifiedRequest.input,
+                        modifiedRequest.init,
+                    );
+                }
+            }
+
+            return originalFetch.apply(this, arguments);
+        };
+    }
+
+    async function modifyCastRequest(input, request, init) {
+        try {
+            let body = init?.body;
+
+            if (body === undefined && request) {
+                body = await request.clone().text();
+            }
+
+            const originalPayload = await normalizeRequestBody(body);
+
+            if (
+                !originalPayload ||
+                typeof originalPayload !== 'object' ||
+                Array.isArray(originalPayload)
+            ) {
+                throw new TypeError('payload 不是可修改的对象');
+            }
+
+            const payload = {
+                ...originalPayload,
+                isTrusted: true,
+            };
+
+            console.info(
+                '[自动抛竿] POST /api/game/cast payload:',
+                payload,
+            );
+
+            const modifiedBody = JSON.stringify(payload);
+
+            if (init?.body !== undefined || !request) {
+                return {
+                    input,
+                    init: {
+                        ...init,
+                        body: modifiedBody,
+                    },
+                };
+            }
+
+            return {
+                input: new Request(request, {
+                    body: modifiedBody,
+                }),
+                init,
+            };
+        } catch (error) {
+            console.warn(
+                '[自动抛竿] 无法修改 POST /api/game/cast payload，保留原请求：',
+                error,
+            );
+
+            return null;
+        }
+    }
+
+    async function normalizeRequestBody(body) {
+        if (body == null) {
+            return body;
+        }
+
+        if (typeof body === 'string') {
+            try {
+                return JSON.parse(body);
+            } catch {
+                return body;
+            }
+        }
+
+        if (body instanceof URLSearchParams) {
+            return Object.fromEntries(body.entries());
+        }
+
+        if (body instanceof FormData) {
+            return Object.fromEntries(body.entries());
+        }
+
+        if (body instanceof Blob) {
+            return normalizeRequestBody(await body.text());
+        }
+
+        return body;
+    }
+
+    /**
+     * 工具函数
+     */
+
+    function randomInt(min, max) {
+        return Math.floor(Math.random() * (max - min + 1)) + min;
+    }
+
+    function sleep(ms) {
+        return new Promise(resolve => {
+            setTimeout(resolve, ms);
+        });
+    }
+
+    function loadEnabled() {
+        try {
+            return localStorage.getItem(STORAGE_KEY) === '1';
+        } catch {
+            return false;
+        }
+    }
+
+    function saveEnabled(value) {
+        try {
+            localStorage.setItem(STORAGE_KEY, value ? '1' : '0');
+        } catch (error) {
+            console.warn('[自动抛竿] 无法保存设置：', error);
+        }
+    }
+
+    function loadPushKey() {
+        try {
+            return localStorage.getItem(PUSH_KEY_STORAGE_KEY)?.trim() ?? '';
+        } catch {
+            return '';
+        }
+    }
+
+    function savePushKey(value) {
+        try {
+            if (value) {
+                localStorage.setItem(PUSH_KEY_STORAGE_KEY, value);
+            } else {
+                localStorage.removeItem(PUSH_KEY_STORAGE_KEY);
+            }
+        } catch (error) {
+            console.warn('[自动抛竿] 无法保存消息推送 Key：', error);
+        }
+    }
+
+    function loadPanelCollapsed() {
+        const collapseByDefault = window.matchMedia(
+            '(max-width: 767px)',
+        ).matches;
+
+        try {
+            const savedValue = localStorage.getItem(
+                PANEL_COLLAPSED_STORAGE_KEY,
+            );
+
+            return savedValue === null
+                ? collapseByDefault
+                : savedValue === '1';
+        } catch {
+            return collapseByDefault;
+        }
+    }
+
+    function savePanelCollapsed(value) {
+        try {
+            localStorage.setItem(
+                PANEL_COLLAPSED_STORAGE_KEY,
+                value ? '1' : '0',
+            );
+        } catch (error) {
+            console.warn('[自动抛竿] 无法保存面板折叠状态：', error);
+        }
+    }
+
+    function normalizeText(text) {
+        return String(text ?? '')
+            .replace(/\s+/g, ' ')
+            .trim();
+    }
+
+    function isVisible(element) {
+        if (!(element instanceof HTMLElement)) {
+            return false;
+        }
+
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+
+        return (
+            rect.width > 0 &&
+            rect.height > 0 &&
+            style.display !== 'none' &&
+            style.visibility !== 'hidden' &&
+            style.visibility !== 'collapse' &&
+            Number.parseFloat(style.opacity || '1') > 0
+        );
+    }
+
+    function isDisplayed(element) {
+        return (
+            isVisible(element) &&
+            window.getComputedStyle(element).pointerEvents !== 'none'
+        );
+    }
+
+    /**
+     * 通过可见标题文字判断页面是否出现人机验证。
+     */
+    function findHumanVerification() {
+        const headings = document.querySelectorAll(
+            'h1, h2, h3, h4, [role="heading"]',
+        );
+
+        for (const heading of headings) {
+            if (
+                normalizeText(heading.textContent).includes(
+                    HUMAN_VERIFICATION_TEXT,
+                ) &&
+                isVisible(heading)
+            ) {
+                return heading;
+            }
+        }
+
+        return null;
+    }
+
+    function stopIfHumanVerificationFound() {
+        const verification = findHumanVerification();
+
+        if (!verification) {
+            return false;
+        }
+
+        setEnabled(false);
+        setStatus('检测到人机验证，已停止');
+        setNextDelay('请手动完成验证');
+
+        console.warn(
+            '[自动抛竿] 检测到人机验证，自动操作已停止。',
+            verification,
+        );
+
+        void sendHumanVerificationNotification();
+
+        return true;
+    }
+
+    async function sendHumanVerificationNotification() {
+        const currentPushKey = pushKey.trim();
+
+        if (!currentPushKey) {
+            console.info(
+                '[自动抛竿] 未设置消息推送 Key，跳过验证码通知。' +
+                '可前往 https://sct.ftqq.com/ 获取 SendKey。',
+            );
+            return;
+        }
+
+        const url =
+            `https://sctapi.ftqq.com/${encodeURIComponent(currentPushKey)}` +
+            `.send?title=${encodeURIComponent(HUMAN_VERIFICATION_MESSAGE)}`;
+
+        try {
+            const response = await window.fetch(url);
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            console.info('[自动抛竿] 验证码通知已发送。');
+        } catch (error) {
+            console.warn('[自动抛竿] 验证码通知发送失败：', error);
+        }
+    }
+
+    /**
+     * 查询当前可用的“抛竿线”按钮。
+     *
+     * 不使用完整 class，因为页面中的 Tailwind class
+     * 较长，并且更新后容易变化。
+     */
+    function findCastButton() {
+        const buttons = document.querySelectorAll('button');
+
+        for (const button of buttons) {
+            const text = normalizeText(button.textContent);
+
+            if (!text.includes(CONFIG.buttonText)) {
+                continue;
+            }
+
+            if (button.disabled) {
+                continue;
+            }
+
+            if (button.getAttribute('aria-disabled') === 'true') {
+                continue;
+            }
+
+            if (!isDisplayed(button)) {
+                continue;
+            }
+
+            return button;
+        }
+
+        return null;
+    }
+
+    function getRandomDelay() {
+        const isLongDelay = Math.random() < CONFIG.longDelayChance;
+
+        if (isLongDelay) {
+            return {
+                milliseconds: randomInt(
+                    CONFIG.longDelayMin,
+                    CONFIG.longDelayMax,
+                ),
+                isLongDelay: true,
+            };
+        }
+
+        return {
+            milliseconds: randomInt(
+                CONFIG.normalDelayMin,
+                CONFIG.normalDelayMax,
+            ),
+            isLongDelay: false,
+        };
+    }
+
+    /**
+     * 向元素发送 PointerEvent。
+     */
+    function dispatchPointerEvent(target, type, options) {
+        if (typeof window.PointerEvent !== 'function') {
+            return;
+        }
+
+        target.dispatchEvent(
+            new window.PointerEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                pointerId: 1,
+                pointerType: 'mouse',
+                isPrimary: true,
+                width: 1,
+                height: 1,
+                pressure: options.buttons === 1 ? 0.5 : 0,
+                button: 0,
+                ...options,
+            }),
+        );
+    }
+
+    /**
+     * 向元素发送 MouseEvent。
+     */
+    function dispatchMouseEvent(target, type, options) {
+        target.dispatchEvent(
+            new window.MouseEvent(type, {
+                bubbles: true,
+                cancelable: true,
+                composed: true,
+                view: window,
+                button: 0,
+                ...options,
+            }),
+        );
+    }
+
+    /**
+     * 模拟一次完整点击。
+     */
+    async function simulateClick(button, currentLoopId) {
+        if (!button?.isConnected) {
+            return false;
+        }
+
+        // 确保按钮处于可点击区域
+        button.scrollIntoView({
+            block: 'center',
+            inline: 'center',
+            behavior: 'auto',
+        });
+
+        await sleep(60);
+
+        if (
+            !enabled ||
+            currentLoopId !== loopId ||
+            !button.isConnected
+        ) {
+            return false;
+        }
+
+        if (stopIfHumanVerificationFound()) {
+            return false;
+        }
+
+        const rect = button.getBoundingClientRect();
+
+        // 在按钮中心附近随机选择一个位置
+        const clientX =
+            rect.left + rect.width * (0.42 + Math.random() * 0.16);
+
+        const clientY =
+            rect.top + rect.height * (0.38 + Math.random() * 0.24);
+
+        // 获取该坐标实际覆盖的元素
+        const hitElement = document.elementFromPoint(
+            clientX,
+            clientY,
+        );
+
+        // 如果按钮被其他元素遮挡，先不点击
+        if (
+            !hitElement ||
+            (hitElement !== button && !button.contains(hitElement))
+        ) {
+            console.warn(
+                '[自动抛竿] 按钮可能被其他元素遮挡：',
+                hitElement,
+            );
+
+            return false;
+        }
+
+        // 可能命中按钮内部的 span 或其他子元素
+        const eventTarget = hitElement;
+
+        try {
+            button.focus({
+                preventScroll: true,
+            });
+        } catch {
+            button.focus();
+        }
+
+        const baseOptions = {
+            clientX,
+            clientY,
+            screenX: window.screenX + clientX,
+            screenY: window.screenY + clientY,
+        };
+
+        // 移入
+        dispatchPointerEvent(eventTarget, 'pointerover', {
+            ...baseOptions,
+            buttons: 0,
+        });
+
+        dispatchMouseEvent(eventTarget, 'mouseover', {
+            ...baseOptions,
+            buttons: 0,
+            detail: 0,
+        });
+
+        dispatchPointerEvent(eventTarget, 'pointermove', {
+            ...baseOptions,
+            buttons: 0,
+        });
+
+        dispatchMouseEvent(eventTarget, 'mousemove', {
+            ...baseOptions,
+            buttons: 0,
+            detail: 0,
+        });
+
+        // 按下
+        dispatchPointerEvent(eventTarget, 'pointerdown', {
+            ...baseOptions,
+            buttons: 1,
+        });
+
+        dispatchMouseEvent(eventTarget, 'mousedown', {
+            ...baseOptions,
+            buttons: 1,
+            detail: 1,
+        });
+
+        // 模拟真实鼠标按住几十毫秒
+        await sleep(
+            randomInt(
+                CONFIG.mouseDownMin,
+                CONFIG.mouseDownMax,
+            ),
+        );
+
+        const wasCancelled =
+            !enabled || currentLoopId !== loopId;
+
+        // 即使中途停止，也要发送松开事件，避免按钮卡在按下状态
+        dispatchPointerEvent(eventTarget, 'pointerup', {
+            ...baseOptions,
+            buttons: 0,
+        });
+
+        dispatchMouseEvent(eventTarget, 'mouseup', {
+            ...baseOptions,
+            buttons: 0,
+            detail: 1,
+        });
+
+        if (wasCancelled) {
+            return false;
+        }
+
+        // 最终 click
+        dispatchMouseEvent(eventTarget, 'click', {
+            ...baseOptions,
+            buttons: 0,
+            detail: 1,
+        });
+
+        return true;
+    }
+
+    /**
+     * 等待按钮出现。
+     */
+    async function waitForButton(currentLoopId) {
+        while (enabled && currentLoopId === loopId) {
+            if (stopIfHumanVerificationFound()) {
+                return null;
+            }
+
+            const button = findCastButton();
+
+            if (button) {
+                return button;
+            }
+
+            setStatus('等待“抛竿线”按钮出现');
+            setNextDelay('—');
+
+            await sleep(CONFIG.buttonPollInterval);
+        }
+
+        return null;
+    }
+
+    /**
+     * 带倒计时的等待。
+     */
+    async function waitWithCountdown(
+        milliseconds,
+        isLongDelay,
+        currentLoopId,
+    ) {
+        const endTime = Date.now() + milliseconds;
+
+        while (enabled && currentLoopId === loopId) {
+            if (stopIfHumanVerificationFound()) {
+                return false;
+            }
+
+            const remaining = endTime - Date.now();
+
+            if (remaining <= 0) {
+                setNextDelay('准备点击');
+                return true;
+            }
+
+            const seconds = (remaining / 1000).toFixed(1);
+
+            setStatus(
+                isLongDelay
+                    ? '随机长等待中'
+                    : '等待下一次操作',
+            );
+
+            setNextDelay(
+                isLongDelay
+                    ? `${seconds} 秒（长等待）`
+                    : `${seconds} 秒`,
+            );
+
+            await sleep(Math.min(100, remaining));
+        }
+
+        return false;
+    }
+
+    /**
+     * 主循环。
+     */
+    async function runLoop(currentLoopId) {
+        while (enabled && currentLoopId === loopId) {
+            const button = await waitForButton(currentLoopId);
+
+            if (!button) {
+                return;
+            }
+
+            const delay = getRandomDelay();
+
+            const completed = await waitWithCountdown(
+                delay.milliseconds,
+                delay.isLongDelay,
+                currentLoopId,
+            );
+
+            if (!completed) {
+                return;
+            }
+
+            // 等待期间 DOM 可能发生变化，所以重新查找
+            const latestButton = findCastButton();
+
+            if (!latestButton) {
+                continue;
+            }
+
+            setStatus('正在模拟点击');
+            setNextDelay('—');
+
+            const clicked = await simulateClick(
+                latestButton,
+                currentLoopId,
+            );
+
+            if (!enabled || currentLoopId !== loopId) {
+                return;
+            }
+
+            if (clicked) {
+                clickCount += 1;
+                updateClickCount();
+
+                const time = new Date().toLocaleTimeString();
+
+                setStatus(`已点击，时间：${time}`);
+                console.info(
+                    `[自动抛竿] 第 ${clickCount} 次点击`,
+                    latestButton,
+                );
+
+                // 给页面一点时间处理状态变化
+                await sleep(150);
+            } else {
+                setStatus('本次未点击，重新等待');
+                await sleep(500);
+            }
+        }
+    }
+
+    /**
+     * 开关控制。
+     */
+    function setEnabled(nextEnabled) {
+        enabled = Boolean(nextEnabled);
+        saveEnabled(enabled);
+
+        // 令旧循环失效，避免出现多个循环同时运行
+        loopId += 1;
+
+        renderToggle();
+
+        if (enabled) {
+            const currentLoopId = loopId;
+
+            setStatus('已启动，正在查找按钮');
+            setNextDelay('—');
+
+            runLoop(currentLoopId).catch(error => {
+                console.error('[自动抛竿] 运行异常：', error);
+
+                if (currentLoopId === loopId) {
+                    setStatus(`运行异常：${error.message}`);
+                }
+            });
+        } else {
+            setStatus('已停止');
+            setNextDelay('—');
+        }
+    }
+
+    /**
+     * 创建右下角控制面板。
+     */
+    function createPanel() {
+        if (document.getElementById(PANEL_ID)) {
+            return;
+        }
+
+        const host = document.createElement('div');
+
+        host.id = PANEL_ID;
+        host.style.cssText = [
+            'position: fixed',
+            'right: 16px',
+            'bottom: 16px',
+            'z-index: 2147483647',
+            'font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+        ].join(';');
+
+        const shadowRoot = host.attachShadow({
+            mode: 'open',
+        });
+
+        shadowRoot.innerHTML = `
+      <style>
+        * {
+          box-sizing: border-box;
+        }
+
+        .panel {
+          width: 230px;
+          max-width: calc(100vw - 32px);
+          padding: 14px;
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          border-radius: 12px;
+          background: rgba(18, 18, 24, 0.94);
+          box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);
+          color: #ffffff;
+          backdrop-filter: blur(12px);
+        }
+
+        .panel[data-collapsed="true"] {
+          width: auto;
+          padding: 7px;
+        }
+
+        .panel[data-collapsed="true"] .panel-content,
+        .panel[data-collapsed="true"] .title-text {
+          display: none;
+        }
+
+        .header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 10px;
+        }
+
+        .title {
+          display: flex;
+          align-items: center;
+          gap: 5px;
+          font-size: 15px;
+          font-weight: 700;
+        }
+
+        .collapse-toggle {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 26px;
+          height: 26px;
+          flex-shrink: 0;
+          padding: 0;
+          border: 1px solid rgba(255, 255, 255, 0.16);
+          border-radius: 7px;
+          background: rgba(255, 255, 255, 0.08);
+          color: rgba(255, 255, 255, 0.88);
+          font-size: 16px;
+          line-height: 1;
+          cursor: pointer;
+        }
+
+        .collapse-toggle:hover {
+          background: rgba(255, 255, 255, 0.14);
+        }
+
+        .panel-content {
+          margin-top: 10px;
+        }
+
+        .row {
+          display: flex;
+          justify-content: space-between;
+          gap: 10px;
+          margin-top: 7px;
+          font-size: 12px;
+          line-height: 1.4;
+        }
+
+        .label {
+          flex-shrink: 0;
+          color: rgba(255, 255, 255, 0.58);
+        }
+
+        .value {
+          min-width: 0;
+          overflow-wrap: anywhere;
+          text-align: right;
+          color: rgba(255, 255, 255, 0.92);
+        }
+
+        .field {
+          display: block;
+          margin-top: 12px;
+        }
+
+        .field-label {
+          display: block;
+          margin-bottom: 5px;
+          color: rgba(255, 255, 255, 0.58);
+          font-size: 12px;
+        }
+
+        .input {
+          width: 100%;
+          padding: 8px 9px;
+          border: 1px solid rgba(255, 255, 255, 0.18);
+          border-radius: 7px;
+          outline: none;
+          background: rgba(255, 255, 255, 0.08);
+          color: rgba(255, 255, 255, 0.92);
+          font-size: 12px;
+        }
+
+        .input:focus {
+          border-color: #6d5dfc;
+        }
+
+        .input::placeholder {
+          color: rgba(255, 255, 255, 0.32);
+        }
+
+        .field-help {
+          margin-top: 6px;
+          color: rgba(255, 255, 255, 0.5);
+          font-size: 11px;
+          line-height: 1.45;
+        }
+
+        .field-help[hidden] {
+          display: none;
+        }
+
+        .field-help a {
+          color: #9ea5ff;
+          text-decoration: underline;
+        }
+
+        .toggle {
+          width: 100%;
+          margin-top: 12px;
+          padding: 9px 12px;
+          border: 0;
+          border-radius: 8px;
+          background: #6d5dfc;
+          color: #ffffff;
+          font-size: 13px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .toggle:hover {
+          filter: brightness(1.08);
+        }
+
+        .toggle[data-enabled="true"] {
+          background: #d34848;
+        }
+
+        .hint {
+          margin-top: 9px;
+          text-align: center;
+          color: rgba(255, 255, 255, 0.42);
+          font-size: 11px;
+        }
+      </style>
+
+      <div class="panel">
+        <div class="header">
+          <div class="title">
+            <span aria-hidden="true">🎣</span>
+            <span class="title-text">自动抛竿</span>
+          </div>
+
+          <button
+            id="collapse-toggle"
+            class="collapse-toggle"
+            type="button"
+            aria-controls="panel-content"
+          >−</button>
+        </div>
+
+        <div id="panel-content" class="panel-content">
+
+          <div class="row">
+            <span class="label">状态</span>
+            <span id="status" class="value">初始化中</span>
+          </div>
+
+          <div class="row">
+            <span class="label">下一操作</span>
+            <span id="next-delay" class="value">—</span>
+          </div>
+
+          <div class="row">
+            <span class="label">点击次数</span>
+            <span id="click-count" class="value">0</span>
+          </div>
+
+          <label class="field">
+            <span class="field-label">消息推送 Key</span>
+            <input
+              id="push-key"
+              class="input"
+              type="password"
+              autocomplete="off"
+              spellcheck="false"
+              placeholder="Server酱 SendKey"
+            />
+          </label>
+
+          <div id="push-key-help" class="field-help">
+            未填写 Key。请前往
+            <a
+              href="https://sct.ftqq.com/"
+              target="_blank"
+              rel="noopener noreferrer"
+            >Server酱官网</a>，登录后按页面提示获取 SendKey。
+          </div>
+
+          <button id="toggle" class="toggle" type="button">
+            启动
+          </button>
+
+          <div class="hint">快捷键：Alt + A</div>
+        </div>
+      </div>
+    `;
+
+        document.body.appendChild(host);
+
+        ui = {
+            panel: shadowRoot.querySelector('.panel'),
+            status: shadowRoot.querySelector('#status'),
+            nextDelay: shadowRoot.querySelector('#next-delay'),
+            clickCount: shadowRoot.querySelector('#click-count'),
+            pushKeyInput: shadowRoot.querySelector('#push-key'),
+            pushKeyHelp: shadowRoot.querySelector('#push-key-help'),
+            collapseToggle: shadowRoot.querySelector('#collapse-toggle'),
+            toggle: shadowRoot.querySelector('#toggle'),
+        };
+
+        ui.pushKeyInput.value = pushKey;
+
+        ui.pushKeyInput.addEventListener('input', event => {
+            pushKey = event.currentTarget.value.trim();
+            savePushKey(pushKey);
+            renderPushKeyHelp();
+        });
+
+        ui.collapseToggle.addEventListener('click', () => {
+            setPanelCollapsed(!panelCollapsed);
+        });
+
+        ui.toggle.addEventListener('click', () => {
+            setEnabled(!enabled);
+        });
+
+        renderToggle();
+        renderPanelCollapsed();
+        renderPushKeyHelp();
+        updateClickCount();
+    }
+
+    function setStatus(text) {
+        if (ui?.status) {
+            ui.status.textContent = text;
+        }
+    }
+
+    function setNextDelay(text) {
+        if (ui?.nextDelay) {
+            ui.nextDelay.textContent = text;
+        }
+    }
+
+    function updateClickCount() {
+        if (ui?.clickCount) {
+            ui.clickCount.textContent = String(clickCount);
+        }
+    }
+
+    function setPanelCollapsed(nextCollapsed) {
+        panelCollapsed = Boolean(nextCollapsed);
+        savePanelCollapsed(panelCollapsed);
+        renderPanelCollapsed();
+    }
+
+    function renderPanelCollapsed() {
+        if (!ui?.panel || !ui?.collapseToggle) {
+            return;
+        }
+
+        const action = panelCollapsed ? '展开' : '收起';
+
+        ui.panel.dataset.collapsed = panelCollapsed ? 'true' : 'false';
+        ui.collapseToggle.textContent = panelCollapsed ? '＋' : '−';
+        ui.collapseToggle.title = `${action}控制面板`;
+        ui.collapseToggle.setAttribute(
+            'aria-label',
+            `${action}控制面板`,
+        );
+        ui.collapseToggle.setAttribute(
+            'aria-expanded',
+            panelCollapsed ? 'false' : 'true',
+        );
+    }
+
+    function renderPushKeyHelp() {
+        if (ui?.pushKeyHelp) {
+            ui.pushKeyHelp.hidden = Boolean(pushKey);
+        }
+    }
+
+    function renderToggle() {
+        if (!ui?.toggle) {
+            return;
+        }
+
+        ui.toggle.textContent = enabled ? '停止' : '启动';
+        ui.toggle.dataset.enabled = enabled ? 'true' : 'false';
+    }
+
+    /**
+     * 快捷键 Alt + A。
+     */
+    document.addEventListener(
+        'keydown',
+        event => {
+            const target = event.target;
+
+            const isTyping =
+                target instanceof HTMLElement &&
+                (
+                    target.isContentEditable ||
+                    target.matches('input, textarea, select')
+                );
+
+            if (isTyping) {
+                return;
+            }
+
+            if (
+                event.altKey &&
+                !event.ctrlKey &&
+                !event.metaKey &&
+                event.code === 'KeyA'
+            ) {
+                event.preventDefault();
+                event.stopPropagation();
+
+                setEnabled(!enabled);
+            }
+        },
+        true,
+    );
+
+    installFetchInterceptor();
+    createPanel();
+
+    // 第一次安装默认关闭；之后恢复上次保存的状态
+    setEnabled(enabled);
+
+    console.info(
+        '[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。',
+    );
+})();
