@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      1.5.1
+// @version      1.6.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -59,6 +59,7 @@
     const PUSH_KEY_STORAGE_KEY = 'arcane-angler-push-key-v1';
     const PANEL_COLLAPSED_STORAGE_KEY =
         'arcane-angler-panel-collapsed-v1';
+    const EARNINGS_STORAGE_KEY = 'arcane-angler-earnings-v1';
     const PANEL_ID = 'arcane-angler-auto-cast-panel-host';
     const HUMAN_VERIFICATION_TEXT = '人机验证';
     const HUMAN_VERIFICATION_MESSAGE =
@@ -68,6 +69,8 @@
     let captchaBypassEnabled = loadCaptchaBypassEnabled();
     let pushKey = loadPushKey();
     let panelCollapsed = loadPanelCollapsed();
+    let earningsStats = loadEarningsStats();
+    let panelView = 'control';
     let loopId = 0;
     let clickCount = 0;
     let ui = null;
@@ -107,13 +110,21 @@
                     init,
                 );
 
-                if (modifiedRequest) {
-                    return originalFetch.call(
+                const response = modifiedRequest
+                    ? await originalFetch.call(
                         this,
                         modifiedRequest.input,
                         modifiedRequest.init,
-                    );
+                    )
+                    : await originalFetch.apply(this, arguments);
+
+                try {
+                    void collectCastResponse(response.clone());
+                } catch (error) {
+                    console.warn('[收益统计] 无法复制抛竿响应：', error);
                 }
+
+                return response;
             }
 
             return originalFetch.apply(this, arguments);
@@ -202,6 +213,151 @@
         }
 
         return body;
+    }
+
+    async function collectCastResponse(response) {
+        if (!response.ok) {
+            return;
+        }
+
+        try {
+            const payload = await response.json();
+
+            if (
+                payload?.success !== true ||
+                !payload.result ||
+                typeof payload.result !== 'object'
+            ) {
+                return;
+            }
+
+            recordCastResult(payload.result);
+        } catch (error) {
+            console.warn('[收益统计] 无法读取抛竿响应：', error);
+        }
+    }
+
+    function createEmptyEarningsStats() {
+        return {
+            startedAt: Date.now(),
+            updatedAt: null,
+            casts: 0,
+            fish: 0,
+            gold: 0,
+            xp: 0,
+            relics: 0,
+            treasureChests: 0,
+            gears: 0,
+            rarityCounts: {},
+        };
+    }
+
+    function toNonNegativeNumber(value) {
+        const number = Number(value);
+
+        return Number.isFinite(number) && number > 0 ? number : 0;
+    }
+
+    function loadEarningsStats() {
+        const emptyStats = createEmptyEarningsStats();
+
+        try {
+            const savedStats = JSON.parse(
+                localStorage.getItem(EARNINGS_STORAGE_KEY),
+            );
+
+            if (!savedStats || typeof savedStats !== 'object') {
+                return emptyStats;
+            }
+
+            return {
+                ...emptyStats,
+                startedAt:
+                    toNonNegativeNumber(savedStats.startedAt) ||
+                    emptyStats.startedAt,
+                updatedAt:
+                    toNonNegativeNumber(savedStats.updatedAt) || null,
+                casts: toNonNegativeNumber(savedStats.casts),
+                fish: toNonNegativeNumber(savedStats.fish),
+                gold: toNonNegativeNumber(savedStats.gold),
+                xp: toNonNegativeNumber(savedStats.xp),
+                relics: toNonNegativeNumber(savedStats.relics),
+                treasureChests: toNonNegativeNumber(
+                    savedStats.treasureChests,
+                ),
+                gears: toNonNegativeNumber(savedStats.gears),
+                rarityCounts:
+                    savedStats.rarityCounts &&
+                    typeof savedStats.rarityCounts === 'object'
+                        ? savedStats.rarityCounts
+                        : {},
+            };
+        } catch (error) {
+            console.warn('[收益统计] 无法读取本地统计：', error);
+            return emptyStats;
+        }
+    }
+
+    function saveEarningsStats() {
+        try {
+            localStorage.setItem(
+                EARNINGS_STORAGE_KEY,
+                JSON.stringify(earningsStats),
+            );
+        } catch (error) {
+            console.warn('[收益统计] 无法保存本地统计：', error);
+        }
+    }
+
+    function recordCastResult(result) {
+        const rarity = String(result.rarity ?? '').trim();
+        const count = Math.max(1, toNonNegativeNumber(result.count));
+        const isTreasure =
+            Boolean(result.treasureChest) || rarity === 'Treasure Chest';
+        const isRelic = rarity === 'Relic';
+        const isGear =
+            rarity === 'Gears' &&
+            Boolean(result.gear) &&
+            !result.inventoryFull;
+        const isFish =
+            Boolean(result.fish?.name) &&
+            !isTreasure &&
+            !isRelic &&
+            rarity !== 'Gears';
+        const gold = toNonNegativeNumber(result.goldGained);
+        const xp = toNonNegativeNumber(result.xpGained);
+        const relics = toNonNegativeNumber(result.relicsGained);
+        const category = isTreasure
+            ? 'Treasure Chest'
+            : isRelic
+                ? 'Relic'
+                : rarity === 'Gears'
+                    ? 'Gears'
+                    : rarity || 'Unknown';
+        const earnedCount = isFish ? count : 1;
+
+        earningsStats = {
+            ...earningsStats,
+            updatedAt: Date.now(),
+            casts: earningsStats.casts + 1,
+            fish: earningsStats.fish + (isFish ? count : 0),
+            gold: earningsStats.gold + gold,
+            xp: earningsStats.xp + xp,
+            relics: earningsStats.relics + relics,
+            treasureChests:
+                earningsStats.treasureChests + (isTreasure ? 1 : 0),
+            gears: earningsStats.gears + (isGear ? 1 : 0),
+            rarityCounts: {
+                ...earningsStats.rarityCounts,
+                [category]:
+                    toNonNegativeNumber(
+                        earningsStats.rarityCounts[category],
+                    ) + earnedCount,
+            },
+        };
+
+        saveEarningsStats();
+        renderEarningsStats();
     }
 
     /**
@@ -1161,7 +1317,7 @@
         }
 
         .panel {
-          width: 230px;
+          width: 250px;
           max-width: calc(100vw - 32px);
           padding: 14px;
           border: 1px solid rgba(255, 255, 255, 0.18);
@@ -1220,6 +1376,36 @@
 
         .panel-content {
           margin-top: 10px;
+        }
+
+        .tabs {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 4px;
+          margin-bottom: 10px;
+          padding: 3px;
+          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.07);
+        }
+
+        .panel-tab {
+          padding: 6px 8px;
+          border: 0;
+          border-radius: 6px;
+          background: transparent;
+          color: rgba(255, 255, 255, 0.56);
+          font-size: 12px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .panel-tab[data-active="true"] {
+          background: #6d5dfc;
+          color: #ffffff;
+        }
+
+        .panel-view[hidden] {
+          display: none;
         }
 
         .row {
@@ -1376,6 +1562,92 @@
           color: rgba(255, 255, 255, 0.42);
           font-size: 11px;
         }
+
+        .stats-start {
+          margin-bottom: 9px;
+          color: rgba(255, 255, 255, 0.48);
+          font-size: 10px;
+          text-align: center;
+        }
+
+        .stats-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 6px;
+        }
+
+        .stat-card {
+          min-width: 0;
+          padding: 8px;
+          border: 1px solid rgba(255, 255, 255, 0.1);
+          border-radius: 8px;
+          background: rgba(255, 255, 255, 0.055);
+        }
+
+        .stat-card-label {
+          display: block;
+          margin-bottom: 3px;
+          color: rgba(255, 255, 255, 0.5);
+          font-size: 10px;
+        }
+
+        .stat-card-value {
+          display: block;
+          overflow: hidden;
+          color: rgba(255, 255, 255, 0.94);
+          font-size: 13px;
+          line-height: 1.25;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .stats-section-title {
+          margin: 12px 0 6px;
+          color: rgba(255, 255, 255, 0.62);
+          font-size: 11px;
+          font-weight: 700;
+        }
+
+        .stats-list {
+          display: flex;
+          flex-wrap: wrap;
+          gap: 5px;
+        }
+
+        .stat-chip {
+          max-width: 100%;
+          overflow: hidden;
+          padding: 4px 6px;
+          border-radius: 6px;
+          background: rgba(109, 93, 252, 0.16);
+          color: rgba(255, 255, 255, 0.78);
+          font-size: 10px;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .empty-stat {
+          color: rgba(255, 255, 255, 0.42);
+          font-size: 10px;
+          line-height: 1.45;
+        }
+
+        .reset-stats {
+          width: 100%;
+          margin-top: 12px;
+          padding: 7px 10px;
+          border: 1px solid rgba(211, 72, 72, 0.52);
+          border-radius: 7px;
+          background: rgba(211, 72, 72, 0.12);
+          color: #ff9d9d;
+          font-size: 11px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .reset-stats:hover {
+          background: rgba(211, 72, 72, 0.22);
+        }
       </style>
 
       <div class="panel">
@@ -1394,61 +1666,141 @@
         </div>
 
         <div id="panel-content" class="panel-content">
-
-          <div class="row">
-            <span class="label">状态</span>
-            <span id="status" class="value">初始化中</span>
+          <div class="tabs" role="tablist" aria-label="面板内容">
+            <button
+              id="control-tab"
+              class="panel-tab"
+              type="button"
+              role="tab"
+              aria-controls="control-view"
+              aria-selected="true"
+              data-active="true"
+            >控制</button>
+            <button
+              id="earnings-tab"
+              class="panel-tab"
+              type="button"
+              role="tab"
+              aria-controls="earnings-view"
+              aria-selected="false"
+              data-active="false"
+            >收益</button>
           </div>
 
-          <div class="row">
-            <span class="label">下一操作</span>
-            <span id="next-delay" class="value">—</span>
-          </div>
+          <div
+            id="control-view"
+            class="panel-view"
+            role="tabpanel"
+            aria-labelledby="control-tab"
+          >
 
-          <div class="row">
-            <span class="label">点击次数</span>
-            <span id="click-count" class="value">0</span>
-          </div>
+            <div class="row">
+              <span class="label">状态</span>
+              <span id="status" class="value">初始化中</span>
+            </div>
 
-          <label class="field">
-            <span class="field-label">消息推送 Key</span>
-            <input
-              id="push-key"
-              class="input"
-              type="password"
-              autocomplete="off"
-              spellcheck="false"
-              placeholder="Server酱 SendKey"
-            />
-          </label>
+            <div class="row">
+              <span class="label">下一操作</span>
+              <span id="next-delay" class="value">—</span>
+            </div>
 
-          <div id="push-key-help" class="field-help">
-            未填写 Key。请前往
-            <a
-              href="https://sct.ftqq.com/"
-              target="_blank"
-              rel="noopener noreferrer"
-            >Server酱官网</a>，登录后按页面提示获取 SendKey。
-          </div>
+            <div class="row">
+              <span class="label">点击次数</span>
+              <span id="click-count" class="value">0</span>
+            </div>
 
-          <label class="option-row">
-            <span>自动过验证</span>
-            <span class="switch">
+            <label class="field">
+              <span class="field-label">消息推送 Key</span>
               <input
-                id="captcha-bypass-toggle"
-                type="checkbox"
-                role="switch"
-                aria-label="自动过验证"
+                id="push-key"
+                class="input"
+                type="password"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="Server酱 SendKey"
               />
-              <span class="switch-track" aria-hidden="true"></span>
-            </span>
-          </label>
+            </label>
 
-          <button id="toggle" class="toggle" type="button">
-            启动
-          </button>
+            <div id="push-key-help" class="field-help">
+              未填写 Key。请前往
+              <a
+                href="https://sct.ftqq.com/"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Server酱官网</a>，登录后按页面提示获取 SendKey。
+            </div>
 
-          <div class="hint">快捷键：Alt + A</div>
+            <label class="option-row">
+              <span>自动过验证</span>
+              <span class="switch">
+                <input
+                  id="captcha-bypass-toggle"
+                  type="checkbox"
+                  role="switch"
+                  aria-label="自动过验证"
+                />
+                <span class="switch-track" aria-hidden="true"></span>
+              </span>
+            </label>
+
+            <button id="toggle" class="toggle" type="button">
+              启动
+            </button>
+
+            <div class="hint">快捷键：Alt + A</div>
+          </div>
+
+          <div
+            id="earnings-view"
+            class="panel-view"
+            role="tabpanel"
+            aria-labelledby="earnings-tab"
+            hidden
+          >
+            <div id="stats-start" class="stats-start">—</div>
+
+            <div class="stats-grid">
+              <div class="stat-card">
+                <span class="stat-card-label">成功抛竿</span>
+                <strong id="stats-casts" class="stat-card-value">0</strong>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">鱼获</span>
+                <strong id="stats-fish" class="stat-card-value">0</strong>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">金币</span>
+                <strong id="stats-gold" class="stat-card-value">0</strong>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">经验</span>
+                <strong id="stats-xp" class="stat-card-value">0</strong>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">遗物</span>
+                <strong id="stats-relics" class="stat-card-value">0</strong>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">宝箱</span>
+                <strong id="stats-treasures" class="stat-card-value">0</strong>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">装备</span>
+                <strong id="stats-gears" class="stat-card-value">0</strong>
+              </div>
+              <div class="stat-card">
+                <span class="stat-card-label">每竿金币</span>
+                <strong id="stats-gold-average" class="stat-card-value">0</strong>
+              </div>
+            </div>
+
+            <div class="stats-section-title">收获分类</div>
+            <div id="rarity-stats" class="stats-list"></div>
+
+            <button id="reset-stats" class="reset-stats" type="button">
+              重置收益统计
+            </button>
+          </div>
         </div>
       </div>
     `;
@@ -1465,6 +1817,23 @@
             captchaBypassToggle: shadowRoot.querySelector(
                 '#captcha-bypass-toggle',
             ),
+            controlTab: shadowRoot.querySelector('#control-tab'),
+            earningsTab: shadowRoot.querySelector('#earnings-tab'),
+            controlView: shadowRoot.querySelector('#control-view'),
+            earningsView: shadowRoot.querySelector('#earnings-view'),
+            statsStart: shadowRoot.querySelector('#stats-start'),
+            statsCasts: shadowRoot.querySelector('#stats-casts'),
+            statsFish: shadowRoot.querySelector('#stats-fish'),
+            statsGold: shadowRoot.querySelector('#stats-gold'),
+            statsXp: shadowRoot.querySelector('#stats-xp'),
+            statsRelics: shadowRoot.querySelector('#stats-relics'),
+            statsTreasures: shadowRoot.querySelector('#stats-treasures'),
+            statsGears: shadowRoot.querySelector('#stats-gears'),
+            statsGoldAverage: shadowRoot.querySelector(
+                '#stats-gold-average',
+            ),
+            rarityStats: shadowRoot.querySelector('#rarity-stats'),
+            resetStats: shadowRoot.querySelector('#reset-stats'),
             collapseToggle: shadowRoot.querySelector('#collapse-toggle'),
             toggle: shadowRoot.querySelector('#toggle'),
         };
@@ -1489,11 +1858,25 @@
             setCaptchaBypassEnabled(event.currentTarget.checked);
         });
 
+        ui.controlTab.addEventListener('click', () => {
+            setPanelView('control');
+        });
+
+        ui.earningsTab.addEventListener('click', () => {
+            setPanelView('earnings');
+        });
+
+        ui.resetStats.addEventListener('click', () => {
+            resetEarningsStats();
+        });
+
         renderToggle();
         renderCaptchaBypassToggle();
         renderPanelCollapsed();
         renderPushKeyHelp();
         updateClickCount();
+        setPanelView(panelView);
+        renderEarningsStats();
     }
 
     function setStatus(text) {
@@ -1512,6 +1895,112 @@
         if (ui?.clickCount) {
             ui.clickCount.textContent = String(clickCount);
         }
+    }
+
+    function setPanelView(nextView) {
+        panelView = nextView === 'earnings' ? 'earnings' : 'control';
+
+        if (
+            !ui?.controlTab ||
+            !ui?.earningsTab ||
+            !ui?.controlView ||
+            !ui?.earningsView
+        ) {
+            return;
+        }
+
+        const showEarnings = panelView === 'earnings';
+
+        ui.controlTab.dataset.active = showEarnings ? 'false' : 'true';
+        ui.controlTab.setAttribute(
+            'aria-selected',
+            showEarnings ? 'false' : 'true',
+        );
+        ui.earningsTab.dataset.active = showEarnings ? 'true' : 'false';
+        ui.earningsTab.setAttribute(
+            'aria-selected',
+            showEarnings ? 'true' : 'false',
+        );
+        ui.controlView.hidden = showEarnings;
+        ui.earningsView.hidden = !showEarnings;
+
+        if (showEarnings) {
+            renderEarningsStats();
+        }
+    }
+
+    function formatStatNumber(value, maximumFractionDigits = 0) {
+        return new Intl.NumberFormat('zh-CN', {
+            maximumFractionDigits,
+        }).format(toNonNegativeNumber(value));
+    }
+
+    function renderStatsList(container, entries, emptyText) {
+        if (!container) {
+            return;
+        }
+
+        container.replaceChildren();
+
+        if (entries.length === 0) {
+            const empty = document.createElement('span');
+
+            empty.className = 'empty-stat';
+            empty.textContent = emptyText;
+            container.appendChild(empty);
+            return;
+        }
+
+        for (const [label, count] of entries) {
+            const chip = document.createElement('span');
+
+            chip.className = 'stat-chip';
+            chip.textContent = `${label} ×${formatStatNumber(count)}`;
+            chip.title = chip.textContent;
+            container.appendChild(chip);
+        }
+    }
+
+    function renderEarningsStats() {
+        if (!ui?.statsCasts) {
+            return;
+        }
+
+        const averageGold = earningsStats.casts > 0
+            ? earningsStats.gold / earningsStats.casts
+            : 0;
+
+        ui.statsStart.textContent =
+            `统计起点：${new Date(earningsStats.startedAt).toLocaleString()}`;
+        ui.statsCasts.textContent = formatStatNumber(earningsStats.casts);
+        ui.statsFish.textContent = formatStatNumber(earningsStats.fish);
+        ui.statsGold.textContent = formatStatNumber(earningsStats.gold, 2);
+        ui.statsXp.textContent = formatStatNumber(earningsStats.xp, 2);
+        ui.statsRelics.textContent = formatStatNumber(
+            earningsStats.relics,
+            2,
+        );
+        ui.statsTreasures.textContent = formatStatNumber(
+            earningsStats.treasureChests,
+        );
+        ui.statsGears.textContent = formatStatNumber(earningsStats.gears);
+        ui.statsGoldAverage.textContent = formatStatNumber(averageGold, 1);
+
+        const rarityEntries = Object.entries(
+            earningsStats.rarityCounts,
+        ).sort((left, right) => right[1] - left[1]);
+
+        renderStatsList(ui.rarityStats, rarityEntries, '暂无收获');
+    }
+
+    function resetEarningsStats() {
+        if (!window.confirm('确定重置全部收益统计吗？此操作无法撤销。')) {
+            return;
+        }
+
+        earningsStats = createEmptyEarningsStats();
+        saveEarningsStats();
+        renderEarningsStats();
     }
 
     function setPanelCollapsed(nextCollapsed) {
