@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      1.5.0
+// @version      1.5.1
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -46,6 +46,10 @@
         // 模拟鼠标按下持续时间
         mouseDownMin: 35,
         mouseDownMax: 90,
+
+        // 自动验证各步骤之间的随机等待时间
+        captchaStepDelayMin: 800,
+        captchaStepDelayMax: 1400,
 
     };
 
@@ -355,6 +359,62 @@
         return null;
     }
 
+    /**
+     * 调用页面传给验证弹窗的 onClose，保持 React 内部状态同步。
+     */
+    function closeHumanVerification(verification) {
+        const fiberKey = Object.keys(verification).find(key =>
+            key.startsWith('__reactFiber$') ||
+            key.startsWith('__reactInternalInstance$'),
+        );
+        let fiber = fiberKey ? verification[fiberKey] : null;
+
+        while (fiber) {
+            const props = fiber.memoizedProps;
+
+            if (
+                props?.isOpen === true &&
+                typeof props.onClose === 'function'
+            ) {
+                props.onClose();
+                return true;
+            }
+
+            fiber = fiber.return;
+        }
+
+        return false;
+    }
+
+    async function waitForCaptchaStep(isAttemptActive) {
+        await sleep(
+            randomInt(
+                CONFIG.captchaStepDelayMin,
+                CONFIG.captchaStepDelayMax,
+            ),
+        );
+
+        return isAttemptActive();
+    }
+
+    async function waitForHumanVerificationToClose(isAttemptActive) {
+        const deadline = Date.now() + 1500;
+
+        while (findHumanVerification()) {
+            if (!isAttemptActive()) {
+                return false;
+            }
+
+            if (Date.now() >= deadline) {
+                throw new Error('人机验证弹窗关闭超时');
+            }
+
+            await sleep(50);
+        }
+
+        return true;
+    }
+
     function parseSvgNumber(value, fieldName) {
         const number = Number.parseFloat(value);
 
@@ -442,7 +502,7 @@
         const challenge = await api.getCaptchaChallenge();
 
         if (!isAttemptActive()) {
-            return;
+            return false;
         }
 
         if (!challenge?.token || typeof challenge.bgSvg !== 'string') {
@@ -452,13 +512,17 @@
         const answer = readExposedCaptchaAnswer(challenge.bgSvg);
         const rangeValue = Math.round(answer.ratio * 100);
 
-        setStatus(`已解析验证缺口 x=${answer.gapX}，正在提交`);
-        setNextDelay(`直接提交滑块值：${rangeValue}`);
+        setStatus(`已解析验证缺口 x=${answer.gapX}，等待提交`);
+        setNextDelay(`稍后提交滑块值：${rangeValue}`);
 
         console.warn('[自动过验证] 客户端已暴露验证码答案：', {
             ...answer,
             rangeValue,
         });
+
+        if (!(await waitForCaptchaStep(isAttemptActive))) {
+            return false;
+        }
 
         await api.notifyCaptchaVerified(
             challenge.token,
@@ -466,7 +530,7 @@
         );
 
         if (!isAttemptActive()) {
-            return;
+            return false;
         }
 
         const verifiedAt = Date.now();
@@ -481,17 +545,33 @@
             String(nextInterval),
         );
 
-        setStatus('服务端验证通过，即将刷新页面');
+        setStatus('服务端验证通过，等待关闭弹窗');
         setNextDelay('验证成功');
         console.warn(
             '[自动过验证] 服务端接受了由客户端题面计算出的答案。',
         );
 
-        await sleep(800);
-
-        if (isAttemptActive()) {
-            window.location.reload();
+        if (!(await waitForCaptchaStep(isAttemptActive))) {
+            return false;
         }
+
+        const verification = findHumanVerification();
+
+        if (
+            verification &&
+            !closeHumanVerification(verification)
+        ) {
+            throw new Error('无法关闭人机验证弹窗');
+        }
+
+        if (!(await waitForHumanVerificationToClose(isAttemptActive))) {
+            return false;
+        }
+
+        setStatus('人机验证已完成，正在恢复自动抛竿');
+        setNextDelay('—');
+
+        return true;
     }
 
     function cancelCaptchaBypass() {
@@ -515,8 +595,8 @@
     /**
      * 自动尝试绕过人机验证。
      *
-     * 成功时 runCaptchaBypass 会直接刷新页面，脚本随页面重新启动。
-     * 失败时才停止脚本并发送消息推送通知。
+     * 成功时关闭验证弹窗并重新启动抛竿循环。
+     * 失败时停止脚本并发送消息推送通知。
      */
     async function autoBypassCaptcha(verification) {
         if (!captchaBypassEnabled || captchaBypassInProgress) {
@@ -527,18 +607,18 @@
 
         captchaBypassAttemptId = attemptId;
         captchaBypassInProgress = true;
+        let bypassSucceeded = false;
         console.warn(
             '[自动抛竿] 检测到人机验证，尝试自动绕过。',
             verification,
         );
 
         try {
-            await runCaptchaBypass(() =>
+            bypassSucceeded = await runCaptchaBypass(() =>
                 enabled &&
                 captchaBypassEnabled &&
                 attemptId === captchaBypassAttemptId,
             );
-            // runCaptchaBypass 成功后会执行 window.location.reload()
         } catch (error) {
             if (
                 !enabled ||
@@ -561,6 +641,15 @@
             if (attemptId === captchaBypassAttemptId) {
                 captchaBypassInProgress = false;
             }
+        }
+
+        if (
+            bypassSucceeded &&
+            enabled &&
+            captchaBypassEnabled &&
+            attemptId === captchaBypassAttemptId
+        ) {
+            setEnabled(true);
         }
     }
 
