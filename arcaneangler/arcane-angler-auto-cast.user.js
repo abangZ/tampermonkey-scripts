@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      1.7.0
+// @version      1.8.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -55,12 +55,20 @@
         captchaConfirmDelayMin: 1400,
         captchaConfirmDelayMax: 2600,
 
+        // 定时运行/休息会在设置值上加入 -5%～+10% 的随机量
+        scheduleRandomExtraRatioMin: -0.05,
+        scheduleRandomExtraRatioMax: 0.1,
+
     };
 
     const STORAGE_KEY = 'arcane-angler-auto-cast-enabled-v1';
     const CAPTCHA_BYPASS_STORAGE_KEY =
         'arcane-angler-captcha-bypass-enabled-v1';
     const PUSH_KEY_STORAGE_KEY = 'arcane-angler-push-key-v1';
+    const NOTIFICATION_MODE_STORAGE_KEY =
+        'arcane-angler-notification-mode-v1';
+    const SCHEDULE_SETTINGS_STORAGE_KEY =
+        'arcane-angler-schedule-settings-v1';
     const PANEL_COLLAPSED_STORAGE_KEY =
         'arcane-angler-panel-collapsed-v1';
     const EARNINGS_STORAGE_KEY = 'arcane-angler-earnings-v1';
@@ -126,6 +134,8 @@
     let enabled = loadEnabled();
     let captchaBypassEnabled = loadCaptchaBypassEnabled();
     let pushKey = loadPushKey();
+    let notificationMode = loadNotificationMode();
+    let scheduleSettings = loadScheduleSettings();
     let panelCollapsed = loadPanelCollapsed();
     let earningsStats = loadEarningsStats();
     let panelView = 'control';
@@ -135,6 +145,9 @@
     let activeCaptchaChallenge = null;
     let captchaBypassInProgress = false;
     let captchaBypassAttemptId = 0;
+    let schedulePhase = 'work';
+    let scheduleEndsAt = 0;
+    let scheduleDuration = 0;
 
     /**
      * 包装页面的 fetch：处理抛竿请求/收益，并复用页面验证码 challenge。
@@ -546,6 +559,79 @@
             }
         } catch (error) {
             console.warn('[自动抛竿] 无法保存消息推送 Key：', error);
+        }
+    }
+
+    function loadNotificationMode() {
+        try {
+            return localStorage.getItem(NOTIFICATION_MODE_STORAGE_KEY) ===
+                'browser'
+                ? 'browser'
+                : 'server';
+        } catch {
+            return 'server';
+        }
+    }
+
+    function saveNotificationMode(value) {
+        try {
+            localStorage.setItem(NOTIFICATION_MODE_STORAGE_KEY, value);
+        } catch (error) {
+            console.warn('[自动抛竿] 无法保存通知方式：', error);
+        }
+    }
+
+    function normalizeScheduleMinutes(value, fallback) {
+        const minutes = Number(value);
+
+        if (!Number.isFinite(minutes) || minutes < 1) {
+            return fallback;
+        }
+
+        return Math.min(1440, Math.round(minutes));
+    }
+
+    function loadScheduleSettings() {
+        const defaults = {
+            enabled: false,
+            workMinutes: 60,
+            restMinutes: 10,
+        };
+
+        try {
+            const savedSettings = JSON.parse(
+                localStorage.getItem(SCHEDULE_SETTINGS_STORAGE_KEY),
+            );
+
+            if (!savedSettings || typeof savedSettings !== 'object') {
+                return defaults;
+            }
+
+            return {
+                enabled: savedSettings.enabled === true,
+                workMinutes: normalizeScheduleMinutes(
+                    savedSettings.workMinutes,
+                    defaults.workMinutes,
+                ),
+                restMinutes: normalizeScheduleMinutes(
+                    savedSettings.restMinutes,
+                    defaults.restMinutes,
+                ),
+            };
+        } catch (error) {
+            console.warn('[自动抛竿] 无法读取定时休息设置：', error);
+            return defaults;
+        }
+    }
+
+    function saveScheduleSettings() {
+        try {
+            localStorage.setItem(
+                SCHEDULE_SETTINGS_STORAGE_KEY,
+                JSON.stringify(scheduleSettings),
+            );
+        } catch (error) {
+            console.warn('[自动抛竿] 无法保存定时休息设置：', error);
         }
     }
 
@@ -974,6 +1060,15 @@
     }
 
     async function sendHumanVerificationNotification() {
+        if (notificationMode === 'browser') {
+            sendBrowserHumanVerificationNotification();
+            return;
+        }
+
+        await sendServerHumanVerificationNotification();
+    }
+
+    async function sendServerHumanVerificationNotification() {
         const currentPushKey = pushKey.trim();
 
         if (!currentPushKey) {
@@ -999,6 +1094,54 @@
         } catch (error) {
             console.warn('[自动抛竿] 验证码通知发送失败：', error);
         }
+    }
+
+    function sendBrowserHumanVerificationNotification() {
+        if (typeof window.Notification !== 'function') {
+            console.warn('[自动抛竿] 当前浏览器不支持系统通知。');
+            return;
+        }
+
+        if (window.Notification.permission !== 'granted') {
+            console.warn(
+                '[自动抛竿] 浏览器通知尚未授权，跳过验证码通知。',
+            );
+            return;
+        }
+
+        try {
+            const notification = new window.Notification(
+                'Arcane Angler 人机验证',
+                {
+                    body: HUMAN_VERIFICATION_MESSAGE,
+                    tag: 'arcane-angler-human-verification',
+                },
+            );
+
+            notification.onclick = () => {
+                window.focus();
+                notification.close();
+            };
+
+            console.info('[自动抛竿] 浏览器验证码通知已发送。');
+        } catch (error) {
+            console.warn('[自动抛竿] 浏览器验证码通知发送失败：', error);
+        }
+    }
+
+    async function requestBrowserNotificationPermission() {
+        if (typeof window.Notification !== 'function') {
+            renderNotificationSettings();
+            return;
+        }
+
+        try {
+            await window.Notification.requestPermission();
+        } catch (error) {
+            console.warn('[自动抛竿] 请求浏览器通知权限失败：', error);
+        }
+
+        renderNotificationSettings();
     }
 
     /**
@@ -1055,6 +1198,123 @@
             ),
             isLongDelay: false,
         };
+    }
+
+    function formatScheduleDuration(milliseconds) {
+        const totalSeconds = Math.max(
+            0,
+            Math.ceil(milliseconds / 1000),
+        );
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds % 60;
+
+        if (minutes === 0) {
+            return `${seconds} 秒`;
+        }
+
+        return seconds > 0
+            ? `${minutes} 分 ${seconds} 秒`
+            : `${minutes} 分钟`;
+    }
+
+    function getRandomizedScheduleDuration(baseMinutes) {
+        const extraRatio =
+            CONFIG.scheduleRandomExtraRatioMin +
+            Math.random() *
+                (
+                    CONFIG.scheduleRandomExtraRatioMax -
+                    CONFIG.scheduleRandomExtraRatioMin
+                );
+
+        return Math.round(baseMinutes * (1 + extraRatio) * 60000);
+    }
+
+    function resetScheduleCycle() {
+        schedulePhase = 'work';
+        scheduleEndsAt = 0;
+        scheduleDuration = 0;
+        renderScheduleSettings();
+    }
+
+    function startSchedulePhase(phase) {
+        const baseMinutes = phase === 'rest'
+            ? scheduleSettings.restMinutes
+            : scheduleSettings.workMinutes;
+
+        schedulePhase = phase;
+        scheduleDuration = getRandomizedScheduleDuration(baseMinutes);
+        scheduleEndsAt = Date.now() + scheduleDuration;
+        renderScheduleSettings();
+
+        console.info(
+            `[自动抛竿] 本轮${phase === 'rest' ? '休息' : '运行'}时长：` +
+            formatScheduleDuration(scheduleDuration),
+        );
+    }
+
+    function isScheduledWorkExpired() {
+        return (
+            scheduleSettings.enabled &&
+            schedulePhase === 'work' &&
+            scheduleEndsAt > 0 &&
+            Date.now() >= scheduleEndsAt
+        );
+    }
+
+    function shouldEnterScheduledRest(currentLoopId) {
+        return (
+            enabled &&
+            currentLoopId === loopId &&
+            !captchaBypassInProgress &&
+            !activeCaptchaChallenge &&
+            isScheduledWorkExpired()
+        );
+    }
+
+    async function waitForScheduledWork(currentLoopId) {
+        if (!scheduleSettings.enabled) {
+            return true;
+        }
+
+        if (scheduleEndsAt === 0) {
+            startSchedulePhase('work');
+        }
+
+        while (enabled && currentLoopId === loopId) {
+            if (!scheduleSettings.enabled) {
+                resetScheduleCycle();
+                return true;
+            }
+
+            if (schedulePhase === 'work') {
+                if (!isScheduledWorkExpired()) {
+                    return true;
+                }
+
+                startSchedulePhase('rest');
+            }
+
+            // 休息阶段仍处理运行周期末尾遗留的验证码：自动验证成功后
+            // 会重新启动循环；关闭自动验证或验证失败时则保持停止。
+            if (stopIfCaptchaChallengeFound()) {
+                return false;
+            }
+
+            const remaining = scheduleEndsAt - Date.now();
+
+            if (remaining <= 0) {
+                startSchedulePhase('work');
+                return true;
+            }
+
+            setStatus('定时休息中');
+            setNextDelay(`剩余 ${formatScheduleDuration(remaining)}`);
+            renderScheduleStatus(remaining);
+
+            await sleep(Math.min(1000, remaining));
+        }
+
+        return false;
     }
 
     /**
@@ -1118,7 +1378,8 @@
         if (
             !enabled ||
             currentLoopId !== loopId ||
-            !button.isConnected
+            !button.isConnected ||
+            isScheduledWorkExpired()
         ) {
             return false;
         }
@@ -1254,6 +1515,10 @@
                 return null;
             }
 
+            if (isScheduledWorkExpired()) {
+                return null;
+            }
+
             const button = findCastButton();
 
             if (button) {
@@ -1281,6 +1546,10 @@
 
         while (enabled && currentLoopId === loopId) {
             if (stopIfCaptchaChallengeFound()) {
+                return false;
+            }
+
+            if (isScheduledWorkExpired()) {
                 return false;
             }
 
@@ -1316,9 +1585,21 @@
      */
     async function runLoop(currentLoopId) {
         while (enabled && currentLoopId === loopId) {
+            const scheduleReady = await waitForScheduledWork(
+                currentLoopId,
+            );
+
+            if (!scheduleReady) {
+                return;
+            }
+
             const button = await waitForButton(currentLoopId);
 
             if (!button) {
+                if (shouldEnterScheduledRest(currentLoopId)) {
+                    continue;
+                }
+
                 return;
             }
 
@@ -1331,6 +1612,10 @@
             );
 
             if (!completed) {
+                if (shouldEnterScheduledRest(currentLoopId)) {
+                    continue;
+                }
+
                 return;
             }
 
@@ -1338,6 +1623,10 @@
             const latestButton = findCastButton();
 
             if (!latestButton) {
+                continue;
+            }
+
+            if (isScheduledWorkExpired()) {
                 continue;
             }
 
@@ -1376,6 +1665,10 @@
                     return;
                 }
 
+                if (isScheduledWorkExpired()) {
+                    continue;
+                }
+
                 setStatus('本次未点击，重新等待');
                 await sleep(500);
             }
@@ -1388,6 +1681,7 @@
     function setEnabled(nextEnabled) {
         enabled = Boolean(nextEnabled);
         saveEnabled(enabled);
+        resetScheduleCycle();
 
         if (!enabled) {
             cancelCaptchaBypass();
@@ -1435,6 +1729,53 @@
             void autoBypassCaptcha(activeCaptchaChallenge);
         } else {
             stopForHumanVerification();
+        }
+    }
+
+    function setNotificationMode(nextMode) {
+        notificationMode = nextMode === 'browser'
+            ? 'browser'
+            : 'server';
+        saveNotificationMode(notificationMode);
+        renderNotificationSettings();
+
+        if (
+            notificationMode === 'browser' &&
+            typeof window.Notification === 'function' &&
+            window.Notification.permission === 'default'
+        ) {
+            void requestBrowserNotificationPermission();
+        }
+    }
+
+    function setScheduleEnabled(nextEnabled) {
+        scheduleSettings = {
+            ...scheduleSettings,
+            enabled: Boolean(nextEnabled),
+        };
+        saveScheduleSettings();
+        resetScheduleCycle();
+
+        if (enabled && scheduleSettings.enabled) {
+            startSchedulePhase('work');
+        }
+    }
+
+    function setScheduleMinutes(field, value) {
+        const nextValue = normalizeScheduleMinutes(
+            value,
+            scheduleSettings[field],
+        );
+
+        scheduleSettings = {
+            ...scheduleSettings,
+            [field]: nextValue,
+        };
+        saveScheduleSettings();
+        resetScheduleCycle();
+
+        if (enabled && scheduleSettings.enabled) {
+            startSchedulePhase('work');
         }
     }
 
@@ -1531,7 +1872,7 @@
 
         .tabs {
           display: grid;
-          grid-template-columns: repeat(2, minmax(0, 1fr));
+          grid-template-columns: repeat(3, minmax(0, 1fr));
           gap: 4px;
           margin-bottom: 10px;
           padding: 3px;
@@ -1625,6 +1966,80 @@
         .field-help a {
           color: #9ea5ff;
           text-decoration: underline;
+        }
+
+        .settings-section + .settings-section {
+          margin-top: 14px;
+          padding-top: 14px;
+          border-top: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .settings-title {
+          color: rgba(255, 255, 255, 0.88);
+          font-size: 12px;
+          font-weight: 700;
+        }
+
+        .choice-list {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 6px;
+          margin-top: 8px;
+        }
+
+        .choice-option {
+          display: flex;
+          align-items: center;
+          gap: 6px;
+          padding: 7px 8px;
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          border-radius: 7px;
+          color: rgba(255, 255, 255, 0.78);
+          font-size: 11px;
+          cursor: pointer;
+        }
+
+        .choice-option:has(input:checked) {
+          border-color: rgba(109, 93, 252, 0.72);
+          background: rgba(109, 93, 252, 0.14);
+          color: #ffffff;
+        }
+
+        .choice-option input {
+          margin: 0;
+          accent-color: #6d5dfc;
+        }
+
+        .settings-group[hidden] {
+          display: none;
+        }
+
+        .number-grid {
+          display: grid;
+          grid-template-columns: repeat(2, minmax(0, 1fr));
+          gap: 8px;
+        }
+
+        .secondary-button {
+          width: 100%;
+          margin-top: 9px;
+          padding: 7px 10px;
+          border: 1px solid rgba(109, 93, 252, 0.55);
+          border-radius: 7px;
+          background: rgba(109, 93, 252, 0.12);
+          color: #b9b5ff;
+          font-size: 11px;
+          font-weight: 700;
+          cursor: pointer;
+        }
+
+        .secondary-button:hover {
+          background: rgba(109, 93, 252, 0.22);
+        }
+
+        .secondary-button:disabled {
+          cursor: default;
+          opacity: 0.48;
         }
 
         .toggle {
@@ -1892,6 +2307,15 @@
               aria-selected="false"
               data-active="false"
             >收益</button>
+            <button
+              id="settings-tab"
+              class="panel-tab"
+              type="button"
+              role="tab"
+              aria-controls="settings-view"
+              aria-selected="false"
+              data-active="false"
+            >设置</button>
           </div>
 
           <div
@@ -1914,27 +2338,6 @@
             <div class="row">
               <span class="label">点击次数</span>
               <span id="click-count" class="value">0</span>
-            </div>
-
-            <label class="field">
-              <span class="field-label">消息推送 Key</span>
-              <input
-                id="push-key"
-                class="input"
-                type="password"
-                autocomplete="off"
-                spellcheck="false"
-                placeholder="Server酱 SendKey"
-              />
-            </label>
-
-            <div id="push-key-help" class="field-help">
-              未填写 Key。请前往
-              <a
-                href="https://sct.ftqq.com/"
-                target="_blank"
-                rel="noopener noreferrer"
-              >Server酱官网</a>，登录后按页面提示获取 SendKey。
             </div>
 
             <label class="option-row">
@@ -2008,6 +2411,144 @@
               重置收益统计
             </button>
           </div>
+
+          <div
+            id="settings-view"
+            class="panel-view"
+            role="tabpanel"
+            aria-labelledby="settings-tab"
+            hidden
+          >
+            <section class="settings-section">
+              <div class="settings-title">消息通知</div>
+
+              <div
+                class="choice-list"
+                role="radiogroup"
+                aria-label="消息通知方式"
+              >
+                <label class="choice-option">
+                  <input
+                    type="radio"
+                    name="notification-mode"
+                    value="server"
+                  />
+                  <span>Server酱</span>
+                </label>
+                <label class="choice-option">
+                  <input
+                    type="radio"
+                    name="notification-mode"
+                    value="browser"
+                  />
+                  <span>浏览器通知</span>
+                </label>
+              </div>
+
+              <div id="server-notification-settings" class="settings-group">
+                <label class="field">
+                  <span class="field-label">消息推送 Key</span>
+                  <input
+                    id="push-key"
+                    class="input"
+                    type="password"
+                    autocomplete="off"
+                    spellcheck="false"
+                    placeholder="Server酱 SendKey"
+                  />
+                </label>
+
+                <div id="push-key-help" class="field-help">
+                  未填写 Key。请前往
+                  <a
+                    href="https://sct.ftqq.com/"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >Server酱官网</a>，登录后按页面提示获取 SendKey。
+                </div>
+                <div class="field-help">
+                  Server酱每日免费额度仅 5 条，推荐优先使用浏览器通知。
+                </div>
+              </div>
+
+              <div
+                id="browser-notification-settings"
+                class="settings-group"
+                hidden
+              >
+                <div class="row">
+                  <span class="label">通知权限</span>
+                  <span
+                    id="browser-notification-permission"
+                    class="value"
+                  >检查中</span>
+                </div>
+                <button
+                  id="browser-notification-permission-button"
+                  class="secondary-button"
+                  type="button"
+                >授权浏览器通知</button>
+                <div class="field-help">
+                  浏览器通知仅在当前浏览器和站点授权后可用。
+                </div>
+              </div>
+            </section>
+
+            <section class="settings-section">
+              <div class="settings-title">定时休息</div>
+
+              <label class="option-row">
+                <span>启用运行/休息周期</span>
+                <span class="switch">
+                  <input
+                    id="schedule-enabled-toggle"
+                    type="checkbox"
+                    role="switch"
+                    aria-label="启用运行和休息周期"
+                  />
+                  <span class="switch-track" aria-hidden="true"></span>
+                </span>
+              </label>
+
+              <div id="schedule-settings" class="settings-group" hidden>
+                <div class="number-grid">
+                  <label class="field">
+                    <span class="field-label">运行分钟</span>
+                    <input
+                      id="schedule-work-minutes"
+                      class="input"
+                      type="number"
+                      min="1"
+                      max="1440"
+                      step="1"
+                      inputmode="numeric"
+                    />
+                  </label>
+                  <label class="field">
+                    <span class="field-label">休息分钟</span>
+                    <input
+                      id="schedule-rest-minutes"
+                      class="input"
+                      type="number"
+                      min="1"
+                      max="1440"
+                      step="1"
+                      inputmode="numeric"
+                    />
+                  </label>
+                </div>
+
+                <div class="row">
+                  <span class="label">当前周期</span>
+                  <span id="schedule-status" class="value">等待启动</span>
+                </div>
+
+                <div class="field-help">
+                  每轮实际运行和休息时长，都会在设置值上加入 -5%～+10% 的随机时间。
+                </div>
+              </div>
+            </section>
+          </div>
         </div>
       </div>
     `;
@@ -2026,8 +2567,38 @@
             ),
             controlTab: shadowRoot.querySelector('#control-tab'),
             earningsTab: shadowRoot.querySelector('#earnings-tab'),
+            settingsTab: shadowRoot.querySelector('#settings-tab'),
             controlView: shadowRoot.querySelector('#control-view'),
             earningsView: shadowRoot.querySelector('#earnings-view'),
+            settingsView: shadowRoot.querySelector('#settings-view'),
+            notificationModeInputs: shadowRoot.querySelectorAll(
+                'input[name="notification-mode"]',
+            ),
+            serverNotificationSettings: shadowRoot.querySelector(
+                '#server-notification-settings',
+            ),
+            browserNotificationSettings: shadowRoot.querySelector(
+                '#browser-notification-settings',
+            ),
+            browserNotificationPermission: shadowRoot.querySelector(
+                '#browser-notification-permission',
+            ),
+            browserNotificationPermissionButton: shadowRoot.querySelector(
+                '#browser-notification-permission-button',
+            ),
+            scheduleEnabledToggle: shadowRoot.querySelector(
+                '#schedule-enabled-toggle',
+            ),
+            scheduleSettings: shadowRoot.querySelector(
+                '#schedule-settings',
+            ),
+            scheduleWorkMinutes: shadowRoot.querySelector(
+                '#schedule-work-minutes',
+            ),
+            scheduleRestMinutes: shadowRoot.querySelector(
+                '#schedule-rest-minutes',
+            ),
+            scheduleStatus: shadowRoot.querySelector('#schedule-status'),
             statsStart: shadowRoot.querySelector('#stats-start'),
             statsCasts: shadowRoot.querySelector('#stats-casts'),
             statsFish: shadowRoot.querySelector('#stats-fish'),
@@ -2073,6 +2644,37 @@
             setPanelView('earnings');
         });
 
+        ui.settingsTab.addEventListener('click', () => {
+            setPanelView('settings');
+        });
+
+        for (const input of ui.notificationModeInputs) {
+            input.addEventListener('change', event => {
+                if (event.currentTarget.checked) {
+                    setNotificationMode(event.currentTarget.value);
+                }
+            });
+        }
+
+        ui.browserNotificationPermissionButton.addEventListener(
+            'click',
+            () => {
+                void requestBrowserNotificationPermission();
+            },
+        );
+
+        ui.scheduleEnabledToggle.addEventListener('change', event => {
+            setScheduleEnabled(event.currentTarget.checked);
+        });
+
+        ui.scheduleWorkMinutes.addEventListener('change', event => {
+            setScheduleMinutes('workMinutes', event.currentTarget.value);
+        });
+
+        ui.scheduleRestMinutes.addEventListener('change', event => {
+            setScheduleMinutes('restMinutes', event.currentTarget.value);
+        });
+
         ui.resetStats.addEventListener('click', () => {
             resetEarningsStats();
         });
@@ -2080,7 +2682,8 @@
         renderToggle();
         renderCaptchaBypassToggle();
         renderPanelCollapsed();
-        renderPushKeyHelp();
+        renderNotificationSettings();
+        renderScheduleSettings();
         updateClickCount();
         setPanelView(panelView);
         renderEarningsStats();
@@ -2105,34 +2708,40 @@
     }
 
     function setPanelView(nextView) {
-        panelView = nextView === 'earnings' ? 'earnings' : 'control';
+        panelView = nextView === 'earnings' || nextView === 'settings'
+            ? nextView
+            : 'control';
 
         if (
             !ui?.controlTab ||
             !ui?.earningsTab ||
+            !ui?.settingsTab ||
             !ui?.controlView ||
-            !ui?.earningsView
+            !ui?.earningsView ||
+            !ui?.settingsView
         ) {
             return;
         }
 
-        const showEarnings = panelView === 'earnings';
+        const panelItems = [
+            ['control', ui.controlTab, ui.controlView],
+            ['earnings', ui.earningsTab, ui.earningsView],
+            ['settings', ui.settingsTab, ui.settingsView],
+        ];
 
-        ui.controlTab.dataset.active = showEarnings ? 'false' : 'true';
-        ui.controlTab.setAttribute(
-            'aria-selected',
-            showEarnings ? 'false' : 'true',
-        );
-        ui.earningsTab.dataset.active = showEarnings ? 'true' : 'false';
-        ui.earningsTab.setAttribute(
-            'aria-selected',
-            showEarnings ? 'true' : 'false',
-        );
-        ui.controlView.hidden = showEarnings;
-        ui.earningsView.hidden = !showEarnings;
+        for (const [view, tab, panel] of panelItems) {
+            const active = panelView === view;
 
-        if (showEarnings) {
+            tab.dataset.active = active ? 'true' : 'false';
+            tab.setAttribute('aria-selected', active ? 'true' : 'false');
+            panel.hidden = !active;
+        }
+
+        if (panelView === 'earnings') {
             renderEarningsStats();
+        } else if (panelView === 'settings') {
+            renderNotificationSettings();
+            renderScheduleSettings();
         }
     }
 
@@ -2255,6 +2864,101 @@
         if (ui?.pushKeyHelp) {
             ui.pushKeyHelp.hidden = Boolean(pushKey);
         }
+    }
+
+    function renderNotificationSettings() {
+        if (!ui?.notificationModeInputs?.length) {
+            return;
+        }
+
+        for (const input of ui.notificationModeInputs) {
+            input.checked = input.value === notificationMode;
+        }
+
+        const showBrowserSettings = notificationMode === 'browser';
+
+        ui.serverNotificationSettings.hidden = showBrowserSettings;
+        ui.browserNotificationSettings.hidden = !showBrowserSettings;
+        renderPushKeyHelp();
+
+        if (!showBrowserSettings) {
+            return;
+        }
+
+        const supported = typeof window.Notification === 'function';
+        const permission = supported
+            ? window.Notification.permission
+            : 'unsupported';
+        const permissionLabels = {
+            granted: '已授权',
+            denied: '已拒绝',
+            default: '未授权',
+            unsupported: '当前浏览器不支持',
+        };
+
+        ui.browserNotificationPermission.textContent =
+            permissionLabels[permission] ?? '未知';
+        ui.browserNotificationPermissionButton.disabled =
+            permission === 'granted' ||
+            permission === 'denied' ||
+            permission === 'unsupported';
+        ui.browserNotificationPermissionButton.textContent =
+            permission === 'granted'
+                ? '浏览器通知已授权'
+                : permission === 'denied'
+                    ? '请在浏览器设置中重新授权'
+                    : permission === 'unsupported'
+                        ? '当前浏览器不支持通知'
+                        : '授权浏览器通知';
+    }
+
+    function renderScheduleStatus(remaining = null) {
+        if (!ui?.scheduleStatus) {
+            return;
+        }
+
+        if (!scheduleSettings.enabled) {
+            ui.scheduleStatus.textContent = '未启用';
+            return;
+        }
+
+        if (scheduleEndsAt === 0 || scheduleDuration === 0) {
+            ui.scheduleStatus.textContent = enabled
+                ? '等待开始本轮运行'
+                : '脚本启动后开始';
+            return;
+        }
+
+        if (schedulePhase === 'rest') {
+            const restRemaining = remaining ?? scheduleEndsAt - Date.now();
+
+            ui.scheduleStatus.textContent =
+                `休息中，剩余 ${formatScheduleDuration(restRemaining)}`;
+            return;
+        }
+
+        ui.scheduleStatus.textContent =
+            `本轮运行 ${formatScheduleDuration(scheduleDuration)}`;
+    }
+
+    function renderScheduleSettings() {
+        if (!ui?.scheduleEnabledToggle) {
+            return;
+        }
+
+        ui.scheduleEnabledToggle.checked = scheduleSettings.enabled;
+        ui.scheduleEnabledToggle.setAttribute(
+            'aria-checked',
+            scheduleSettings.enabled ? 'true' : 'false',
+        );
+        ui.scheduleSettings.hidden = !scheduleSettings.enabled;
+        ui.scheduleWorkMinutes.value = String(
+            scheduleSettings.workMinutes,
+        );
+        ui.scheduleRestMinutes.value = String(
+            scheduleSettings.restMinutes,
+        );
+        renderScheduleStatus();
     }
 
     function renderToggle() {
