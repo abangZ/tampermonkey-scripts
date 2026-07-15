@@ -19,6 +19,10 @@ export const CONFIG = {
     // 按钮未出现时的检查间隔
     buttonPollInterval: 250,
 
+    // 冷却倒计时持续超过该时间后刷新页面
+    cooldownButtonText: '冷却时间',
+    cooldownReloadDelay: 10000,
+
     // 模拟鼠标按下持续时间
     mouseDownMin: 35,
     mouseDownMax: 90,

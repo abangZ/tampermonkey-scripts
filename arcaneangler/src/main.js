@@ -9,6 +9,7 @@
 
 import { createCaptchaController } from './captcha.js';
 import { CONFIG } from './config.js';
+import { createCooldownWatchdog, isCooldownButton } from './cooldown.js';
 import {
     createEmptyEarningsStats,
     loadEarningsStats,
@@ -39,7 +40,7 @@ import {
     saveScheduleSettings,
 } from './storage.js';
 import { createPanelController } from './ui/panel.js';
-import { isDisplayed, normalizeText } from './utils/dom.js';
+import { isDisplayed, isVisible, normalizeText } from './utils/dom.js';
 import { randomInt, sleep } from './utils/time.js';
 
 let enabled = loadEnabled();
@@ -122,6 +123,27 @@ function findCastButton() {
         }
 
         if (!isDisplayed(button)) {
+            continue;
+        }
+
+        return button;
+    }
+
+    return null;
+}
+
+/**
+ * 查询当前可见且不可点击的冷却倒计时按钮。
+ */
+function findCooldownButton() {
+    const buttons = document.querySelectorAll('button');
+
+    for (const button of buttons) {
+        if (!isCooldownButton(button, CONFIG.cooldownButtonText)) {
+            continue;
+        }
+
+        if (!isVisible(button)) {
             continue;
         }
 
@@ -326,6 +348,8 @@ async function simulateClick(button, currentLoopId) {
  * 等待按钮出现。
  */
 async function waitForButton(currentLoopId) {
+    const cooldownWatchdog = createCooldownWatchdog(CONFIG.cooldownReloadDelay);
+
     while (enabled && currentLoopId === loopId) {
         if (captcha.stopIfChallengeFound()) {
             return null;
@@ -339,6 +363,21 @@ async function waitForButton(currentLoopId) {
 
         if (button) {
             return button;
+        }
+
+        const cooldownButton = findCooldownButton();
+
+        if (cooldownWatchdog.observe(Boolean(cooldownButton))) {
+            panel.setStatus('冷却倒计时卡住，正在刷新页面');
+            panel.setNextDelay('—');
+
+            console.warn(
+                '[自动抛竿] 冷却倒计时持续超过 10 秒，正在刷新页面。',
+                cooldownButton,
+            );
+
+            window.location.reload();
+            return null;
         }
 
         panel.setStatus('等待“抛竿线”按钮出现');

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.0.2
+// @version      2.0.3
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -31,6 +31,8 @@
 		longDelayMax: 1e4,
 		longDelayChance: .08,
 		buttonPollInterval: 250,
+		cooldownButtonText: "冷却时间",
+		cooldownReloadDelay: 1e4,
 		mouseDownMin: 35,
 		mouseDownMax: 90,
 		captchaObserveDelayMin: 2200,
@@ -295,6 +297,28 @@
 			},
 			stopIfChallengeFound: stopIfCaptchaChallengeFound
 		};
+	}
+	function isCooldownButton(button, buttonText) {
+		const text = normalizeText(button?.textContent);
+		return (Boolean(button?.disabled) || button?.getAttribute?.("aria-disabled") === "true") && text.includes(buttonText);
+	}
+	function createCooldownWatchdog(timeoutMilliseconds) {
+		let startedAt = null;
+		let timedOut = false;
+		return { observe(isCoolingDown, now = Date.now()) {
+			if (!isCoolingDown) {
+				startedAt = null;
+				return false;
+			}
+			if (timedOut) return false;
+			if (startedAt === null) {
+				startedAt = now;
+				return false;
+			}
+			if (now - startedAt < timeoutMilliseconds) return false;
+			timedOut = true;
+			return true;
+		} };
 	}
 	function createEmptyEarningsCounters() {
 		return {
@@ -1689,6 +1713,15 @@
 		}
 		return null;
 	}
+	function findCooldownButton() {
+		const buttons = document.querySelectorAll("button");
+		for (const button of buttons) {
+			if (!isCooldownButton(button, CONFIG.cooldownButtonText)) continue;
+			if (!isVisible(button)) continue;
+			return button;
+		}
+		return null;
+	}
 	function getRandomDelay() {
 		if (Math.random() < CONFIG.longDelayChance) return {
 			milliseconds: randomInt(CONFIG.longDelayMin, CONFIG.longDelayMax),
@@ -1802,11 +1835,20 @@
 		return true;
 	}
 	async function waitForButton(currentLoopId) {
+		const cooldownWatchdog = createCooldownWatchdog(CONFIG.cooldownReloadDelay);
 		while (enabled && currentLoopId === loopId) {
 			if (captcha.stopIfChallengeFound()) return null;
 			if (schedule.isWorkExpired()) return null;
 			const button = findCastButton();
 			if (button) return button;
+			const cooldownButton = findCooldownButton();
+			if (cooldownWatchdog.observe(Boolean(cooldownButton))) {
+				panel.setStatus("冷却倒计时卡住，正在刷新页面");
+				panel.setNextDelay("—");
+				console.warn("[自动抛竿] 冷却倒计时持续超过 10 秒，正在刷新页面。", cooldownButton);
+				window.location.reload();
+				return null;
+			}
 			panel.setStatus("等待“抛竿线”按钮出现");
 			panel.setNextDelay("—");
 			await sleep(CONFIG.buttonPollInterval);
