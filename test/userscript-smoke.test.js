@@ -71,6 +71,11 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         assert.ok(host);
         assert.ok(host.shadowRoot);
         assert.match(host.shadowRoot.textContent, /自动抛竿/);
+        assert.ok(host.shadowRoot.querySelector('#auto-biome-toggle'));
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-biome-status').textContent,
+            '未启用',
+        );
         assert.notEqual(window.fetch, originalFetch);
 
         await window.fetch('/api/game/cast', {

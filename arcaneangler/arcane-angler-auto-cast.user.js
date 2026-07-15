@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.0.3
+// @version      2.1.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -23,6 +23,297 @@
 
 (function() {
 	"use strict";
+	var WEATHER_LABELS = {
+		clear: "晴朗",
+		rain: "雨天",
+		windy: "大风",
+		foggy: "大雾",
+		heatwave: "热浪",
+		storm: "暴风",
+		blight: "枯萎",
+		gold_breeze: "黄金微风",
+		arcane_surge: "奥术涌动"
+	};
+	function normalizeBiomeId(value) {
+		const biomeId = Number(value);
+		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
+	}
+	function normalizeXpBonus(value) {
+		const xpBonus = Number(value);
+		return Number.isFinite(xpBonus) ? xpBonus : 0;
+	}
+	function normalizeWeatherByBiome(payload) {
+		const source = payload?.weather ?? payload;
+		if (!source || typeof source !== "object" || Array.isArray(source)) return {};
+		const weatherByBiome = {};
+		for (const [rawBiomeId, rawWeather] of Object.entries(source)) {
+			const biomeId = normalizeBiomeId(rawBiomeId);
+			if (!biomeId || !rawWeather || typeof rawWeather !== "object") continue;
+			weatherByBiome[biomeId] = {
+				weather: String(rawWeather.weather ?? "clear"),
+				xpBonus: normalizeXpBonus(rawWeather.xpBonus)
+			};
+		}
+		return weatherByBiome;
+	}
+	function getBiomeScore(biomeId, xpBonus, biomeWeight) {
+		const normalizedBiomeId = normalizeBiomeId(biomeId) ?? 1;
+		return normalizeXpBonus(xpBonus) + (normalizedBiomeId - 1) * normalizeXpBonus(biomeWeight);
+	}
+	function findAvailableBaitForBiome(player, biomeId) {
+		const inventory = player?.baitInventory;
+		if (!inventory || typeof inventory !== "object") return null;
+		const currentGrade = String(player.equippedBait ?? "").match(/^bait_\d+_(low|medium|high|super)$/)?.[1];
+		const grades = currentGrade && currentGrade !== "low" ? [currentGrade, "low"] : ["low"];
+		for (const grade of grades) {
+			const baitId = `bait_${biomeId}_${grade}`;
+			if (Number(inventory[baitId]) > 0) return baitId;
+		}
+		for (const grade of [
+			"medium",
+			"high",
+			"super"
+		]) {
+			const baitId = `bait_${biomeId}_${grade}`;
+			if (Number(inventory[baitId]) > 0) return baitId;
+		}
+		return null;
+	}
+	function selectBestBiome({ biomeWeight, player, weatherByBiome }) {
+		const unlockedBiomes = Array.isArray(player?.unlockedBiomes) ? player.unlockedBiomes : [player?.currentBiome ?? 1];
+		const candidates = [];
+		for (const rawBiomeId of unlockedBiomes) {
+			const biomeId = normalizeBiomeId(rawBiomeId);
+			const weather = weatherByBiome?.[biomeId];
+			if (!biomeId || !weather) continue;
+			candidates.push({
+				baitId: findAvailableBaitForBiome(player, biomeId),
+				biomeId,
+				score: getBiomeScore(biomeId, weather.xpBonus, biomeWeight),
+				weather: weather.weather,
+				xpBonus: weather.xpBonus
+			});
+		}
+		candidates.sort((left, right) => right.score - left.score || right.biomeId - left.biomeId);
+		return candidates[0] ?? null;
+	}
+	function getBiomeName(biomeId) {
+		return String(window.BIOMES?.[biomeId]?.name ?? "").trim() || `地图 ${biomeId}`;
+	}
+	function getWeatherLabel(weather) {
+		return WEATHER_LABELS[weather] ?? weather ?? "未知天气";
+	}
+	function formatBiomeTarget(target) {
+		return `[B${target.biomeId}] ${getBiomeName(target.biomeId)}`;
+	}
+	function formatTargetSummary(target) {
+		const weatherLabel = getWeatherLabel(target.weather);
+		const signedXpBonus = target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
+		return `${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
+	}
+	function getErrorMessage(error) {
+		return String(error?.message ?? error ?? "未知错误");
+	}
+	async function autoEquipForBiome(player, target) {
+		const api = window.ApiService;
+		if (target.baitId && target.baitId !== player.equippedBait) try {
+			await api.equipBait(target.baitId);
+		} catch (error) {
+			console.warn("[自动换图] 无法自动装备目标地图鱼饵：", error);
+		}
+		const currentRod = String(player.equippedRod ?? "rod_default");
+		if (!currentRod.startsWith("rod_biome_") || currentRod === `rod_biome_${target.biomeId}`) return;
+		const ownedRods = Array.isArray(player.ownedRods) ? player.ownedRods : [];
+		const targetBiomeRod = `rod_biome_${target.biomeId}`;
+		const nextRod = ownedRods.includes(targetBiomeRod) ? targetBiomeRod : [
+			"rod_strength",
+			"rod_luck",
+			"rod_relic",
+			"rod_treasure",
+			"rod_default"
+		].find((rodId) => ownedRods.includes(rodId)) ?? "rod_default";
+		try {
+			await api.equipRod(nextRod);
+		} catch (error) {
+			console.warn("[自动换图] 无法自动装备可用鱼竿：", error);
+		}
+	}
+	function getNextHourlyRefreshDelay(now = new Date()) {
+		const nextRefresh = new Date(now);
+		nextRefresh.setHours(now.getHours() + 1, 0, 5, 0);
+		return Math.max(1e3, nextRefresh.getTime() - now.getTime());
+	}
+	function createAutoBiomeController({ getState, onStateChange }) {
+		let evaluationId = 0;
+		let eventSource = null;
+		let fallbackTimer = null;
+		let lastUpdatedAt = 0;
+		let status = "等待天气数据";
+		let switching = false;
+		let target = null;
+		let weatherByBiome = {};
+		let weatherRevision = 0;
+		function notifyStateChanged() {
+			onStateChange?.();
+		}
+		function setStatus(nextStatus) {
+			status = nextStatus;
+			notifyStateChanged();
+		}
+		function getSnapshot() {
+			return {
+				autoBiomeLastUpdatedAt: lastUpdatedAt,
+				autoBiomeStatus: status,
+				autoBiomeTarget: target,
+				autoBiomeWeatherByBiome: weatherByBiome
+			};
+		}
+		async function loadAllWeather() {
+			if (typeof window.ApiService?.getAllBiomeWeather === "function") return window.ApiService.getAllBiomeWeather();
+			const response = await window.fetch("/api/game/weather");
+			if (!response.ok) throw new Error(`天气接口返回 ${response.status}`);
+			return response.json();
+		}
+		function applyWeather(payload, source) {
+			const nextWeather = normalizeWeatherByBiome(payload);
+			if (Object.keys(nextWeather).length === 0) return false;
+			weatherByBiome = nextWeather;
+			lastUpdatedAt = Date.now();
+			if (source === "stream") weatherRevision += 1;
+			notifyStateChanged();
+			evaluateBestBiome();
+			return true;
+		}
+		async function refreshWeather() {
+			const revisionBeforeRequest = weatherRevision;
+			try {
+				const payload = await loadAllWeather();
+				if (revisionBeforeRequest === weatherRevision) applyWeather(payload, "request");
+			} catch (error) {
+				console.warn("[自动换图] 无法读取地图天气：", error);
+				if (Object.keys(weatherByBiome).length === 0) setStatus("天气数据读取失败");
+			}
+		}
+		function scheduleHourlyFallback() {
+			window.clearTimeout(fallbackTimer);
+			fallbackTimer = window.setTimeout(async () => {
+				await refreshWeather();
+				scheduleHourlyFallback();
+			}, getNextHourlyRefreshDelay());
+		}
+		function connectWeatherStream() {
+			if (typeof window.EventSource !== "function") {
+				console.warn("[自动换图] 当前浏览器不支持天气推送，改为整点刷新天气。");
+				scheduleHourlyFallback();
+				return;
+			}
+			const baseUrl = String(window.ApiService?.baseURL ?? `${window.location.origin}/api`).replace(/\/$/, "");
+			eventSource = new window.EventSource(`${baseUrl}/game/weather/stream`);
+			eventSource.onmessage = (event) => {
+				try {
+					const payload = JSON.parse(event.data);
+					if (payload?.type === "weather_update") applyWeather(payload, "stream");
+				} catch (error) {
+					console.warn("[自动换图] 无法解析天气推送：", error);
+				}
+			};
+			eventSource.onerror = () => {
+				console.warn("[自动换图] 天气推送暂时断开，等待自动重连。");
+			};
+		}
+		async function evaluateBestBiome() {
+			const currentEvaluationId = ++evaluationId;
+			const { autoBiomeSettings, enabled } = getState();
+			if (!autoBiomeSettings.enabled) {
+				target = null;
+				setStatus("未启用");
+				return;
+			}
+			if (!enabled) {
+				target = null;
+				setStatus("脚本启动后自动选择地图");
+				return;
+			}
+			if (Object.keys(weatherByBiome).length === 0) {
+				setStatus("等待天气数据");
+				return;
+			}
+			if (switching) return;
+			const api = window.ApiService;
+			if (typeof api?.getPlayerData !== "function" || typeof api?.changeBiome !== "function") {
+				setStatus("等待游戏角色数据");
+				return;
+			}
+			let player;
+			try {
+				player = await api.getPlayerData();
+			} catch (error) {
+				console.warn("[自动换图] 无法读取角色数据：", error);
+				setStatus("角色数据读取失败");
+				return;
+			}
+			if (currentEvaluationId !== evaluationId) return;
+			if (player?.boat) {
+				target = null;
+				setStatus("组队中暂不自动换图");
+				return;
+			}
+			target = selectBestBiome({
+				biomeWeight: autoBiomeSettings.biomeWeight,
+				player,
+				weatherByBiome
+			});
+			if (!target) {
+				setStatus("没有可用的已解锁地图数据");
+				return;
+			}
+			const targetLabel = formatBiomeTarget(target);
+			const summary = formatTargetSummary(target);
+			if (normalizeBiomeId(player.currentBiome) === target.biomeId) {
+				setStatus(`已在 ${summary}`);
+				return;
+			}
+			switching = true;
+			setStatus(`正在切换到 ${summary}`);
+			try {
+				const result = await api.changeBiome(target.biomeId);
+				if (result?.success !== true) throw new Error(result?.message ?? "游戏未确认切图成功");
+				await autoEquipForBiome(player, target);
+				setStatus(`已切换到 ${targetLabel}，等待下一竿同步页面`);
+			} catch (error) {
+				console.error("[自动换图] 切换地图失败：", error);
+				setStatus(`切图失败：${getErrorMessage(error)}`);
+			} finally {
+				switching = false;
+			}
+		}
+		function handleStateChanged() {
+			evaluateBestBiome();
+		}
+		function handleCastResult(result) {
+			if (target && normalizeBiomeId(result?.currentBiome) === target.biomeId) setStatus(`已在 ${formatTargetSummary(target)}`);
+		}
+		function start() {
+			connectWeatherStream();
+			refreshWeather();
+			evaluateBestBiome();
+		}
+		function destroy() {
+			eventSource?.close();
+			window.clearTimeout(fallbackTimer);
+		}
+		return {
+			destroy,
+			getSnapshot,
+			handleCastResult,
+			handleStateChanged,
+			isSwitching() {
+				return switching;
+			},
+			refreshWeather,
+			start
+		};
+	}
 	var CONFIG = {
 		buttonText: "抛竿线",
 		normalDelayMin: 500,
@@ -49,6 +340,7 @@
 	var PUSH_KEY_STORAGE_KEY = "arcane-angler-push-key-v1";
 	var NOTIFICATION_MODE_STORAGE_KEY = "arcane-angler-notification-mode-v1";
 	var SCHEDULE_SETTINGS_STORAGE_KEY = "arcane-angler-schedule-settings-v1";
+	var AUTO_BIOME_SETTINGS_STORAGE_KEY = "arcane-angler-auto-biome-settings-v1";
 	var PANEL_COLLAPSED_STORAGE_KEY = "arcane-angler-panel-collapsed-v1";
 	var EARNINGS_STORAGE_KEY = "arcane-angler-earnings-v1";
 	var PANEL_ID = "arcane-angler-auto-cast-panel-host";
@@ -802,6 +1094,11 @@
 			waitForWork
 		};
 	}
+	var AUTO_BIOME_WEIGHTS = [
+		0,
+		5,
+		10
+	];
 	function loadEnabled() {
 		try {
 			return localStorage.getItem(STORAGE_KEY) === "1";
@@ -860,6 +1157,34 @@
 			console.warn("[自动抛竿] 无法保存通知方式：", error);
 		}
 	}
+	function normalizeAutoBiomeWeight(value, fallback = 5) {
+		const weight = Number(value);
+		return AUTO_BIOME_WEIGHTS.includes(weight) ? weight : fallback;
+	}
+	function loadAutoBiomeSettings() {
+		const defaults = {
+			enabled: false,
+			biomeWeight: 5
+		};
+		try {
+			const savedSettings = JSON.parse(localStorage.getItem(AUTO_BIOME_SETTINGS_STORAGE_KEY));
+			if (!savedSettings || typeof savedSettings !== "object") return defaults;
+			return {
+				enabled: savedSettings.enabled === true,
+				biomeWeight: normalizeAutoBiomeWeight(savedSettings.biomeWeight, defaults.biomeWeight)
+			};
+		} catch (error) {
+			console.warn("[自动换图] 无法读取设置：", error);
+			return defaults;
+		}
+	}
+	function saveAutoBiomeSettings(autoBiomeSettings) {
+		try {
+			localStorage.setItem(AUTO_BIOME_SETTINGS_STORAGE_KEY, JSON.stringify(autoBiomeSettings));
+		} catch (error) {
+			console.warn("[自动换图] 无法保存设置：", error);
+		}
+	}
 	function normalizeScheduleMinutes(value, fallback) {
 		const minutes = Number(value);
 		if (!Number.isFinite(minutes) || minutes < 1) return fallback;
@@ -907,14 +1232,14 @@
 			console.warn("[自动抛竿] 无法保存面板折叠状态：", error);
 		}
 	}
-	var panel_default = "* {\n    box-sizing: border-box;\n}\n\n.panel {\n    width: 280px;\n    max-width: calc(100vw - 32px);\n    padding: 14px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 12px;\n    background: rgba(18, 18, 24, 0.94);\n    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);\n    color: #ffffff;\n    backdrop-filter: blur(12px);\n}\n\n.panel[data-collapsed='true'] {\n    width: auto;\n    padding: 7px;\n}\n\n.panel[data-collapsed='true'] .panel-content,\n.panel[data-collapsed='true'] .title-text {\n    display: none;\n}\n\n.header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n}\n\n.title {\n    display: flex;\n    align-items: center;\n    gap: 5px;\n    font-size: 15px;\n    font-weight: 700;\n}\n\n.collapse-toggle {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    width: 26px;\n    height: 26px;\n    flex-shrink: 0;\n    padding: 0;\n    border: 1px solid rgba(255, 255, 255, 0.16);\n    border-radius: 7px;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 16px;\n    line-height: 1;\n    cursor: pointer;\n}\n\n.collapse-toggle:hover {\n    background: rgba(255, 255, 255, 0.14);\n}\n\n.panel-content {\n    margin-top: 10px;\n}\n\n.tabs {\n    display: grid;\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n    gap: 4px;\n    margin-bottom: 10px;\n    padding: 3px;\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.07);\n}\n\n.panel-tab {\n    padding: 6px 8px;\n    border: 0;\n    border-radius: 6px;\n    background: transparent;\n    color: rgba(255, 255, 255, 0.56);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.panel-tab[data-active='true'] {\n    background: #6d5dfc;\n    color: #ffffff;\n}\n\n.panel-view[hidden] {\n    display: none;\n}\n\n.row {\n    display: flex;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 7px;\n    font-size: 12px;\n    line-height: 1.4;\n}\n\n.label {\n    flex-shrink: 0;\n    color: rgba(255, 255, 255, 0.58);\n}\n\n.value {\n    min-width: 0;\n    overflow-wrap: anywhere;\n    text-align: right;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.field {\n    display: block;\n    margin-top: 12px;\n}\n\n.field-label {\n    display: block;\n    margin-bottom: 5px;\n    color: rgba(255, 255, 255, 0.58);\n    font-size: 12px;\n}\n\n.input {\n    width: 100%;\n    padding: 8px 9px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 7px;\n    outline: none;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.92);\n    font-size: 12px;\n}\n\n.input:focus {\n    border-color: #6d5dfc;\n}\n\n.input::placeholder {\n    color: rgba(255, 255, 255, 0.32);\n}\n\n.field-help {\n    margin-top: 6px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 11px;\n    line-height: 1.45;\n}\n\n.field-help[hidden] {\n    display: none;\n}\n\n.field-help a {\n    color: #9ea5ff;\n    text-decoration: underline;\n}\n\n.settings-section + .settings-section {\n    margin-top: 14px;\n    padding-top: 14px;\n    border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.settings-title {\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    font-weight: 700;\n}\n\n.choice-list {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n    margin-top: 8px;\n}\n\n.choice-option {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    padding: 7px 8px;\n    border: 1px solid rgba(255, 255, 255, 0.12);\n    border-radius: 7px;\n    color: rgba(255, 255, 255, 0.78);\n    font-size: 11px;\n    cursor: pointer;\n}\n\n.choice-option:has(input:checked) {\n    border-color: rgba(109, 93, 252, 0.72);\n    background: rgba(109, 93, 252, 0.14);\n    color: #ffffff;\n}\n\n.choice-option input {\n    margin: 0;\n    accent-color: #6d5dfc;\n}\n\n.settings-group[hidden] {\n    display: none;\n}\n\n.number-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n\n.secondary-button {\n    width: 100%;\n    margin-top: 9px;\n    padding: 7px 10px;\n    border: 1px solid rgba(109, 93, 252, 0.55);\n    border-radius: 7px;\n    background: rgba(109, 93, 252, 0.12);\n    color: #b9b5ff;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.secondary-button:hover {\n    background: rgba(109, 93, 252, 0.22);\n}\n\n.secondary-button:disabled {\n    cursor: default;\n    opacity: 0.48;\n}\n\n.toggle {\n    width: 100%;\n    margin-top: 12px;\n    padding: 9px 12px;\n    border: 0;\n    border-radius: 8px;\n    background: #6d5dfc;\n    color: #ffffff;\n    font-size: 13px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.toggle:hover {\n    filter: brightness(1.08);\n}\n\n.toggle[data-enabled='true'] {\n    background: #d34848;\n}\n\n.option-row {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 10px;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    cursor: pointer;\n}\n\n.switch {\n    position: relative;\n    width: 38px;\n    height: 22px;\n    flex-shrink: 0;\n}\n\n.switch input {\n    position: absolute;\n    width: 1px;\n    height: 1px;\n    opacity: 0;\n}\n\n.switch-track {\n    display: block;\n    width: 100%;\n    height: 100%;\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.2);\n    transition: background 0.15s ease;\n}\n\n.switch-track::after {\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #ffffff;\n    content: '';\n    transition: transform 0.15s ease;\n}\n\n.switch input:checked + .switch-track {\n    background: #6d5dfc;\n}\n\n.switch input:checked + .switch-track::after {\n    transform: translateX(16px);\n}\n\n.switch input:focus-visible + .switch-track {\n    outline: 2px solid #9ea5ff;\n    outline-offset: 2px;\n}\n\n.hint {\n    margin-top: 9px;\n    text-align: center;\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 11px;\n}\n\n.stats-filters {\n    display: grid;\n    gap: 6px;\n    margin-bottom: 8px;\n}\n\n.stats-filter span {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stats-select {\n    width: 100%;\n    padding: 6px 7px;\n    border: 1px solid rgba(255, 255, 255, 0.14);\n    border-radius: 6px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.9);\n    font-size: 10px;\n}\n\n.stats-select:focus {\n    border-color: #6d5dfc;\n}\n\n.stats-scope {\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.72);\n    font-size: 10px;\n    font-weight: 700;\n    text-align: center;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stats-start {\n    margin: 3px 0 9px;\n    color: rgba(255, 255, 255, 0.48);\n    font-size: 10px;\n    text-align: center;\n}\n\n.stats-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n\n.stat-card {\n    min-width: 0;\n    padding: 8px;\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.055);\n}\n\n.stat-card-label {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stat-card-value {\n    display: block;\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.94);\n    font-size: 13px;\n    line-height: 1.25;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-card-value[data-tone='income'],\n.stat-card-value[data-tone='positive'] {\n    color: #4ade80;\n}\n\n.stat-card-value[data-tone='gold'] {\n    color: #fbbf24;\n}\n\n.stat-card-value[data-tone='cost'],\n.stat-card-value[data-tone='negative'] {\n    color: #f87171;\n}\n\n.stats-section-title {\n    margin: 12px 0 6px;\n    color: rgba(255, 255, 255, 0.62);\n    font-size: 11px;\n    font-weight: 700;\n}\n\n.stats-list {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n\n.stat-chip {\n    max-width: 100%;\n    overflow: hidden;\n    padding: 4px 6px;\n    border-radius: 6px;\n    background: rgba(109, 93, 252, 0.16);\n    color: #d8d8df;\n    font-size: 10px;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-chip[data-tone='uncommon'] {\n    background: rgba(132, 204, 22, 0.14);\n    color: #84cc16;\n}\n\n.stat-chip[data-tone='common'] {\n    background: rgba(156, 163, 175, 0.14);\n    color: #9ca3af;\n}\n\n.stat-chip[data-tone='fine'] {\n    background: rgba(59, 130, 246, 0.14);\n    color: #3b82f6;\n}\n\n.stat-chip[data-tone='rare'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='epic'] {\n    background: rgba(236, 72, 153, 0.14);\n    color: #ec4899;\n}\n\n.stat-chip[data-tone='legendary'] {\n    background: rgba(245, 158, 11, 0.14);\n    color: #f59e0b;\n}\n\n.stat-chip[data-tone='mythic'] {\n    background: rgba(239, 68, 68, 0.14);\n    color: #ef4444;\n}\n\n.stat-chip[data-tone='exotic'] {\n    background: rgba(6, 182, 212, 0.14);\n    color: #06b6d4;\n}\n\n.stat-chip[data-tone='arcane'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='relic'],\n.stat-chip[data-tone='treasure'] {\n    background: rgba(242, 204, 96, 0.14);\n    color: #f2cc60;\n}\n\n.stat-chip[data-tone='gear'] {\n    background: rgba(86, 212, 221, 0.14);\n    color: #7ce7ee;\n}\n\n.empty-stat {\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 10px;\n    line-height: 1.45;\n}\n\n.stats-cost-note {\n    margin-top: 7px;\n    color: #fbbf24;\n    font-size: 10px;\n    line-height: 1.4;\n}\n\n.stats-cost-note[hidden] {\n    display: none;\n}\n\n.reset-stats {\n    width: 100%;\n    margin-top: 12px;\n    padding: 7px 10px;\n    border: 1px solid rgba(211, 72, 72, 0.52);\n    border-radius: 7px;\n    background: rgba(211, 72, 72, 0.12);\n    color: #ff9d9d;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.reset-stats:hover {\n    background: rgba(211, 72, 72, 0.22);\n}\n";
+	var panel_default = "* {\n    box-sizing: border-box;\n}\n\n.panel {\n    width: 280px;\n    max-width: calc(100vw - 32px);\n    padding: 14px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 12px;\n    background: rgba(18, 18, 24, 0.94);\n    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);\n    color: #ffffff;\n    backdrop-filter: blur(12px);\n}\n\n.panel[data-collapsed='true'] {\n    width: auto;\n    padding: 7px;\n}\n\n.panel[data-collapsed='true'] .panel-content,\n.panel[data-collapsed='true'] .title-text {\n    display: none;\n}\n\n.header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n}\n\n.title {\n    display: flex;\n    align-items: center;\n    gap: 5px;\n    font-size: 15px;\n    font-weight: 700;\n}\n\n.collapse-toggle {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    width: 26px;\n    height: 26px;\n    flex-shrink: 0;\n    padding: 0;\n    border: 1px solid rgba(255, 255, 255, 0.16);\n    border-radius: 7px;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 16px;\n    line-height: 1;\n    cursor: pointer;\n}\n\n.collapse-toggle:hover {\n    background: rgba(255, 255, 255, 0.14);\n}\n\n.panel-content {\n    max-height: calc(100vh - 96px);\n    overflow-y: auto;\n    overscroll-behavior: contain;\n    margin-top: 10px;\n    padding-right: 2px;\n}\n\n.tabs {\n    display: grid;\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n    gap: 4px;\n    margin-bottom: 10px;\n    padding: 3px;\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.07);\n}\n\n.panel-tab {\n    padding: 6px 8px;\n    border: 0;\n    border-radius: 6px;\n    background: transparent;\n    color: rgba(255, 255, 255, 0.56);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.panel-tab[data-active='true'] {\n    background: #6d5dfc;\n    color: #ffffff;\n}\n\n.panel-view[hidden] {\n    display: none;\n}\n\n.row {\n    display: flex;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 7px;\n    font-size: 12px;\n    line-height: 1.4;\n}\n\n.label {\n    flex-shrink: 0;\n    color: rgba(255, 255, 255, 0.58);\n}\n\n.value {\n    min-width: 0;\n    overflow-wrap: anywhere;\n    text-align: right;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.field {\n    display: block;\n    margin-top: 12px;\n}\n\n.field-label {\n    display: block;\n    margin-bottom: 5px;\n    color: rgba(255, 255, 255, 0.58);\n    font-size: 12px;\n}\n\n.input {\n    width: 100%;\n    padding: 8px 9px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 7px;\n    outline: none;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.92);\n    font-size: 12px;\n}\n\n.input:focus {\n    border-color: #6d5dfc;\n}\n\n.input::placeholder {\n    color: rgba(255, 255, 255, 0.32);\n}\n\n.field-help {\n    margin-top: 6px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 11px;\n    line-height: 1.45;\n}\n\n.field-help[hidden] {\n    display: none;\n}\n\n.field-help a {\n    color: #9ea5ff;\n    text-decoration: underline;\n}\n\n.settings-section + .settings-section {\n    margin-top: 14px;\n    padding-top: 14px;\n    border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.settings-title {\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    font-weight: 700;\n}\n\n.choice-list {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n    margin-top: 8px;\n}\n\n.choice-list-three {\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n}\n\n.choice-option {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    padding: 7px 8px;\n    border: 1px solid rgba(255, 255, 255, 0.12);\n    border-radius: 7px;\n    color: rgba(255, 255, 255, 0.78);\n    font-size: 11px;\n    cursor: pointer;\n}\n\n.choice-option:has(input:checked) {\n    border-color: rgba(109, 93, 252, 0.72);\n    background: rgba(109, 93, 252, 0.14);\n    color: #ffffff;\n}\n\n.choice-option input {\n    margin: 0;\n    accent-color: #6d5dfc;\n}\n\n.settings-group[hidden] {\n    display: none;\n}\n\n.number-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n\n.secondary-button {\n    width: 100%;\n    margin-top: 9px;\n    padding: 7px 10px;\n    border: 1px solid rgba(109, 93, 252, 0.55);\n    border-radius: 7px;\n    background: rgba(109, 93, 252, 0.12);\n    color: #b9b5ff;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.secondary-button:hover {\n    background: rgba(109, 93, 252, 0.22);\n}\n\n.secondary-button:disabled {\n    cursor: default;\n    opacity: 0.48;\n}\n\n.toggle {\n    width: 100%;\n    margin-top: 12px;\n    padding: 9px 12px;\n    border: 0;\n    border-radius: 8px;\n    background: #6d5dfc;\n    color: #ffffff;\n    font-size: 13px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.toggle:hover {\n    filter: brightness(1.08);\n}\n\n.toggle[data-enabled='true'] {\n    background: #d34848;\n}\n\n.option-row {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 10px;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    cursor: pointer;\n}\n\n.switch {\n    position: relative;\n    width: 38px;\n    height: 22px;\n    flex-shrink: 0;\n}\n\n.switch input {\n    position: absolute;\n    width: 1px;\n    height: 1px;\n    opacity: 0;\n}\n\n.switch-track {\n    display: block;\n    width: 100%;\n    height: 100%;\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.2);\n    transition: background 0.15s ease;\n}\n\n.switch-track::after {\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #ffffff;\n    content: '';\n    transition: transform 0.15s ease;\n}\n\n.switch input:checked + .switch-track {\n    background: #6d5dfc;\n}\n\n.switch input:checked + .switch-track::after {\n    transform: translateX(16px);\n}\n\n.switch input:focus-visible + .switch-track {\n    outline: 2px solid #9ea5ff;\n    outline-offset: 2px;\n}\n\n.hint {\n    margin-top: 9px;\n    text-align: center;\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 11px;\n}\n\n.stats-filters {\n    display: grid;\n    gap: 6px;\n    margin-bottom: 8px;\n}\n\n.stats-filter span {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stats-select {\n    width: 100%;\n    padding: 6px 7px;\n    border: 1px solid rgba(255, 255, 255, 0.14);\n    border-radius: 6px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.9);\n    font-size: 10px;\n}\n\n.stats-select:focus {\n    border-color: #6d5dfc;\n}\n\n.stats-scope {\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.72);\n    font-size: 10px;\n    font-weight: 700;\n    text-align: center;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stats-start {\n    margin: 3px 0 9px;\n    color: rgba(255, 255, 255, 0.48);\n    font-size: 10px;\n    text-align: center;\n}\n\n.stats-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n\n.stat-card {\n    min-width: 0;\n    padding: 8px;\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.055);\n}\n\n.stat-card-label {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stat-card-value {\n    display: block;\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.94);\n    font-size: 13px;\n    line-height: 1.25;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-card-value[data-tone='income'],\n.stat-card-value[data-tone='positive'] {\n    color: #4ade80;\n}\n\n.stat-card-value[data-tone='gold'] {\n    color: #fbbf24;\n}\n\n.stat-card-value[data-tone='cost'],\n.stat-card-value[data-tone='negative'] {\n    color: #f87171;\n}\n\n.stats-section-title {\n    margin: 12px 0 6px;\n    color: rgba(255, 255, 255, 0.62);\n    font-size: 11px;\n    font-weight: 700;\n}\n\n.stats-list {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n\n.stat-chip {\n    max-width: 100%;\n    overflow: hidden;\n    padding: 4px 6px;\n    border-radius: 6px;\n    background: rgba(109, 93, 252, 0.16);\n    color: #d8d8df;\n    font-size: 10px;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-chip[data-tone='uncommon'] {\n    background: rgba(132, 204, 22, 0.14);\n    color: #84cc16;\n}\n\n.stat-chip[data-tone='common'] {\n    background: rgba(156, 163, 175, 0.14);\n    color: #9ca3af;\n}\n\n.stat-chip[data-tone='fine'] {\n    background: rgba(59, 130, 246, 0.14);\n    color: #3b82f6;\n}\n\n.stat-chip[data-tone='rare'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='epic'] {\n    background: rgba(236, 72, 153, 0.14);\n    color: #ec4899;\n}\n\n.stat-chip[data-tone='legendary'] {\n    background: rgba(245, 158, 11, 0.14);\n    color: #f59e0b;\n}\n\n.stat-chip[data-tone='mythic'] {\n    background: rgba(239, 68, 68, 0.14);\n    color: #ef4444;\n}\n\n.stat-chip[data-tone='exotic'] {\n    background: rgba(6, 182, 212, 0.14);\n    color: #06b6d4;\n}\n\n.stat-chip[data-tone='arcane'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='relic'],\n.stat-chip[data-tone='treasure'] {\n    background: rgba(242, 204, 96, 0.14);\n    color: #f2cc60;\n}\n\n.stat-chip[data-tone='gear'] {\n    background: rgba(86, 212, 221, 0.14);\n    color: #7ce7ee;\n}\n\n.empty-stat {\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 10px;\n    line-height: 1.45;\n}\n\n.stats-cost-note {\n    margin-top: 7px;\n    color: #fbbf24;\n    font-size: 10px;\n    line-height: 1.4;\n}\n\n.stats-cost-note[hidden] {\n    display: none;\n}\n\n.reset-stats {\n    width: 100%;\n    margin-top: 12px;\n    padding: 7px 10px;\n    border: 1px solid rgba(211, 72, 72, 0.52);\n    border-radius: 7px;\n    background: rgba(211, 72, 72, 0.12);\n    color: #ff9d9d;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.reset-stats:hover {\n    background: rgba(211, 72, 72, 0.22);\n}\n";
 	function createPanelController({ actions, formatScheduleDuration, getState }) {
 		let panelCollapsed = loadPanelCollapsed();
 		let panelView = "control";
 		let earningsBiomeFilter = "current";
 		let earningsBaitFilter = "current";
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setCaptchaBypassEnabled, setEnabled, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBiomeEnabled, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
@@ -1004,6 +1329,24 @@
           <span class="label">点击次数</span>
           <span id="click-count" class="value">0</span>
         </div>
+
+        <div class="row">
+          <span class="label">选图状态</span>
+          <span id="auto-biome-status" class="value">等待天气数据</span>
+        </div>
+
+        <label class="option-row">
+          <span>自动换地图</span>
+          <span class="switch">
+            <input
+              id="auto-biome-toggle"
+              type="checkbox"
+              role="switch"
+              aria-label="自动换地图"
+            />
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
 
         <label class="option-row">
           <span>自动过验证</span>
@@ -1130,6 +1473,50 @@
         aria-labelledby="settings-tab"
         hidden
       >
+        <section class="settings-section">
+          <div class="settings-title">自动换地图</div>
+
+          <div
+            class="choice-list choice-list-three"
+            role="radiogroup"
+            aria-label="地图等级加权量"
+          >
+            <label class="choice-option">
+              <input
+                type="radio"
+                name="auto-biome-weight"
+                value="0"
+              />
+              <span>0%</span>
+            </label>
+            <label class="choice-option">
+              <input
+                type="radio"
+                name="auto-biome-weight"
+                value="5"
+              />
+              <span>5%</span>
+            </label>
+            <label class="choice-option">
+              <input
+                type="radio"
+                name="auto-biome-weight"
+                value="10"
+              />
+              <span>10%</span>
+            </label>
+          </div>
+
+          <div class="field-help">
+            评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+          </div>
+
+          <div class="row">
+            <span class="label">天气更新</span>
+            <span id="auto-biome-updated-at" class="value">等待接口数据</span>
+          </div>
+        </section>
+
         <section class="settings-section">
           <div class="settings-title">消息通知</div>
 
@@ -1269,6 +1656,10 @@
 				status: shadowRoot.querySelector("#status"),
 				nextDelay: shadowRoot.querySelector("#next-delay"),
 				clickCount: shadowRoot.querySelector("#click-count"),
+				autoBiomeStatus: shadowRoot.querySelector("#auto-biome-status"),
+				autoBiomeToggle: shadowRoot.querySelector("#auto-biome-toggle"),
+				autoBiomeWeightInputs: shadowRoot.querySelectorAll("input[name=\"auto-biome-weight\"]"),
+				autoBiomeUpdatedAt: shadowRoot.querySelector("#auto-biome-updated-at"),
 				pushKeyInput: shadowRoot.querySelector("#push-key"),
 				pushKeyHelp: shadowRoot.querySelector("#push-key-help"),
 				captchaBypassToggle: shadowRoot.querySelector("#captcha-bypass-toggle"),
@@ -1323,6 +1714,12 @@
 			ui.captchaBypassToggle.addEventListener("change", (event) => {
 				setCaptchaBypassEnabled(event.currentTarget.checked);
 			});
+			ui.autoBiomeToggle.addEventListener("change", (event) => {
+				setAutoBiomeEnabled(event.currentTarget.checked);
+			});
+			for (const input of ui.autoBiomeWeightInputs) input.addEventListener("change", (event) => {
+				if (event.currentTarget.checked) setAutoBiomeWeight(event.currentTarget.value);
+			});
 			ui.controlTab.addEventListener("click", () => {
 				setPanelView("control");
 			});
@@ -1360,6 +1757,7 @@
 				renderEarningsStats();
 			});
 			renderToggle();
+			renderAutoBiomeSettings();
 			renderCaptchaBypassToggle();
 			renderPanelCollapsed();
 			renderNotificationSettings();
@@ -1405,6 +1803,7 @@
 			}
 			if (panelView === "earnings") renderEarningsStats();
 			else if (panelView === "settings") {
+				renderAutoBiomeSettings();
 				renderNotificationSettings();
 				renderScheduleSettings();
 			}
@@ -1635,6 +2034,15 @@
 			ui.scheduleRestMinutes.value = String(scheduleSettings.restMinutes);
 			renderScheduleStatus();
 		}
+		function renderAutoBiomeSettings() {
+			if (!ui?.autoBiomeToggle) return;
+			const { autoBiomeLastUpdatedAt, autoBiomeSettings, autoBiomeStatus } = getState();
+			ui.autoBiomeToggle.checked = autoBiomeSettings.enabled;
+			ui.autoBiomeToggle.setAttribute("aria-checked", autoBiomeSettings.enabled ? "true" : "false");
+			ui.autoBiomeStatus.textContent = autoBiomeStatus;
+			for (const input of ui.autoBiomeWeightInputs) input.checked = Number(input.value) === autoBiomeSettings.biomeWeight;
+			ui.autoBiomeUpdatedAt.textContent = autoBiomeLastUpdatedAt ? new Date(autoBiomeLastUpdatedAt).toLocaleTimeString() : "等待接口数据";
+		}
 		function renderToggle() {
 			if (!ui?.toggle) return;
 			const { enabled } = getState();
@@ -1649,6 +2057,7 @@
 		}
 		createPanel();
 		return {
+			renderAutoBiomeSettings,
 			renderCaptchaBypassToggle,
 			renderEarningsStats,
 			renderNotificationSettings,
@@ -1665,16 +2074,19 @@
 	var pushKey = loadPushKey();
 	var notificationMode = loadNotificationMode();
 	var scheduleSettings = loadScheduleSettings();
+	var autoBiomeSettings = loadAutoBiomeSettings();
 	var earningsStats = loadEarningsStats();
 	var loopId = 0;
 	var clickCount = 0;
 	var captcha = null;
 	var panel = null;
 	var schedule = null;
+	var autoBiome = null;
 	function recordCastResult(result) {
 		earningsStats = updateEarningsStats(earningsStats, result, getCastEarningsContext(result));
 		saveEarningsStats(earningsStats);
 		panel.renderEarningsStats();
+		autoBiome?.handleCastResult(result);
 	}
 	function setPushKey(nextPushKey) {
 		pushKey = String(nextPushKey ?? "").trim();
@@ -1696,9 +2108,16 @@
 			clickCount,
 			earningsStats,
 			enabled,
+			autoBiomeSettings,
 			notificationMode,
 			pushKey,
 			scheduleSettings,
+			...autoBiome?.getSnapshot() ?? {
+				autoBiomeLastUpdatedAt: 0,
+				autoBiomeStatus: "等待天气数据",
+				autoBiomeTarget: null,
+				autoBiomeWeatherByBiome: {}
+			},
 			...schedule.getSnapshot()
 		};
 	}
@@ -1887,6 +2306,10 @@
 			const latestButton = findCastButton();
 			if (!latestButton) continue;
 			if (schedule.isWorkExpired()) continue;
+			if (autoBiome?.isSwitching()) {
+				await sleep(CONFIG.buttonPollInterval);
+				continue;
+			}
 			panel.setStatus("正在模拟点击");
 			panel.setNextDelay("—");
 			const clicked = await simulateClick(latestButton, currentLoopId);
@@ -1925,6 +2348,7 @@
 			panel.setStatus("已停止");
 			panel.setNextDelay("—");
 		}
+		autoBiome?.handleStateChanged();
 	}
 	function setCaptchaBypassEnabled(nextEnabled) {
 		captchaBypassEnabled = Boolean(nextEnabled);
@@ -1937,6 +2361,24 @@
 		saveNotificationMode(notificationMode);
 		panel.renderNotificationSettings();
 		if (notificationMode === "browser" && typeof window.Notification === "function" && window.Notification.permission === "default") requestBrowserNotificationPermission();
+	}
+	function setAutoBiomeEnabled(nextEnabled) {
+		autoBiomeSettings = {
+			...autoBiomeSettings,
+			enabled: Boolean(nextEnabled)
+		};
+		saveAutoBiomeSettings(autoBiomeSettings);
+		panel.renderAutoBiomeSettings();
+		autoBiome?.handleStateChanged();
+	}
+	function setAutoBiomeWeight(nextWeight) {
+		autoBiomeSettings = {
+			...autoBiomeSettings,
+			biomeWeight: normalizeAutoBiomeWeight(nextWeight, autoBiomeSettings.biomeWeight)
+		};
+		saveAutoBiomeSettings(autoBiomeSettings);
+		panel.renderAutoBiomeSettings();
+		autoBiome?.handleStateChanged();
 	}
 	function setScheduleEnabled(nextEnabled) {
 		scheduleSettings = {
@@ -1994,6 +2436,8 @@
 		actions: {
 			requestBrowserNotificationPermission,
 			resetEarningsStats,
+			setAutoBiomeEnabled,
+			setAutoBiomeWeight,
 			setCaptchaBypassEnabled,
 			setEnabled,
 			setNotificationMode,
@@ -2021,6 +2465,12 @@
 		setNextDelay: panel.setNextDelay,
 		setStatus: panel.setStatus
 	});
+	autoBiome = createAutoBiomeController({
+		getState: getPanelState,
+		onStateChange() {
+			panel?.renderAutoBiomeSettings();
+		}
+	});
 	installFetchInterceptor({
 		onCastResult: recordCastResult,
 		onCaptchaChallenge(challenge) {
@@ -2031,5 +2481,6 @@
 		}
 	});
 	setEnabled(enabled);
+	autoBiome.start();
 	console.info("[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。");
 })();

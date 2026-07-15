@@ -1,4 +1,5 @@
 import {
+    AUTO_BIOME_SETTINGS_STORAGE_KEY,
     CAPTCHA_BYPASS_STORAGE_KEY,
     NOTIFICATION_MODE_STORAGE_KEY,
     PANEL_COLLAPSED_STORAGE_KEY,
@@ -6,6 +7,8 @@ import {
     SCHEDULE_SETTINGS_STORAGE_KEY,
     STORAGE_KEY,
 } from './config.js';
+
+export const AUTO_BIOME_WEIGHTS = [0, 5, 10];
 
 export function loadEnabled() {
     try {
@@ -76,6 +79,51 @@ export function saveNotificationMode(value) {
         localStorage.setItem(NOTIFICATION_MODE_STORAGE_KEY, value);
     } catch (error) {
         console.warn('[自动抛竿] 无法保存通知方式：', error);
+    }
+}
+
+export function normalizeAutoBiomeWeight(value, fallback = 5) {
+    const weight = Number(value);
+
+    return AUTO_BIOME_WEIGHTS.includes(weight) ? weight : fallback;
+}
+
+export function loadAutoBiomeSettings() {
+    const defaults = {
+        enabled: false,
+        biomeWeight: 5,
+    };
+
+    try {
+        const savedSettings = JSON.parse(
+            localStorage.getItem(AUTO_BIOME_SETTINGS_STORAGE_KEY),
+        );
+
+        if (!savedSettings || typeof savedSettings !== 'object') {
+            return defaults;
+        }
+
+        return {
+            enabled: savedSettings.enabled === true,
+            biomeWeight: normalizeAutoBiomeWeight(
+                savedSettings.biomeWeight,
+                defaults.biomeWeight,
+            ),
+        };
+    } catch (error) {
+        console.warn('[自动换图] 无法读取设置：', error);
+        return defaults;
+    }
+}
+
+export function saveAutoBiomeSettings(autoBiomeSettings) {
+    try {
+        localStorage.setItem(
+            AUTO_BIOME_SETTINGS_STORAGE_KEY,
+            JSON.stringify(autoBiomeSettings),
+        );
+    } catch (error) {
+        console.warn('[自动换图] 无法保存设置：', error);
     }
 }
 

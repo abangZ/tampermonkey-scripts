@@ -17,6 +17,8 @@ export function createPanelController({
     const {
         requestBrowserNotificationPermission,
         resetEarningsStats,
+        setAutoBiomeEnabled,
+        setAutoBiomeWeight,
         setCaptchaBypassEnabled,
         setEnabled,
         setNotificationMode,
@@ -130,6 +132,24 @@ export function createPanelController({
           <span class="label">点击次数</span>
           <span id="click-count" class="value">0</span>
         </div>
+
+        <div class="row">
+          <span class="label">选图状态</span>
+          <span id="auto-biome-status" class="value">等待天气数据</span>
+        </div>
+
+        <label class="option-row">
+          <span>自动换地图</span>
+          <span class="switch">
+            <input
+              id="auto-biome-toggle"
+              type="checkbox"
+              role="switch"
+              aria-label="自动换地图"
+            />
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
 
         <label class="option-row">
           <span>自动过验证</span>
@@ -256,6 +276,50 @@ export function createPanelController({
         aria-labelledby="settings-tab"
         hidden
       >
+        <section class="settings-section">
+          <div class="settings-title">自动换地图</div>
+
+          <div
+            class="choice-list choice-list-three"
+            role="radiogroup"
+            aria-label="地图等级加权量"
+          >
+            <label class="choice-option">
+              <input
+                type="radio"
+                name="auto-biome-weight"
+                value="0"
+              />
+              <span>0%</span>
+            </label>
+            <label class="choice-option">
+              <input
+                type="radio"
+                name="auto-biome-weight"
+                value="5"
+              />
+              <span>5%</span>
+            </label>
+            <label class="choice-option">
+              <input
+                type="radio"
+                name="auto-biome-weight"
+                value="10"
+              />
+              <span>10%</span>
+            </label>
+          </div>
+
+          <div class="field-help">
+            评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+          </div>
+
+          <div class="row">
+            <span class="label">天气更新</span>
+            <span id="auto-biome-updated-at" class="value">等待接口数据</span>
+          </div>
+        </section>
+
         <section class="settings-section">
           <div class="settings-title">消息通知</div>
 
@@ -397,6 +461,14 @@ export function createPanelController({
             status: shadowRoot.querySelector('#status'),
             nextDelay: shadowRoot.querySelector('#next-delay'),
             clickCount: shadowRoot.querySelector('#click-count'),
+            autoBiomeStatus: shadowRoot.querySelector('#auto-biome-status'),
+            autoBiomeToggle: shadowRoot.querySelector('#auto-biome-toggle'),
+            autoBiomeWeightInputs: shadowRoot.querySelectorAll(
+                'input[name="auto-biome-weight"]',
+            ),
+            autoBiomeUpdatedAt: shadowRoot.querySelector(
+                '#auto-biome-updated-at',
+            ),
             pushKeyInput: shadowRoot.querySelector('#push-key'),
             pushKeyHelp: shadowRoot.querySelector('#push-key-help'),
             captchaBypassToggle: shadowRoot.querySelector(
@@ -475,6 +547,18 @@ export function createPanelController({
             setCaptchaBypassEnabled(event.currentTarget.checked);
         });
 
+        ui.autoBiomeToggle.addEventListener('change', (event) => {
+            setAutoBiomeEnabled(event.currentTarget.checked);
+        });
+
+        for (const input of ui.autoBiomeWeightInputs) {
+            input.addEventListener('change', (event) => {
+                if (event.currentTarget.checked) {
+                    setAutoBiomeWeight(event.currentTarget.value);
+                }
+            });
+        }
+
         ui.controlTab.addEventListener('click', () => {
             setPanelView('control');
         });
@@ -528,6 +612,7 @@ export function createPanelController({
         });
 
         renderToggle();
+        renderAutoBiomeSettings();
         renderCaptchaBypassToggle();
         renderPanelCollapsed();
         renderNotificationSettings();
@@ -589,6 +674,7 @@ export function createPanelController({
         if (panelView === 'earnings') {
             renderEarningsStats();
         } else if (panelView === 'settings') {
+            renderAutoBiomeSettings();
             renderNotificationSettings();
             renderScheduleSettings();
         }
@@ -1047,6 +1133,31 @@ export function createPanelController({
         renderScheduleStatus();
     }
 
+    function renderAutoBiomeSettings() {
+        if (!ui?.autoBiomeToggle) {
+            return;
+        }
+
+        const { autoBiomeLastUpdatedAt, autoBiomeSettings, autoBiomeStatus } =
+            getState();
+
+        ui.autoBiomeToggle.checked = autoBiomeSettings.enabled;
+        ui.autoBiomeToggle.setAttribute(
+            'aria-checked',
+            autoBiomeSettings.enabled ? 'true' : 'false',
+        );
+        ui.autoBiomeStatus.textContent = autoBiomeStatus;
+
+        for (const input of ui.autoBiomeWeightInputs) {
+            input.checked =
+                Number(input.value) === autoBiomeSettings.biomeWeight;
+        }
+
+        ui.autoBiomeUpdatedAt.textContent = autoBiomeLastUpdatedAt
+            ? new Date(autoBiomeLastUpdatedAt).toLocaleTimeString()
+            : '等待接口数据';
+    }
+
     function renderToggle() {
         if (!ui?.toggle) {
             return;
@@ -1075,6 +1186,7 @@ export function createPanelController({
     createPanel();
 
     return {
+        renderAutoBiomeSettings,
         renderCaptchaBypassToggle,
         renderEarningsStats,
         renderNotificationSettings,

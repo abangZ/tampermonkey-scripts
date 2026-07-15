@@ -7,6 +7,7 @@
 
 'use strict';
 
+import { createAutoBiomeController } from './auto-biome.js';
 import { createCaptchaController } from './captcha.js';
 import { CONFIG } from './config.js';
 import { createCooldownWatchdog, isCooldownButton } from './cooldown.js';
@@ -27,12 +28,15 @@ import {
     formatScheduleDuration,
 } from './schedule.js';
 import {
+    loadAutoBiomeSettings,
     loadCaptchaBypassEnabled,
     loadEnabled,
     loadNotificationMode,
     loadPushKey,
     loadScheduleSettings,
+    normalizeAutoBiomeWeight,
     normalizeScheduleMinutes,
+    saveAutoBiomeSettings,
     saveCaptchaBypassEnabled,
     saveEnabled,
     saveNotificationMode,
@@ -48,12 +52,14 @@ let captchaBypassEnabled = loadCaptchaBypassEnabled();
 let pushKey = loadPushKey();
 let notificationMode = loadNotificationMode();
 let scheduleSettings = loadScheduleSettings();
+let autoBiomeSettings = loadAutoBiomeSettings();
 let earningsStats = loadEarningsStats();
 let loopId = 0;
 let clickCount = 0;
 let captcha = null;
 let panel = null;
 let schedule = null;
+let autoBiome = null;
 
 function recordCastResult(result) {
     earningsStats = updateEarningsStats(
@@ -63,6 +69,7 @@ function recordCastResult(result) {
     );
     saveEarningsStats(earningsStats);
     panel.renderEarningsStats();
+    autoBiome?.handleCastResult(result);
 }
 
 function setPushKey(nextPushKey) {
@@ -91,9 +98,16 @@ function getPanelState() {
         clickCount,
         earningsStats,
         enabled,
+        autoBiomeSettings,
         notificationMode,
         pushKey,
         scheduleSettings,
+        ...(autoBiome?.getSnapshot() ?? {
+            autoBiomeLastUpdatedAt: 0,
+            autoBiomeStatus: '等待天气数据',
+            autoBiomeTarget: null,
+            autoBiomeWeatherByBiome: {},
+        }),
         ...schedule.getSnapshot(),
     };
 }
@@ -473,6 +487,11 @@ async function runLoop(currentLoopId) {
             continue;
         }
 
+        if (autoBiome?.isSwitching()) {
+            await sleep(CONFIG.buttonPollInterval);
+            continue;
+        }
+
         panel.setStatus('正在模拟点击');
         panel.setNextDelay('—');
 
@@ -546,6 +565,8 @@ function setEnabled(nextEnabled) {
         panel.setStatus('已停止');
         panel.setNextDelay('—');
     }
+
+    autoBiome?.handleStateChanged();
 }
 
 function setCaptchaBypassEnabled(nextEnabled) {
@@ -568,6 +589,29 @@ function setNotificationMode(nextMode) {
     ) {
         void requestBrowserNotificationPermission();
     }
+}
+
+function setAutoBiomeEnabled(nextEnabled) {
+    autoBiomeSettings = {
+        ...autoBiomeSettings,
+        enabled: Boolean(nextEnabled),
+    };
+    saveAutoBiomeSettings(autoBiomeSettings);
+    panel.renderAutoBiomeSettings();
+    autoBiome?.handleStateChanged();
+}
+
+function setAutoBiomeWeight(nextWeight) {
+    autoBiomeSettings = {
+        ...autoBiomeSettings,
+        biomeWeight: normalizeAutoBiomeWeight(
+            nextWeight,
+            autoBiomeSettings.biomeWeight,
+        ),
+    };
+    saveAutoBiomeSettings(autoBiomeSettings);
+    panel.renderAutoBiomeSettings();
+    autoBiome?.handleStateChanged();
 }
 
 function setScheduleEnabled(nextEnabled) {
@@ -659,6 +703,8 @@ panel = createPanelController({
     actions: {
         requestBrowserNotificationPermission,
         resetEarningsStats,
+        setAutoBiomeEnabled,
+        setAutoBiomeWeight,
         setCaptchaBypassEnabled,
         setEnabled,
         setNotificationMode,
@@ -688,6 +734,13 @@ captcha = createCaptchaController({
     setStatus: panel.setStatus,
 });
 
+autoBiome = createAutoBiomeController({
+    getState: getPanelState,
+    onStateChange() {
+        panel?.renderAutoBiomeSettings();
+    },
+});
+
 installFetchInterceptor({
     onCastResult: recordCastResult,
     onCaptchaChallenge(challenge) {
@@ -700,5 +753,6 @@ installFetchInterceptor({
 
 // 第一次安装默认关闭；之后恢复上次保存的状态
 setEnabled(enabled);
+autoBiome.start();
 
 console.info('[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。');
