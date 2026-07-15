@@ -1,4 +1,5 @@
 import {
+    AUTO_BAIT_SETTINGS_STORAGE_KEY,
     AUTO_BIOME_SETTINGS_STORAGE_KEY,
     CAPTCHA_BYPASS_STORAGE_KEY,
     NOTIFICATION_MODE_STORAGE_KEY,
@@ -9,6 +10,8 @@ import {
 } from './config.js';
 
 export const AUTO_BIOME_WEIGHTS = [0, 5, 10];
+export const AUTO_BAIT_GRADES = ['default', 'low', 'medium', 'high', 'super'];
+export const AUTO_BAIT_PURCHASE_QUANTITIES = [100, 1000];
 
 export function loadEnabled() {
     try {
@@ -124,6 +127,77 @@ export function saveAutoBiomeSettings(autoBiomeSettings) {
         );
     } catch (error) {
         console.warn('[自动换图] 无法保存设置：', error);
+    }
+}
+
+export function normalizeAutoBaitGrade(value, fallback = 'low') {
+    return AUTO_BAIT_GRADES.includes(value) ? value : fallback;
+}
+
+export function normalizeAutoBaitMinimumQuantity(value, fallback = 100) {
+    const quantity = Number(value);
+
+    if (!Number.isFinite(quantity) || quantity < 100) {
+        return fallback;
+    }
+
+    return Math.min(100000, Math.round(quantity / 100) * 100);
+}
+
+export function normalizeAutoBaitPurchaseQuantity(value, fallback = 100) {
+    const quantity = Number(value);
+
+    return AUTO_BAIT_PURCHASE_QUANTITIES.includes(quantity)
+        ? quantity
+        : fallback;
+}
+
+export function loadAutoBaitSettings() {
+    const defaults = {
+        baitGrade: 'low',
+        enabled: false,
+        minimumQuantity: 100,
+        purchaseQuantity: 100,
+    };
+
+    try {
+        const savedSettings = JSON.parse(
+            localStorage.getItem(AUTO_BAIT_SETTINGS_STORAGE_KEY),
+        );
+
+        if (!savedSettings || typeof savedSettings !== 'object') {
+            return defaults;
+        }
+
+        return {
+            baitGrade: normalizeAutoBaitGrade(
+                savedSettings.baitGrade,
+                defaults.baitGrade,
+            ),
+            enabled: savedSettings.enabled === true,
+            minimumQuantity: normalizeAutoBaitMinimumQuantity(
+                savedSettings.minimumQuantity,
+                defaults.minimumQuantity,
+            ),
+            purchaseQuantity: normalizeAutoBaitPurchaseQuantity(
+                savedSettings.purchaseQuantity,
+                defaults.purchaseQuantity,
+            ),
+        };
+    } catch (error) {
+        console.warn('[自动买鱼饵] 无法读取设置：', error);
+        return defaults;
+    }
+}
+
+export function saveAutoBaitSettings(autoBaitSettings) {
+    try {
+        localStorage.setItem(
+            AUTO_BAIT_SETTINGS_STORAGE_KEY,
+            JSON.stringify(autoBaitSettings),
+        );
+    } catch (error) {
+        console.warn('[自动买鱼饵] 无法保存设置：', error);
     }
 }
 

@@ -147,10 +147,10 @@ function getErrorMessage(error) {
     return String(error?.message ?? error ?? '未知错误');
 }
 
-async function autoEquipForBiome(player, target) {
+async function autoEquipForBiome(player, target, { skipBait = false } = {}) {
     const api = window.ApiService;
 
-    if (target.baitId && target.baitId !== player.equippedBait) {
+    if (!skipBait && target.baitId && target.baitId !== player.equippedBait) {
         try {
             await api.equipBait(target.baitId);
         } catch (error) {
@@ -195,7 +195,11 @@ function getNextHourlyRefreshDelay(now = new Date()) {
     return Math.max(1000, nextRefresh.getTime() - now.getTime());
 }
 
-export function createAutoBiomeController({ getState, onStateChange }) {
+export function createAutoBiomeController({
+    getState,
+    onBiomeReady,
+    onStateChange,
+}) {
     let evaluationId = 0;
     let eventSource = null;
     let fallbackTimer = null;
@@ -222,6 +226,14 @@ export function createAutoBiomeController({ getState, onStateChange }) {
             autoBiomeTarget: target,
             autoBiomeWeatherByBiome: weatherByBiome,
         };
+    }
+
+    async function notifyBiomeReady(biomeId) {
+        try {
+            await onBiomeReady?.(biomeId);
+        } catch (error) {
+            console.warn('[自动换图] 切图后的鱼饵检查失败：', error);
+        }
     }
 
     async function loadAllWeather() {
@@ -315,7 +327,7 @@ export function createAutoBiomeController({ getState, onStateChange }) {
 
     async function evaluateBestBiome() {
         const currentEvaluationId = ++evaluationId;
-        const { autoBiomeSettings, enabled } = getState();
+        const { autoBaitSettings, autoBiomeSettings, enabled } = getState();
 
         if (!autoBiomeSettings.enabled) {
             target = null;
@@ -365,6 +377,7 @@ export function createAutoBiomeController({ getState, onStateChange }) {
         if (player?.boat) {
             target = null;
             setStatus('组队中暂不自动换图');
+            await notifyBiomeReady(normalizeBiomeId(player.currentBiome));
             return;
         }
 
@@ -376,6 +389,7 @@ export function createAutoBiomeController({ getState, onStateChange }) {
 
         if (!target) {
             setStatus('没有可用的已解锁地图数据');
+            await notifyBiomeReady(normalizeBiomeId(player.currentBiome));
             return;
         }
 
@@ -384,6 +398,7 @@ export function createAutoBiomeController({ getState, onStateChange }) {
 
         if (normalizeBiomeId(player.currentBiome) === target.biomeId) {
             setStatus(`已在 ${summary}`);
+            await notifyBiomeReady(target.biomeId);
             return;
         }
 
@@ -397,8 +412,11 @@ export function createAutoBiomeController({ getState, onStateChange }) {
                 throw new Error(result?.message ?? '游戏未确认切图成功');
             }
 
-            await autoEquipForBiome(player, target);
+            await autoEquipForBiome(player, target, {
+                skipBait: autoBaitSettings?.enabled === true,
+            });
             setStatus(`已切换到 ${targetLabel}，等待下一竿同步页面`);
+            await notifyBiomeReady(target.biomeId);
         } catch (error) {
             console.error('[自动换图] 切换地图失败：', error);
             setStatus(`切图失败：${getErrorMessage(error)}`);
@@ -408,7 +426,7 @@ export function createAutoBiomeController({ getState, onStateChange }) {
     }
 
     function handleStateChanged() {
-        void evaluateBestBiome();
+        return evaluateBestBiome();
     }
 
     function handleCastResult(result) {

@@ -8,6 +8,7 @@
 'use strict';
 
 import { createAutoBiomeController } from './auto-biome.js';
+import { createAutoBaitController } from './auto-bait.js';
 import { createCaptchaController } from './captcha.js';
 import { CONFIG } from './config.js';
 import { createCooldownWatchdog, isCooldownButton } from './cooldown.js';
@@ -28,14 +29,19 @@ import {
     formatScheduleDuration,
 } from './schedule.js';
 import {
+    loadAutoBaitSettings,
     loadAutoBiomeSettings,
     loadCaptchaBypassEnabled,
     loadEnabled,
     loadNotificationMode,
     loadPushKey,
     loadScheduleSettings,
+    normalizeAutoBaitGrade,
+    normalizeAutoBaitMinimumQuantity,
+    normalizeAutoBaitPurchaseQuantity,
     normalizeAutoBiomeWeight,
     normalizeScheduleMinutes,
+    saveAutoBaitSettings,
     saveAutoBiomeSettings,
     saveCaptchaBypassEnabled,
     saveEnabled,
@@ -53,6 +59,7 @@ let pushKey = loadPushKey();
 let notificationMode = loadNotificationMode();
 let scheduleSettings = loadScheduleSettings();
 let autoBiomeSettings = loadAutoBiomeSettings();
+let autoBaitSettings = loadAutoBaitSettings();
 let earningsStats = loadEarningsStats();
 let loopId = 0;
 let clickCount = 0;
@@ -60,6 +67,8 @@ let captcha = null;
 let panel = null;
 let schedule = null;
 let autoBiome = null;
+let autoBait = null;
+let forceNextAutoBaitCheck = false;
 
 function recordCastResult(result) {
     earningsStats = updateEarningsStats(
@@ -70,6 +79,7 @@ function recordCastResult(result) {
     saveEarningsStats(earningsStats);
     panel.renderEarningsStats();
     autoBiome?.handleCastResult(result);
+    autoBait?.handleCastResult(result);
 }
 
 function setPushKey(nextPushKey) {
@@ -98,6 +108,7 @@ function getPanelState() {
         clickCount,
         earningsStats,
         enabled,
+        autoBaitSettings,
         autoBiomeSettings,
         notificationMode,
         pushKey,
@@ -108,8 +119,29 @@ function getPanelState() {
             autoBiomeTarget: null,
             autoBiomeWeatherByBiome: {},
         }),
+        ...(autoBait?.getSnapshot() ?? {
+            autoBaitCurrentBaitId: null,
+            autoBaitCurrentQuantity: null,
+            autoBaitLastCheckedAt: 0,
+            autoBaitLastPurchasedAt: 0,
+            autoBaitStatus: '未启用',
+        }),
         ...schedule.getSnapshot(),
     };
+}
+
+function handleAutomationStateChanged({ forceBait = false } = {}) {
+    forceNextAutoBaitCheck ||= forceBait;
+    const biomeUpdate = autoBiome?.handleStateChanged();
+
+    if (!enabled || !autoBiomeSettings.enabled) {
+        void Promise.resolve(biomeUpdate).then(() => {
+            const force = forceNextAutoBaitCheck;
+
+            forceNextAutoBaitCheck = false;
+            return autoBait?.handleStateChanged({ force });
+        });
+    }
 }
 
 /**
@@ -487,7 +519,7 @@ async function runLoop(currentLoopId) {
             continue;
         }
 
-        if (autoBiome?.isSwitching()) {
+        if (autoBiome?.isSwitching() || autoBait?.isChecking()) {
             await sleep(CONFIG.buttonPollInterval);
             continue;
         }
@@ -566,7 +598,7 @@ function setEnabled(nextEnabled) {
         panel.setNextDelay('—');
     }
 
-    autoBiome?.handleStateChanged();
+    handleAutomationStateChanged();
 }
 
 function setCaptchaBypassEnabled(nextEnabled) {
@@ -598,7 +630,7 @@ function setAutoBiomeEnabled(nextEnabled) {
     };
     saveAutoBiomeSettings(autoBiomeSettings);
     panel.renderAutoBiomeSettings();
-    autoBiome?.handleStateChanged();
+    handleAutomationStateChanged();
 }
 
 function setAutoBiomeWeight(nextWeight) {
@@ -611,7 +643,48 @@ function setAutoBiomeWeight(nextWeight) {
     };
     saveAutoBiomeSettings(autoBiomeSettings);
     panel.renderAutoBiomeSettings();
-    autoBiome?.handleStateChanged();
+    handleAutomationStateChanged();
+}
+
+function updateAutoBaitSettings(nextSettings) {
+    autoBaitSettings = {
+        ...autoBaitSettings,
+        ...nextSettings,
+    };
+    saveAutoBaitSettings(autoBaitSettings);
+    panel.renderAutoBaitSettings();
+    handleAutomationStateChanged({ forceBait: true });
+}
+
+function setAutoBaitEnabled(nextEnabled) {
+    updateAutoBaitSettings({ enabled: Boolean(nextEnabled) });
+}
+
+function setAutoBaitGrade(nextGrade) {
+    updateAutoBaitSettings({
+        baitGrade: normalizeAutoBaitGrade(
+            nextGrade,
+            autoBaitSettings.baitGrade,
+        ),
+    });
+}
+
+function setAutoBaitMinimumQuantity(nextQuantity) {
+    updateAutoBaitSettings({
+        minimumQuantity: normalizeAutoBaitMinimumQuantity(
+            nextQuantity,
+            autoBaitSettings.minimumQuantity,
+        ),
+    });
+}
+
+function setAutoBaitPurchaseQuantity(nextQuantity) {
+    updateAutoBaitSettings({
+        purchaseQuantity: normalizeAutoBaitPurchaseQuantity(
+            nextQuantity,
+            autoBaitSettings.purchaseQuantity,
+        ),
+    });
 }
 
 function setScheduleEnabled(nextEnabled) {
@@ -703,6 +776,10 @@ panel = createPanelController({
     actions: {
         requestBrowserNotificationPermission,
         resetEarningsStats,
+        setAutoBaitEnabled,
+        setAutoBaitGrade,
+        setAutoBaitMinimumQuantity,
+        setAutoBaitPurchaseQuantity,
         setAutoBiomeEnabled,
         setAutoBiomeWeight,
         setCaptchaBypassEnabled,
@@ -734,8 +811,21 @@ captcha = createCaptchaController({
     setStatus: panel.setStatus,
 });
 
+autoBait = createAutoBaitController({
+    getState: getPanelState,
+    onStateChange() {
+        panel?.renderAutoBaitSettings();
+    },
+});
+
 autoBiome = createAutoBiomeController({
     getState: getPanelState,
+    onBiomeReady(biomeId) {
+        const force = forceNextAutoBaitCheck;
+
+        forceNextAutoBaitCheck = false;
+        return autoBait?.checkNow({ biomeId, force });
+    },
     onStateChange() {
         panel?.renderAutoBiomeSettings();
     },

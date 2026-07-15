@@ -72,6 +72,38 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         assert.ok(host.shadowRoot);
         assert.match(host.shadowRoot.textContent, /自动抛竿/);
         assert.ok(host.shadowRoot.querySelector('#auto-biome-toggle'));
+        assert.ok(host.shadowRoot.querySelector('#auto-bait-toggle'));
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-bait-status').textContent,
+            '未启用',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-bait-grade').value,
+            'low',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-bait-minimum-quantity').value,
+            '100',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-bait-purchase-quantity').value,
+            '100',
+        );
+
+        const autoBaitToggle =
+            host.shadowRoot.querySelector('#auto-bait-toggle');
+
+        autoBaitToggle.click();
+        await Promise.resolve();
+        await Promise.resolve();
+        assert.equal(autoBaitToggle.checked, true);
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-bait-status').textContent,
+            '脚本启动后自动检查',
+        );
+
+        autoBaitToggle.click();
+        await Promise.resolve();
         assert.equal(
             host.shadowRoot.querySelector('#auto-biome-status').textContent,
             '未启用',

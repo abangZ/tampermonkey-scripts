@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.1.0
+// @version      2.2.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -34,7 +34,7 @@
 		gold_breeze: "黄金微风",
 		arcane_surge: "奥术涌动"
 	};
-	function normalizeBiomeId(value) {
+	function normalizeBiomeId$1(value) {
 		const biomeId = Number(value);
 		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
 	}
@@ -47,7 +47,7 @@
 		if (!source || typeof source !== "object" || Array.isArray(source)) return {};
 		const weatherByBiome = {};
 		for (const [rawBiomeId, rawWeather] of Object.entries(source)) {
-			const biomeId = normalizeBiomeId(rawBiomeId);
+			const biomeId = normalizeBiomeId$1(rawBiomeId);
 			if (!biomeId || !rawWeather || typeof rawWeather !== "object") continue;
 			weatherByBiome[biomeId] = {
 				weather: String(rawWeather.weather ?? "clear"),
@@ -57,7 +57,7 @@
 		return weatherByBiome;
 	}
 	function getBiomeScore(biomeId, xpBonus, biomeWeight) {
-		const normalizedBiomeId = normalizeBiomeId(biomeId) ?? 1;
+		const normalizedBiomeId = normalizeBiomeId$1(biomeId) ?? 1;
 		return normalizeXpBonus(xpBonus) + (normalizedBiomeId - 1) * normalizeXpBonus(biomeWeight);
 	}
 	function findAvailableBaitForBiome(player, biomeId) {
@@ -83,7 +83,7 @@
 		const unlockedBiomes = Array.isArray(player?.unlockedBiomes) ? player.unlockedBiomes : [player?.currentBiome ?? 1];
 		const candidates = [];
 		for (const rawBiomeId of unlockedBiomes) {
-			const biomeId = normalizeBiomeId(rawBiomeId);
+			const biomeId = normalizeBiomeId$1(rawBiomeId);
 			const weather = weatherByBiome?.[biomeId];
 			if (!biomeId || !weather) continue;
 			candidates.push({
@@ -111,12 +111,12 @@
 		const signedXpBonus = target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
 		return `${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
 	}
-	function getErrorMessage(error) {
+	function getErrorMessage$1(error) {
 		return String(error?.message ?? error ?? "未知错误");
 	}
-	async function autoEquipForBiome(player, target) {
+	async function autoEquipForBiome(player, target, { skipBait = false } = {}) {
 		const api = window.ApiService;
-		if (target.baitId && target.baitId !== player.equippedBait) try {
+		if (!skipBait && target.baitId && target.baitId !== player.equippedBait) try {
 			await api.equipBait(target.baitId);
 		} catch (error) {
 			console.warn("[自动换图] 无法自动装备目标地图鱼饵：", error);
@@ -143,7 +143,7 @@
 		nextRefresh.setHours(now.getHours() + 1, 0, 5, 0);
 		return Math.max(1e3, nextRefresh.getTime() - now.getTime());
 	}
-	function createAutoBiomeController({ getState, onStateChange }) {
+	function createAutoBiomeController({ getState, onBiomeReady, onStateChange }) {
 		let evaluationId = 0;
 		let eventSource = null;
 		let fallbackTimer = null;
@@ -167,6 +167,13 @@
 				autoBiomeTarget: target,
 				autoBiomeWeatherByBiome: weatherByBiome
 			};
+		}
+		async function notifyBiomeReady(biomeId) {
+			try {
+				await onBiomeReady?.(biomeId);
+			} catch (error) {
+				console.warn("[自动换图] 切图后的鱼饵检查失败：", error);
+			}
 		}
 		async function loadAllWeather() {
 			if (typeof window.ApiService?.getAllBiomeWeather === "function") return window.ApiService.getAllBiomeWeather();
@@ -223,7 +230,7 @@
 		}
 		async function evaluateBestBiome() {
 			const currentEvaluationId = ++evaluationId;
-			const { autoBiomeSettings, enabled } = getState();
+			const { autoBaitSettings, autoBiomeSettings, enabled } = getState();
 			if (!autoBiomeSettings.enabled) {
 				target = null;
 				setStatus("未启用");
@@ -256,6 +263,7 @@
 			if (player?.boat) {
 				target = null;
 				setStatus("组队中暂不自动换图");
+				await notifyBiomeReady(normalizeBiomeId$1(player.currentBiome));
 				return;
 			}
 			target = selectBestBiome({
@@ -265,12 +273,14 @@
 			});
 			if (!target) {
 				setStatus("没有可用的已解锁地图数据");
+				await notifyBiomeReady(normalizeBiomeId$1(player.currentBiome));
 				return;
 			}
 			const targetLabel = formatBiomeTarget(target);
 			const summary = formatTargetSummary(target);
-			if (normalizeBiomeId(player.currentBiome) === target.biomeId) {
+			if (normalizeBiomeId$1(player.currentBiome) === target.biomeId) {
 				setStatus(`已在 ${summary}`);
+				await notifyBiomeReady(target.biomeId);
 				return;
 			}
 			switching = true;
@@ -278,20 +288,21 @@
 			try {
 				const result = await api.changeBiome(target.biomeId);
 				if (result?.success !== true) throw new Error(result?.message ?? "游戏未确认切图成功");
-				await autoEquipForBiome(player, target);
+				await autoEquipForBiome(player, target, { skipBait: autoBaitSettings?.enabled === true });
 				setStatus(`已切换到 ${targetLabel}，等待下一竿同步页面`);
+				await notifyBiomeReady(target.biomeId);
 			} catch (error) {
 				console.error("[自动换图] 切换地图失败：", error);
-				setStatus(`切图失败：${getErrorMessage(error)}`);
+				setStatus(`切图失败：${getErrorMessage$1(error)}`);
 			} finally {
 				switching = false;
 			}
 		}
 		function handleStateChanged() {
-			evaluateBestBiome();
+			return evaluateBestBiome();
 		}
 		function handleCastResult(result) {
-			if (target && normalizeBiomeId(result?.currentBiome) === target.biomeId) setStatus(`已在 ${formatTargetSummary(target)}`);
+			if (target && normalizeBiomeId$1(result?.currentBiome) === target.biomeId) setStatus(`已在 ${formatTargetSummary(target)}`);
 		}
 		function start() {
 			connectWeatherStream();
@@ -312,6 +323,212 @@
 			},
 			refreshWeather,
 			start
+		};
+	}
+	var DEFAULT_BAIT_ID = "bait_default";
+	var PURCHASE_RETRY_DELAY = 6e4;
+	var BAIT_GRADE_LABELS = {
+		default: "默认饵",
+		low: "低级饵",
+		medium: "中级饵（+250 幸运）",
+		high: "高级饵（+500 幸运）",
+		super: "超级饵（+1000 幸运）"
+	};
+	function normalizeBiomeId(value) {
+		const biomeId = Number(value);
+		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
+	}
+	function normalizeQuantity(value) {
+		const quantity = Number(value);
+		return Number.isFinite(quantity) && quantity >= 0 ? Math.floor(quantity) : 0;
+	}
+	function getBaitIdForBiome(biomeId, baitGrade) {
+		if (baitGrade === "default") return DEFAULT_BAIT_ID;
+		const normalizedBiomeId = normalizeBiomeId(biomeId);
+		return normalizedBiomeId ? `bait_${normalizedBiomeId}_${baitGrade}` : null;
+	}
+	function shouldPurchaseBait(quantity, minimumQuantity, baitGrade) {
+		return baitGrade !== "default" && normalizeQuantity(quantity) < normalizeQuantity(minimumQuantity);
+	}
+	function getBaitById$1(baitId) {
+		if (typeof window.getBaitById === "function") try {
+			const bait = window.getBaitById(baitId);
+			if (bait) return bait;
+		} catch {}
+		return Array.isArray(window.BAITS) ? window.BAITS.find((bait) => bait?.id === baitId) : null;
+	}
+	function getBaitLabel(baitId, baitGrade, biomeId) {
+		const catalogName = String(getBaitById$1(baitId)?.name ?? "").trim();
+		const gradeLabel = BAIT_GRADE_LABELS[baitGrade] ?? baitGrade;
+		if (baitGrade === "default") return catalogName ? `${gradeLabel}（${catalogName}）` : gradeLabel;
+		return `[B${biomeId}] ${gradeLabel}${catalogName ? `（${catalogName}）` : ""}`;
+	}
+	function getErrorMessage(error) {
+		return String(error?.message ?? error ?? "未知错误");
+	}
+	function createAutoBaitController({ getState, onStateChange }) {
+		let checking = false;
+		let currentBaitId = null;
+		let currentQuantity = null;
+		let lastCheckedAt = 0;
+		let lastPurchasedAt = 0;
+		let retryAfter = 0;
+		let retryBaitId = null;
+		let status = "未启用";
+		let checkQueue = Promise.resolve();
+		function notifyStateChanged() {
+			onStateChange?.();
+		}
+		function updateSnapshot({ baitId, quantity, nextStatus }) {
+			if (baitId !== void 0) currentBaitId = baitId;
+			if (quantity !== void 0) currentQuantity = quantity;
+			if (nextStatus !== void 0) status = nextStatus;
+			notifyStateChanged();
+		}
+		function getSnapshot() {
+			return {
+				autoBaitCurrentBaitId: currentBaitId,
+				autoBaitCurrentQuantity: currentQuantity,
+				autoBaitLastCheckedAt: lastCheckedAt,
+				autoBaitLastPurchasedAt: lastPurchasedAt,
+				autoBaitStatus: status
+			};
+		}
+		async function equipBait(api, player, baitId, baitLabel) {
+			if (player.equippedBait === baitId) return;
+			const result = await api.equipBait(baitId);
+			if (result?.success !== true) throw new Error(result?.message ?? `无法装备${baitLabel}`);
+		}
+		async function evaluate({ biomeId: requestedBiomeId = null, force = false }) {
+			const { autoBaitSettings, enabled } = getState();
+			if (!autoBaitSettings.enabled) {
+				updateSnapshot({
+					baitId: null,
+					quantity: null,
+					nextStatus: "未启用"
+				});
+				return;
+			}
+			if (!enabled) {
+				updateSnapshot({
+					baitId: null,
+					quantity: null,
+					nextStatus: "脚本启动后自动检查"
+				});
+				return;
+			}
+			const requestedBaitId = getBaitIdForBiome(requestedBiomeId, autoBaitSettings.baitGrade);
+			if (!force && requestedBaitId && requestedBaitId === retryBaitId && Date.now() < retryAfter) return;
+			const api = window.ApiService;
+			if (typeof api?.getPlayerData !== "function" || typeof api?.equipBait !== "function" || autoBaitSettings.baitGrade !== "default" && typeof api?.buyBait !== "function") {
+				updateSnapshot({ nextStatus: "等待游戏鱼饵接口" });
+				return;
+			}
+			checking = true;
+			updateSnapshot({ nextStatus: "正在检查鱼饵库存" });
+			try {
+				const player = await api.getPlayerData();
+				const biomeId = normalizeBiomeId(requestedBiomeId) ?? normalizeBiomeId(player?.currentBiome);
+				const baitId = getBaitIdForBiome(biomeId, autoBaitSettings.baitGrade);
+				if (!baitId) throw new Error("无法识别当前地图");
+				const baitLabel = getBaitLabel(baitId, autoBaitSettings.baitGrade, biomeId);
+				lastCheckedAt = Date.now();
+				if (autoBaitSettings.baitGrade === "default") {
+					await equipBait(api, player, baitId, baitLabel);
+					retryAfter = 0;
+					retryBaitId = null;
+					updateSnapshot({
+						baitId,
+						quantity: null,
+						nextStatus: `${baitLabel} · 无限`
+					});
+					return;
+				}
+				let quantity = normalizeQuantity(player?.baitInventory?.[baitId]);
+				let purchased = false;
+				if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, autoBaitSettings.baitGrade)) {
+					const bait = getBaitById$1(baitId);
+					const totalCost = Number(bait?.price) * autoBaitSettings.purchaseQuantity;
+					if (Number.isFinite(totalCost) && totalCost > Number(player?.gold ?? 0)) {
+						if (quantity > 0) await equipBait(api, player, baitId, baitLabel);
+						retryBaitId = baitId;
+						retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
+						updateSnapshot({
+							baitId,
+							quantity,
+							nextStatus: `${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币`
+						});
+						return;
+					}
+					updateSnapshot({
+						baitId,
+						quantity,
+						nextStatus: `正在购买 ${baitLabel} ×${autoBaitSettings.purchaseQuantity}`
+					});
+					const result = await api.buyBait(baitId, autoBaitSettings.purchaseQuantity);
+					if (result?.success !== true) throw new Error(result?.message ?? "游戏未确认购买成功");
+					quantity = Number.isFinite(Number(result.newBaitQuantity)) ? normalizeQuantity(result.newBaitQuantity) : quantity + autoBaitSettings.purchaseQuantity;
+					lastPurchasedAt = Date.now();
+					purchased = true;
+				}
+				await equipBait(api, player, baitId, baitLabel);
+				retryAfter = 0;
+				retryBaitId = null;
+				updateSnapshot({
+					baitId,
+					quantity,
+					nextStatus: purchased ? `已购买 ${baitLabel}，当前 ${quantity.toLocaleString()} 个` : `${baitLabel} · ${quantity.toLocaleString()} 个`
+				});
+			} catch (error) {
+				console.error("[自动买鱼饵] 检查或购买失败：", error);
+				retryBaitId = requestedBaitId ?? currentBaitId;
+				retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
+				updateSnapshot({ nextStatus: `鱼饵处理失败：${getErrorMessage(error)}` });
+			} finally {
+				checking = false;
+			}
+		}
+		function checkNow(options = {}) {
+			checkQueue = checkQueue.then(() => evaluate(options), () => evaluate(options));
+			return checkQueue;
+		}
+		function handleCastResult(result) {
+			const { autoBaitSettings, enabled } = getState();
+			if (!autoBaitSettings.enabled || !enabled) return;
+			const biomeId = normalizeBiomeId(result?.currentBiome);
+			const baitId = getBaitIdForBiome(biomeId, autoBaitSettings.baitGrade);
+			if (!baitId) return;
+			if (result?.equippedBait !== baitId) {
+				checkNow({ biomeId });
+				return;
+			}
+			lastCheckedAt = Date.now();
+			if (autoBaitSettings.baitGrade === "default") {
+				updateSnapshot({
+					baitId,
+					quantity: null,
+					nextStatus: `${BAIT_GRADE_LABELS.default} · 无限`
+				});
+				return;
+			}
+			const quantity = normalizeQuantity(result?.baitQuantity);
+			updateSnapshot({
+				baitId,
+				quantity,
+				nextStatus: `${getBaitLabel(baitId, autoBaitSettings.baitGrade, biomeId)} · ${quantity.toLocaleString()} 个`
+			});
+			if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, autoBaitSettings.baitGrade)) checkNow({ biomeId });
+		}
+		return {
+			checkNow,
+			getSnapshot,
+			handleCastResult,
+			handleStateChanged(options = {}) {
+				return checkNow(options);
+			},
+			isChecking() {
+				return checking;
+			}
 		};
 	}
 	var CONFIG = {
@@ -341,6 +558,7 @@
 	var NOTIFICATION_MODE_STORAGE_KEY = "arcane-angler-notification-mode-v1";
 	var SCHEDULE_SETTINGS_STORAGE_KEY = "arcane-angler-schedule-settings-v1";
 	var AUTO_BIOME_SETTINGS_STORAGE_KEY = "arcane-angler-auto-biome-settings-v1";
+	var AUTO_BAIT_SETTINGS_STORAGE_KEY = "arcane-angler-auto-bait-settings-v1";
 	var PANEL_COLLAPSED_STORAGE_KEY = "arcane-angler-panel-collapsed-v1";
 	var EARNINGS_STORAGE_KEY = "arcane-angler-earnings-v1";
 	var PANEL_ID = "arcane-angler-auto-cast-panel-host";
@@ -1099,6 +1317,14 @@
 		5,
 		10
 	];
+	var AUTO_BAIT_GRADES = [
+		"default",
+		"low",
+		"medium",
+		"high",
+		"super"
+	];
+	var AUTO_BAIT_PURCHASE_QUANTITIES = [100, 1e3];
 	function loadEnabled() {
 		try {
 			return localStorage.getItem(STORAGE_KEY) === "1";
@@ -1185,6 +1411,46 @@
 			console.warn("[自动换图] 无法保存设置：", error);
 		}
 	}
+	function normalizeAutoBaitGrade(value, fallback = "low") {
+		return AUTO_BAIT_GRADES.includes(value) ? value : fallback;
+	}
+	function normalizeAutoBaitMinimumQuantity(value, fallback = 100) {
+		const quantity = Number(value);
+		if (!Number.isFinite(quantity) || quantity < 100) return fallback;
+		return Math.min(1e5, Math.round(quantity / 100) * 100);
+	}
+	function normalizeAutoBaitPurchaseQuantity(value, fallback = 100) {
+		const quantity = Number(value);
+		return AUTO_BAIT_PURCHASE_QUANTITIES.includes(quantity) ? quantity : fallback;
+	}
+	function loadAutoBaitSettings() {
+		const defaults = {
+			baitGrade: "low",
+			enabled: false,
+			minimumQuantity: 100,
+			purchaseQuantity: 100
+		};
+		try {
+			const savedSettings = JSON.parse(localStorage.getItem(AUTO_BAIT_SETTINGS_STORAGE_KEY));
+			if (!savedSettings || typeof savedSettings !== "object") return defaults;
+			return {
+				baitGrade: normalizeAutoBaitGrade(savedSettings.baitGrade, defaults.baitGrade),
+				enabled: savedSettings.enabled === true,
+				minimumQuantity: normalizeAutoBaitMinimumQuantity(savedSettings.minimumQuantity, defaults.minimumQuantity),
+				purchaseQuantity: normalizeAutoBaitPurchaseQuantity(savedSettings.purchaseQuantity, defaults.purchaseQuantity)
+			};
+		} catch (error) {
+			console.warn("[自动买鱼饵] 无法读取设置：", error);
+			return defaults;
+		}
+	}
+	function saveAutoBaitSettings(autoBaitSettings) {
+		try {
+			localStorage.setItem(AUTO_BAIT_SETTINGS_STORAGE_KEY, JSON.stringify(autoBaitSettings));
+		} catch (error) {
+			console.warn("[自动买鱼饵] 无法保存设置：", error);
+		}
+	}
 	function normalizeScheduleMinutes(value, fallback) {
 		const minutes = Number(value);
 		if (!Number.isFinite(minutes) || minutes < 1) return fallback;
@@ -1239,7 +1505,7 @@
 		let earningsBiomeFilter = "current";
 		let earningsBaitFilter = "current";
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBiomeEnabled, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitMinimumQuantity, setAutoBaitPurchaseQuantity, setAutoBiomeEnabled, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
@@ -1335,6 +1601,11 @@
           <span id="auto-biome-status" class="value">等待天气数据</span>
         </div>
 
+        <div class="row">
+          <span class="label">鱼饵状态</span>
+          <span id="auto-bait-status" class="value">未启用</span>
+        </div>
+
         <label class="option-row">
           <span>自动换地图</span>
           <span class="switch">
@@ -1343,6 +1614,19 @@
               type="checkbox"
               role="switch"
               aria-label="自动换地图"
+            />
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
+
+        <label class="option-row">
+          <span>自动买鱼饵</span>
+          <span class="switch">
+            <input
+              id="auto-bait-toggle"
+              type="checkbox"
+              role="switch"
+              aria-label="自动买鱼饵"
             />
             <span class="switch-track" aria-hidden="true"></span>
           </span>
@@ -1518,6 +1802,55 @@
         </section>
 
         <section class="settings-section">
+          <div class="settings-title">自动买鱼饵</div>
+
+          <label class="field">
+            <span class="field-label">使用鱼饵等级</span>
+            <select id="auto-bait-grade" class="input">
+              <option value="default">默认饵（无限，不购买）</option>
+              <option value="low">低级饵</option>
+              <option value="medium">中级饵（+250 幸运）</option>
+              <option value="high">高级饵（+500 幸运）</option>
+              <option value="super">超级饵（+1000 幸运）</option>
+            </select>
+          </label>
+
+          <div id="auto-bait-purchase-settings" class="settings-group">
+            <div class="number-grid">
+              <label class="field">
+                <span class="field-label">库存低于</span>
+                <input
+                  id="auto-bait-minimum-quantity"
+                  class="input"
+                  type="number"
+                  min="100"
+                  max="100000"
+                  step="100"
+                  inputmode="numeric"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field-label">每次购买</span>
+                <select id="auto-bait-purchase-quantity" class="input">
+                  <option value="100">100 个</option>
+                  <option value="1000">1000 个</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="field-help">
+              每次抛竿后检查当前地图对应等级的鱼饵；库存低于设置值时购买。阈值按 100 的倍数保存。
+            </div>
+          </div>
+
+          <div class="row">
+            <span class="label">上次购买</span>
+            <span id="auto-bait-last-purchased-at" class="value">暂无</span>
+          </div>
+        </section>
+
+        <section class="settings-section">
           <div class="settings-title">消息通知</div>
 
           <div
@@ -1660,6 +1993,13 @@
 				autoBiomeToggle: shadowRoot.querySelector("#auto-biome-toggle"),
 				autoBiomeWeightInputs: shadowRoot.querySelectorAll("input[name=\"auto-biome-weight\"]"),
 				autoBiomeUpdatedAt: shadowRoot.querySelector("#auto-biome-updated-at"),
+				autoBaitStatus: shadowRoot.querySelector("#auto-bait-status"),
+				autoBaitToggle: shadowRoot.querySelector("#auto-bait-toggle"),
+				autoBaitGrade: shadowRoot.querySelector("#auto-bait-grade"),
+				autoBaitPurchaseSettings: shadowRoot.querySelector("#auto-bait-purchase-settings"),
+				autoBaitMinimumQuantity: shadowRoot.querySelector("#auto-bait-minimum-quantity"),
+				autoBaitPurchaseQuantity: shadowRoot.querySelector("#auto-bait-purchase-quantity"),
+				autoBaitLastPurchasedAt: shadowRoot.querySelector("#auto-bait-last-purchased-at"),
 				pushKeyInput: shadowRoot.querySelector("#push-key"),
 				pushKeyHelp: shadowRoot.querySelector("#push-key-help"),
 				captchaBypassToggle: shadowRoot.querySelector("#captcha-bypass-toggle"),
@@ -1717,6 +2057,18 @@
 			ui.autoBiomeToggle.addEventListener("change", (event) => {
 				setAutoBiomeEnabled(event.currentTarget.checked);
 			});
+			ui.autoBaitToggle.addEventListener("change", (event) => {
+				setAutoBaitEnabled(event.currentTarget.checked);
+			});
+			ui.autoBaitGrade.addEventListener("change", (event) => {
+				setAutoBaitGrade(event.currentTarget.value);
+			});
+			ui.autoBaitMinimumQuantity.addEventListener("change", (event) => {
+				setAutoBaitMinimumQuantity(event.currentTarget.value);
+			});
+			ui.autoBaitPurchaseQuantity.addEventListener("change", (event) => {
+				setAutoBaitPurchaseQuantity(event.currentTarget.value);
+			});
 			for (const input of ui.autoBiomeWeightInputs) input.addEventListener("change", (event) => {
 				if (event.currentTarget.checked) setAutoBiomeWeight(event.currentTarget.value);
 			});
@@ -1757,6 +2109,7 @@
 				renderEarningsStats();
 			});
 			renderToggle();
+			renderAutoBaitSettings();
 			renderAutoBiomeSettings();
 			renderCaptchaBypassToggle();
 			renderPanelCollapsed();
@@ -2043,6 +2396,18 @@
 			for (const input of ui.autoBiomeWeightInputs) input.checked = Number(input.value) === autoBiomeSettings.biomeWeight;
 			ui.autoBiomeUpdatedAt.textContent = autoBiomeLastUpdatedAt ? new Date(autoBiomeLastUpdatedAt).toLocaleTimeString() : "等待接口数据";
 		}
+		function renderAutoBaitSettings() {
+			if (!ui?.autoBaitToggle) return;
+			const { autoBaitLastPurchasedAt, autoBaitSettings, autoBaitStatus } = getState();
+			ui.autoBaitToggle.checked = autoBaitSettings.enabled;
+			ui.autoBaitToggle.setAttribute("aria-checked", autoBaitSettings.enabled ? "true" : "false");
+			ui.autoBaitStatus.textContent = autoBaitStatus;
+			ui.autoBaitGrade.value = autoBaitSettings.baitGrade;
+			ui.autoBaitPurchaseSettings.hidden = autoBaitSettings.baitGrade === "default";
+			ui.autoBaitMinimumQuantity.value = String(autoBaitSettings.minimumQuantity);
+			ui.autoBaitPurchaseQuantity.value = String(autoBaitSettings.purchaseQuantity);
+			ui.autoBaitLastPurchasedAt.textContent = autoBaitLastPurchasedAt ? new Date(autoBaitLastPurchasedAt).toLocaleTimeString() : "暂无";
+		}
 		function renderToggle() {
 			if (!ui?.toggle) return;
 			const { enabled } = getState();
@@ -2057,6 +2422,7 @@
 		}
 		createPanel();
 		return {
+			renderAutoBaitSettings,
 			renderAutoBiomeSettings,
 			renderCaptchaBypassToggle,
 			renderEarningsStats,
@@ -2075,6 +2441,7 @@
 	var notificationMode = loadNotificationMode();
 	var scheduleSettings = loadScheduleSettings();
 	var autoBiomeSettings = loadAutoBiomeSettings();
+	var autoBaitSettings = loadAutoBaitSettings();
 	var earningsStats = loadEarningsStats();
 	var loopId = 0;
 	var clickCount = 0;
@@ -2082,11 +2449,14 @@
 	var panel = null;
 	var schedule = null;
 	var autoBiome = null;
+	var autoBait = null;
+	var forceNextAutoBaitCheck = false;
 	function recordCastResult(result) {
 		earningsStats = updateEarningsStats(earningsStats, result, getCastEarningsContext(result));
 		saveEarningsStats(earningsStats);
 		panel.renderEarningsStats();
 		autoBiome?.handleCastResult(result);
+		autoBait?.handleCastResult(result);
 	}
 	function setPushKey(nextPushKey) {
 		pushKey = String(nextPushKey ?? "").trim();
@@ -2108,6 +2478,7 @@
 			clickCount,
 			earningsStats,
 			enabled,
+			autoBaitSettings,
 			autoBiomeSettings,
 			notificationMode,
 			pushKey,
@@ -2118,8 +2489,24 @@
 				autoBiomeTarget: null,
 				autoBiomeWeatherByBiome: {}
 			},
+			...autoBait?.getSnapshot() ?? {
+				autoBaitCurrentBaitId: null,
+				autoBaitCurrentQuantity: null,
+				autoBaitLastCheckedAt: 0,
+				autoBaitLastPurchasedAt: 0,
+				autoBaitStatus: "未启用"
+			},
 			...schedule.getSnapshot()
 		};
+	}
+	function handleAutomationStateChanged({ forceBait = false } = {}) {
+		forceNextAutoBaitCheck ||= forceBait;
+		const biomeUpdate = autoBiome?.handleStateChanged();
+		if (!enabled || !autoBiomeSettings.enabled) Promise.resolve(biomeUpdate).then(() => {
+			const force = forceNextAutoBaitCheck;
+			forceNextAutoBaitCheck = false;
+			return autoBait?.handleStateChanged({ force });
+		});
 	}
 	function findCastButton() {
 		const buttons = document.querySelectorAll("button");
@@ -2306,7 +2693,7 @@
 			const latestButton = findCastButton();
 			if (!latestButton) continue;
 			if (schedule.isWorkExpired()) continue;
-			if (autoBiome?.isSwitching()) {
+			if (autoBiome?.isSwitching() || autoBait?.isChecking()) {
 				await sleep(CONFIG.buttonPollInterval);
 				continue;
 			}
@@ -2348,7 +2735,7 @@
 			panel.setStatus("已停止");
 			panel.setNextDelay("—");
 		}
-		autoBiome?.handleStateChanged();
+		handleAutomationStateChanged();
 	}
 	function setCaptchaBypassEnabled(nextEnabled) {
 		captchaBypassEnabled = Boolean(nextEnabled);
@@ -2369,7 +2756,7 @@
 		};
 		saveAutoBiomeSettings(autoBiomeSettings);
 		panel.renderAutoBiomeSettings();
-		autoBiome?.handleStateChanged();
+		handleAutomationStateChanged();
 	}
 	function setAutoBiomeWeight(nextWeight) {
 		autoBiomeSettings = {
@@ -2378,7 +2765,28 @@
 		};
 		saveAutoBiomeSettings(autoBiomeSettings);
 		panel.renderAutoBiomeSettings();
-		autoBiome?.handleStateChanged();
+		handleAutomationStateChanged();
+	}
+	function updateAutoBaitSettings(nextSettings) {
+		autoBaitSettings = {
+			...autoBaitSettings,
+			...nextSettings
+		};
+		saveAutoBaitSettings(autoBaitSettings);
+		panel.renderAutoBaitSettings();
+		handleAutomationStateChanged({ forceBait: true });
+	}
+	function setAutoBaitEnabled(nextEnabled) {
+		updateAutoBaitSettings({ enabled: Boolean(nextEnabled) });
+	}
+	function setAutoBaitGrade(nextGrade) {
+		updateAutoBaitSettings({ baitGrade: normalizeAutoBaitGrade(nextGrade, autoBaitSettings.baitGrade) });
+	}
+	function setAutoBaitMinimumQuantity(nextQuantity) {
+		updateAutoBaitSettings({ minimumQuantity: normalizeAutoBaitMinimumQuantity(nextQuantity, autoBaitSettings.minimumQuantity) });
+	}
+	function setAutoBaitPurchaseQuantity(nextQuantity) {
+		updateAutoBaitSettings({ purchaseQuantity: normalizeAutoBaitPurchaseQuantity(nextQuantity, autoBaitSettings.purchaseQuantity) });
 	}
 	function setScheduleEnabled(nextEnabled) {
 		scheduleSettings = {
@@ -2436,6 +2844,10 @@
 		actions: {
 			requestBrowserNotificationPermission,
 			resetEarningsStats,
+			setAutoBaitEnabled,
+			setAutoBaitGrade,
+			setAutoBaitMinimumQuantity,
+			setAutoBaitPurchaseQuantity,
 			setAutoBiomeEnabled,
 			setAutoBiomeWeight,
 			setCaptchaBypassEnabled,
@@ -2465,8 +2877,22 @@
 		setNextDelay: panel.setNextDelay,
 		setStatus: panel.setStatus
 	});
+	autoBait = createAutoBaitController({
+		getState: getPanelState,
+		onStateChange() {
+			panel?.renderAutoBaitSettings();
+		}
+	});
 	autoBiome = createAutoBiomeController({
 		getState: getPanelState,
+		onBiomeReady(biomeId) {
+			const force = forceNextAutoBaitCheck;
+			forceNextAutoBaitCheck = false;
+			return autoBait?.checkNow({
+				biomeId,
+				force
+			});
+		},
 		onStateChange() {
 			panel?.renderAutoBiomeSettings();
 		}

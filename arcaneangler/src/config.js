@@ -50,6 +50,8 @@ export const SCHEDULE_SETTINGS_STORAGE_KEY =
     'arcane-angler-schedule-settings-v1';
 export const AUTO_BIOME_SETTINGS_STORAGE_KEY =
     'arcane-angler-auto-biome-settings-v1';
+export const AUTO_BAIT_SETTINGS_STORAGE_KEY =
+    'arcane-angler-auto-bait-settings-v1';
 export const PANEL_COLLAPSED_STORAGE_KEY = 'arcane-angler-panel-collapsed-v1';
 export const EARNINGS_STORAGE_KEY = 'arcane-angler-earnings-v1';
 export const PANEL_ID = 'arcane-angler-auto-cast-panel-host';

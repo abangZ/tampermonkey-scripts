@@ -17,6 +17,10 @@ export function createPanelController({
     const {
         requestBrowserNotificationPermission,
         resetEarningsStats,
+        setAutoBaitEnabled,
+        setAutoBaitGrade,
+        setAutoBaitMinimumQuantity,
+        setAutoBaitPurchaseQuantity,
         setAutoBiomeEnabled,
         setAutoBiomeWeight,
         setCaptchaBypassEnabled,
@@ -138,6 +142,11 @@ export function createPanelController({
           <span id="auto-biome-status" class="value">等待天气数据</span>
         </div>
 
+        <div class="row">
+          <span class="label">鱼饵状态</span>
+          <span id="auto-bait-status" class="value">未启用</span>
+        </div>
+
         <label class="option-row">
           <span>自动换地图</span>
           <span class="switch">
@@ -146,6 +155,19 @@ export function createPanelController({
               type="checkbox"
               role="switch"
               aria-label="自动换地图"
+            />
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
+
+        <label class="option-row">
+          <span>自动买鱼饵</span>
+          <span class="switch">
+            <input
+              id="auto-bait-toggle"
+              type="checkbox"
+              role="switch"
+              aria-label="自动买鱼饵"
             />
             <span class="switch-track" aria-hidden="true"></span>
           </span>
@@ -321,6 +343,55 @@ export function createPanelController({
         </section>
 
         <section class="settings-section">
+          <div class="settings-title">自动买鱼饵</div>
+
+          <label class="field">
+            <span class="field-label">使用鱼饵等级</span>
+            <select id="auto-bait-grade" class="input">
+              <option value="default">默认饵（无限，不购买）</option>
+              <option value="low">低级饵</option>
+              <option value="medium">中级饵（+250 幸运）</option>
+              <option value="high">高级饵（+500 幸运）</option>
+              <option value="super">超级饵（+1000 幸运）</option>
+            </select>
+          </label>
+
+          <div id="auto-bait-purchase-settings" class="settings-group">
+            <div class="number-grid">
+              <label class="field">
+                <span class="field-label">库存低于</span>
+                <input
+                  id="auto-bait-minimum-quantity"
+                  class="input"
+                  type="number"
+                  min="100"
+                  max="100000"
+                  step="100"
+                  inputmode="numeric"
+                />
+              </label>
+
+              <label class="field">
+                <span class="field-label">每次购买</span>
+                <select id="auto-bait-purchase-quantity" class="input">
+                  <option value="100">100 个</option>
+                  <option value="1000">1000 个</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="field-help">
+              每次抛竿后检查当前地图对应等级的鱼饵；库存低于设置值时购买。阈值按 100 的倍数保存。
+            </div>
+          </div>
+
+          <div class="row">
+            <span class="label">上次购买</span>
+            <span id="auto-bait-last-purchased-at" class="value">暂无</span>
+          </div>
+        </section>
+
+        <section class="settings-section">
           <div class="settings-title">消息通知</div>
 
           <div
@@ -469,6 +540,21 @@ export function createPanelController({
             autoBiomeUpdatedAt: shadowRoot.querySelector(
                 '#auto-biome-updated-at',
             ),
+            autoBaitStatus: shadowRoot.querySelector('#auto-bait-status'),
+            autoBaitToggle: shadowRoot.querySelector('#auto-bait-toggle'),
+            autoBaitGrade: shadowRoot.querySelector('#auto-bait-grade'),
+            autoBaitPurchaseSettings: shadowRoot.querySelector(
+                '#auto-bait-purchase-settings',
+            ),
+            autoBaitMinimumQuantity: shadowRoot.querySelector(
+                '#auto-bait-minimum-quantity',
+            ),
+            autoBaitPurchaseQuantity: shadowRoot.querySelector(
+                '#auto-bait-purchase-quantity',
+            ),
+            autoBaitLastPurchasedAt: shadowRoot.querySelector(
+                '#auto-bait-last-purchased-at',
+            ),
             pushKeyInput: shadowRoot.querySelector('#push-key'),
             pushKeyHelp: shadowRoot.querySelector('#push-key-help'),
             captchaBypassToggle: shadowRoot.querySelector(
@@ -551,6 +637,22 @@ export function createPanelController({
             setAutoBiomeEnabled(event.currentTarget.checked);
         });
 
+        ui.autoBaitToggle.addEventListener('change', (event) => {
+            setAutoBaitEnabled(event.currentTarget.checked);
+        });
+
+        ui.autoBaitGrade.addEventListener('change', (event) => {
+            setAutoBaitGrade(event.currentTarget.value);
+        });
+
+        ui.autoBaitMinimumQuantity.addEventListener('change', (event) => {
+            setAutoBaitMinimumQuantity(event.currentTarget.value);
+        });
+
+        ui.autoBaitPurchaseQuantity.addEventListener('change', (event) => {
+            setAutoBaitPurchaseQuantity(event.currentTarget.value);
+        });
+
         for (const input of ui.autoBiomeWeightInputs) {
             input.addEventListener('change', (event) => {
                 if (event.currentTarget.checked) {
@@ -612,6 +714,7 @@ export function createPanelController({
         });
 
         renderToggle();
+        renderAutoBaitSettings();
         renderAutoBiomeSettings();
         renderCaptchaBypassToggle();
         renderPanelCollapsed();
@@ -1158,6 +1261,34 @@ export function createPanelController({
             : '等待接口数据';
     }
 
+    function renderAutoBaitSettings() {
+        if (!ui?.autoBaitToggle) {
+            return;
+        }
+
+        const { autoBaitLastPurchasedAt, autoBaitSettings, autoBaitStatus } =
+            getState();
+
+        ui.autoBaitToggle.checked = autoBaitSettings.enabled;
+        ui.autoBaitToggle.setAttribute(
+            'aria-checked',
+            autoBaitSettings.enabled ? 'true' : 'false',
+        );
+        ui.autoBaitStatus.textContent = autoBaitStatus;
+        ui.autoBaitGrade.value = autoBaitSettings.baitGrade;
+        ui.autoBaitPurchaseSettings.hidden =
+            autoBaitSettings.baitGrade === 'default';
+        ui.autoBaitMinimumQuantity.value = String(
+            autoBaitSettings.minimumQuantity,
+        );
+        ui.autoBaitPurchaseQuantity.value = String(
+            autoBaitSettings.purchaseQuantity,
+        );
+        ui.autoBaitLastPurchasedAt.textContent = autoBaitLastPurchasedAt
+            ? new Date(autoBaitLastPurchasedAt).toLocaleTimeString()
+            : '暂无';
+    }
+
     function renderToggle() {
         if (!ui?.toggle) {
             return;
@@ -1186,6 +1317,7 @@ export function createPanelController({
     createPanel();
 
     return {
+        renderAutoBaitSettings,
         renderAutoBiomeSettings,
         renderCaptchaBypassToggle,
         renderEarningsStats,
