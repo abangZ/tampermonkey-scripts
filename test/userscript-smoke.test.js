@@ -97,6 +97,42 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
             host.shadowRoot.querySelector('#stats-scope').textContent,
             /Tinker River · Tinker Larva/,
         );
+        assert.equal(
+            host.shadowRoot.querySelector('#stats-gold').dataset.tone,
+            'income',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#stats-fish-gold').dataset.tone,
+            'gold',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#stats-bait-cost').dataset.tone,
+            'cost',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#stats-net-gold').dataset.tone,
+            'positive',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#stats-net-average').dataset.tone,
+            'positive',
+        );
+
+        window.BAITS[0].price = 1000;
+        await window.fetch('/api/game/cast', {
+            body: '{}',
+            method: 'POST',
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.equal(
+            host.shadowRoot.querySelector('#stats-net-gold').dataset.tone,
+            'negative',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#stats-net-average').dataset.tone,
+            'negative',
+        );
 
         const toggle = host.shadowRoot.querySelector('#toggle');
 

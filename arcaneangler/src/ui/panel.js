@@ -183,19 +183,35 @@ export function createPanelController({
           </div>
           <div class="stat-card">
             <span class="stat-card-label">直接金币</span>
-            <strong id="stats-gold" class="stat-card-value">0</strong>
+            <strong
+              id="stats-gold"
+              class="stat-card-value"
+              data-tone="income"
+            >0</strong>
           </div>
           <div class="stat-card">
             <span class="stat-card-label">鱼获价值</span>
-            <strong id="stats-fish-gold" class="stat-card-value">0</strong>
+            <strong
+              id="stats-fish-gold"
+              class="stat-card-value"
+              data-tone="gold"
+            >0</strong>
           </div>
           <div class="stat-card">
             <span class="stat-card-label">鱼饵成本</span>
-            <strong id="stats-bait-cost" class="stat-card-value">0</strong>
+            <strong
+              id="stats-bait-cost"
+              class="stat-card-value"
+              data-tone="cost"
+            >0</strong>
           </div>
           <div class="stat-card">
             <span class="stat-card-label">净收益</span>
-            <strong id="stats-net-gold" class="stat-card-value">0</strong>
+            <strong
+              id="stats-net-gold"
+              class="stat-card-value"
+              data-tone="neutral"
+            >0</strong>
           </div>
           <div class="stat-card">
             <span class="stat-card-label">经验</span>
@@ -215,7 +231,11 @@ export function createPanelController({
           </div>
           <div class="stat-card">
             <span class="stat-card-label">每竿净收益</span>
-            <strong id="stats-net-average" class="stat-card-value">0</strong>
+            <strong
+              id="stats-net-average"
+              class="stat-card-value"
+              data-tone="neutral"
+            >0</strong>
           </div>
         </div>
 
@@ -580,6 +600,13 @@ export function createPanelController({
         }).format(toFiniteNumber(value));
     }
 
+    function renderSignedStatTone(element, value) {
+        const number = toFiniteNumber(value);
+
+        element.dataset.tone =
+            number > 0 ? 'positive' : number < 0 ? 'negative' : 'neutral';
+    }
+
     function compareDimensionIds(left, right) {
         const leftNumber = Number(left);
         const rightNumber = Number(right);
@@ -874,6 +901,8 @@ export function createPanelController({
         );
         ui.statsGears.textContent = formatStatNumber(filteredStats.gears);
         ui.statsNetAverage.textContent = formatStatNumber(averageNetGold, 1);
+        renderSignedStatTone(ui.statsNetGold, netGold);
+        renderSignedStatTone(ui.statsNetAverage, averageNetGold);
 
         ui.statsCostNote.hidden = filteredStats.unknownBaitCostCasts === 0;
         ui.statsCostNote.textContent =

@@ -1,5 +1,5 @@
 export const userscriptFileName = 'arcane-angler-auto-cast.user.js';
-export const userscriptVersion = '2.0.0';
+export const userscriptVersion = '2.0.2';
 
 const installUrl =
     'https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/' +
@@ -11,6 +11,7 @@ export const userscriptMetadata = {
     version: userscriptVersion,
     author: 'Codex',
     description: '自动点击“抛竿线”按钮，带随机等待和启停控制',
+    homepageURL: 'https://github.com/abangZ/tampermonkey-scripts',
     updateURL: installUrl,
     downloadURL: installUrl,
     match: ['https://arcaneangler.com/*', 'https://www.arcaneangler.com/*'],

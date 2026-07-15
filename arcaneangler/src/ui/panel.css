@@ -399,6 +399,20 @@
     white-space: nowrap;
 }
 
+.stat-card-value[data-tone='income'],
+.stat-card-value[data-tone='positive'] {
+    color: #4ade80;
+}
+
+.stat-card-value[data-tone='gold'] {
+    color: #fbbf24;
+}
+
+.stat-card-value[data-tone='cost'],
+.stat-card-value[data-tone='negative'] {
+    color: #f87171;
+}
+
 .stats-section-title {
     margin: 12px 0 6px;
     color: rgba(255, 255, 255, 0.62);
