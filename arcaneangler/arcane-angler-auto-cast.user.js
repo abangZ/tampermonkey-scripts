@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      1.6.0
+// @version      1.6.1
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -74,11 +74,12 @@
     let loopId = 0;
     let clickCount = 0;
     let ui = null;
+    let activeCaptchaChallenge = null;
     let captchaBypassInProgress = false;
     let captchaBypassAttemptId = 0;
 
     /**
-     * 包装页面的 fetch，在抛竿请求发出前修改并打印 payload。
+     * 包装页面的 fetch：处理抛竿请求/收益，并复用页面验证码 challenge。
      */
     function installFetchInterceptor() {
         const originalFetch = window.fetch;
@@ -127,7 +128,29 @@
                 return response;
             }
 
-            return originalFetch.apply(this, arguments);
+            const response = await originalFetch.apply(this, arguments);
+
+            if (
+                method === 'GET' &&
+                url?.pathname === '/api/game/captcha-challenge'
+            ) {
+                try {
+                    void collectCaptchaChallengeResponse(response.clone());
+                } catch (error) {
+                    console.warn(
+                        '[自动过验证] 无法复制验证码 challenge 响应：',
+                        error,
+                    );
+                }
+            } else if (
+                method === 'POST' &&
+                url?.pathname === '/api/game/captcha-verified' &&
+                response.ok
+            ) {
+                activeCaptchaChallenge = null;
+            }
+
+            return response;
         };
     }
 
@@ -234,6 +257,41 @@
             recordCastResult(payload.result);
         } catch (error) {
             console.warn('[收益统计] 无法读取抛竿响应：', error);
+        }
+    }
+
+    async function collectCaptchaChallengeResponse(response) {
+        if (!response.ok) {
+            return;
+        }
+
+        try {
+            const payload = await response.json();
+            const challenge = payload?.result ?? payload;
+
+            if (
+                !challenge?.token ||
+                typeof challenge.bgSvg !== 'string'
+            ) {
+                return;
+            }
+
+            activeCaptchaChallenge = challenge;
+
+            if (!enabled) {
+                return;
+            }
+
+            if (captchaBypassEnabled) {
+                void autoBypassCaptcha(challenge);
+            } else {
+                stopForHumanVerification();
+            }
+        } catch (error) {
+            console.warn(
+                '[自动过验证] 无法读取验证码 challenge 响应：',
+                error,
+            );
         }
     }
 
@@ -638,24 +696,12 @@
         };
     }
 
-    async function runCaptchaBypass(isAttemptActive) {
-        if (!findHumanVerification()) {
-            throw new Error('当前页面没有可见的人机验证');
-        }
-
+    async function runCaptchaBypass(challenge, isAttemptActive) {
         const api = window.ApiService;
 
-        if (
-            typeof api?.getCaptchaChallenge !== 'function' ||
-            typeof api?.notifyCaptchaVerified !== 'function'
-        ) {
+        if (typeof api?.notifyCaptchaVerified !== 'function') {
             throw new Error('页面验证码 API 不可用');
         }
-
-        setStatus('正在请求新的验证码 challenge');
-        setNextDelay('读取服务端题面');
-
-        const challenge = await api.getCaptchaChallenge();
 
         if (!isAttemptActive()) {
             return false;
@@ -684,6 +730,10 @@
             challenge.token,
             String(rangeValue),
         );
+
+        if (activeCaptchaChallenge?.token === challenge.token) {
+            activeCaptchaChallenge = null;
+        }
 
         if (!isAttemptActive()) {
             return false;
@@ -735,15 +785,12 @@
         captchaBypassInProgress = false;
     }
 
-    function stopForHumanVerification(verification) {
+    function stopForHumanVerification() {
         setEnabled(false);
         setStatus('检测到人机验证，已停止');
         setNextDelay('请手动完成验证');
 
-        console.warn(
-            '[自动抛竿] 检测到人机验证，自动操作已停止。',
-            verification,
-        );
+        console.warn('[自动抛竿] 检测到人机验证，自动操作已停止。');
 
         void sendHumanVerificationNotification();
     }
@@ -754,7 +801,7 @@
      * 成功时关闭验证弹窗并重新启动抛竿循环。
      * 失败时停止脚本并发送消息推送通知。
      */
-    async function autoBypassCaptcha(verification) {
+    async function autoBypassCaptcha(challenge) {
         if (!captchaBypassEnabled || captchaBypassInProgress) {
             return;
         }
@@ -765,15 +812,16 @@
         captchaBypassInProgress = true;
         let bypassSucceeded = false;
         console.warn(
-            '[自动抛竿] 检测到人机验证，尝试自动绕过。',
-            verification,
+            '[自动抛竿] 捕获到验证码 challenge，尝试自动验证。',
         );
 
         try {
-            bypassSucceeded = await runCaptchaBypass(() =>
-                enabled &&
-                captchaBypassEnabled &&
-                attemptId === captchaBypassAttemptId,
+            bypassSucceeded = await runCaptchaBypass(
+                challenge,
+                () =>
+                    enabled &&
+                    captchaBypassEnabled &&
+                    attemptId === captchaBypassAttemptId,
             );
         } catch (error) {
             if (
@@ -782,6 +830,10 @@
                 attemptId !== captchaBypassAttemptId
             ) {
                 return;
+            }
+
+            if (activeCaptchaChallenge?.token === challenge?.token) {
+                activeCaptchaChallenge = null;
             }
 
             setEnabled(false);
@@ -809,18 +861,16 @@
         }
     }
 
-    function stopIfHumanVerificationFound() {
-        const verification = findHumanVerification();
-
-        if (!verification) {
+    function stopIfCaptchaChallengeFound() {
+        if (!activeCaptchaChallenge) {
             return false;
         }
 
         if (captchaBypassEnabled) {
             // 触发自动过验证（异步，不阻塞当前循环退出）
-            void autoBypassCaptcha(verification);
+            void autoBypassCaptcha(activeCaptchaChallenge);
         } else {
-            stopForHumanVerification(verification);
+            stopForHumanVerification();
         }
 
         return true;
@@ -976,7 +1026,7 @@
             return false;
         }
 
-        if (stopIfHumanVerificationFound()) {
+        if (stopIfCaptchaChallengeFound()) {
             return false;
         }
 
@@ -1103,7 +1153,7 @@
      */
     async function waitForButton(currentLoopId) {
         while (enabled && currentLoopId === loopId) {
-            if (stopIfHumanVerificationFound()) {
+            if (stopIfCaptchaChallengeFound()) {
                 return null;
             }
 
@@ -1133,7 +1183,7 @@
         const endTime = Date.now() + milliseconds;
 
         while (enabled && currentLoopId === loopId) {
-            if (stopIfHumanVerificationFound()) {
+            if (stopIfCaptchaChallengeFound()) {
                 return false;
             }
 
@@ -1224,7 +1274,7 @@
                 // 如果验证码导致未点击，按当前过验证设置处理后退出。
                 if (
                     captchaBypassInProgress ||
-                    stopIfHumanVerificationFound()
+                    stopIfCaptchaChallengeFound()
                 ) {
                     return;
                 }
@@ -1280,10 +1330,14 @@
 
         renderCaptchaBypassToggle();
 
-        const verification = findHumanVerification();
+        if (!enabled || !activeCaptchaChallenge) {
+            return;
+        }
 
-        if (!captchaBypassEnabled && enabled && verification) {
-            stopForHumanVerification(verification);
+        if (captchaBypassEnabled) {
+            void autoBypassCaptcha(activeCaptchaChallenge);
+        } else {
+            stopForHumanVerification();
         }
     }
 
