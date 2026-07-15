@@ -1,0 +1,20 @@
+{
+    "name": "tampermonkey-scripts",
+    "private": true,
+    "type": "module",
+    "packageManager": "pnpm@9.15.4",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build && node scripts/publish-userscript.mjs",
+        "format": "prettier --write \"arcaneangler/src/**/*.{js,css}\" arcaneangler/userscript.config.js \"scripts/*.mjs\" \"test/*.js\" vite.config.js package.json",
+        "format:check": "prettier --check \"arcaneangler/src/**/*.{js,css}\" arcaneangler/userscript.config.js \"scripts/*.mjs\" \"test/*.js\" vite.config.js package.json",
+        "test": "node --test",
+        "check": "pnpm format:check && pnpm build && pnpm test && node --check arcaneangler/arcane-angler-auto-cast.user.js && node scripts/check-userscript.mjs && git diff --check"
+    },
+    "devDependencies": {
+        "happy-dom": "^20.10.3",
+        "prettier": "^3.8.4",
+        "vite": "^8.0.0",
+        "vite-plugin-monkey": "^8.0.6"
+    }
+}

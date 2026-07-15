@@ -59,6 +59,23 @@ https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/
 
 发布新版本时，需要递增脚本元数据中的 `@version`，Tampermonkey 才会识别为可用更新。
 
+### 开发与构建
+
+项目使用 Vite 和 `vite-plugin-monkey` 维护模块化源码，最终仍生成可直接安装的单文件 userscript。
+
+```bash
+pnpm install
+pnpm dev
+pnpm build
+pnpm check
+```
+
+- `arcaneangler/src/` 是 Arcane Angler 脚本的源码目录。
+- `arcaneangler/arcane-angler-auto-cast.user.js` 是构建产物，也是 Tampermonkey 的稳定发布文件，请勿直接修改。
+- `pnpm build` 会打包模块、生成 userscript metadata，并将产物写入稳定发布路径。
+- `pnpm check` 会执行单元测试、重新构建、检查生成文件语法和 metadata。
+- 发布代码前需要提交源码、构建配置、锁文件以及最新生成的 `.user.js` 文件。
+
 ## 免责声明
 
 本项目仅供学习与个人研究使用。使用者应自行遵守目标网站的服务条款、使用规则及所在地法律法规。因使用本项目产生的账号限制、数据损失或其他直接、间接后果，均由使用者自行承担，项目作者不承担相关责任。
