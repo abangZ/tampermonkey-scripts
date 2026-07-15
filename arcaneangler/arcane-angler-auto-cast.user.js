@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      1.6.1
+// @version      1.7.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -47,9 +47,13 @@
         mouseDownMin: 35,
         mouseDownMax: 90,
 
-        // 自动验证各步骤之间的随机等待时间
-        captchaStepDelayMin: 800,
-        captchaStepDelayMax: 1400,
+        // 自动验证：模拟人观察题面、拖动滑块和确认结果的耗时
+        captchaObserveDelayMin: 2200,
+        captchaObserveDelayMax: 4200,
+        captchaDragDelayMin: 900,
+        captchaDragDelayMax: 1800,
+        captchaConfirmDelayMin: 1400,
+        captchaConfirmDelayMax: 2600,
 
     };
 
@@ -64,6 +68,60 @@
     const HUMAN_VERIFICATION_TEXT = '人机验证';
     const HUMAN_VERIFICATION_MESSAGE =
         'Arcane Angler 出现验证码了，自动抛竿已停止';
+    const EARNINGS_CATEGORY_DISPLAY = {
+        unknown: {
+            label: '未知',
+            tone: 'unknown',
+        },
+        common: {
+            label: '普通',
+            tone: 'common',
+        },
+        uncommon: {
+            label: '罕见',
+            tone: 'uncommon',
+        },
+        fine: {
+            label: '精良',
+            tone: 'fine',
+        },
+        rare: {
+            label: '稀有',
+            tone: 'rare',
+        },
+        epic: {
+            label: '史诗',
+            tone: 'epic',
+        },
+        legendary: {
+            label: '传说',
+            tone: 'legendary',
+        },
+        mythic: {
+            label: '神话',
+            tone: 'mythic',
+        },
+        exotic: {
+            label: '奇异',
+            tone: 'exotic',
+        },
+        arcane: {
+            label: '奥术',
+            tone: 'arcane',
+        },
+        relic: {
+            label: '遗物',
+            tone: 'relic',
+        },
+        'treasure chest': {
+            label: '宝箱',
+            tone: 'treasure',
+        },
+        gears: {
+            label: '装备',
+            tone: 'gear',
+        },
+    };
 
     let enabled = loadEnabled();
     let captchaBypassEnabled = loadCaptchaBypassEnabled();
@@ -600,15 +658,31 @@
         return false;
     }
 
-    async function waitForCaptchaStep(isAttemptActive) {
-        await sleep(
-            randomInt(
-                CONFIG.captchaStepDelayMin,
-                CONFIG.captchaStepDelayMax,
-            ),
-        );
+    async function waitForCaptchaStep(
+        minDelay,
+        maxDelay,
+        status,
+        nextAction,
+        isAttemptActive,
+    ) {
+        const endTime = Date.now() + randomInt(minDelay, maxDelay);
 
-        return isAttemptActive();
+        while (isAttemptActive()) {
+            const remaining = endTime - Date.now();
+
+            if (remaining <= 0) {
+                return true;
+            }
+
+            setStatus(status);
+            setNextDelay(
+                `${(remaining / 1000).toFixed(1)} 秒后${nextAction}`,
+            );
+
+            await sleep(Math.min(100, remaining));
+        }
+
+        return false;
     }
 
     async function waitForHumanVerificationToClose(isAttemptActive) {
@@ -714,15 +788,32 @@
         const answer = readExposedCaptchaAnswer(challenge.bgSvg);
         const rangeValue = Math.round(answer.ratio * 100);
 
-        setStatus(`已解析验证缺口 x=${answer.gapX}，等待提交`);
-        setNextDelay(`稍后提交滑块值：${rangeValue}`);
-
         console.warn('[自动过验证] 客户端已暴露验证码答案：', {
             ...answer,
             rangeValue,
         });
 
-        if (!(await waitForCaptchaStep(isAttemptActive))) {
+        if (!(
+            await waitForCaptchaStep(
+                CONFIG.captchaObserveDelayMin,
+                CONFIG.captchaObserveDelayMax,
+                '正在观察验证题面',
+                '操作滑块',
+                isAttemptActive,
+            )
+        )) {
+            return false;
+        }
+
+        if (!(
+            await waitForCaptchaStep(
+                CONFIG.captchaDragDelayMin,
+                CONFIG.captchaDragDelayMax,
+                '正在模拟滑块操作',
+                '提交验证',
+                isAttemptActive,
+            )
+        )) {
             return false;
         }
 
@@ -751,13 +842,19 @@
             String(nextInterval),
         );
 
-        setStatus('服务端验证通过，等待关闭弹窗');
-        setNextDelay('验证成功');
         console.warn(
             '[自动过验证] 服务端接受了由客户端题面计算出的答案。',
         );
 
-        if (!(await waitForCaptchaStep(isAttemptActive))) {
+        if (!(
+            await waitForCaptchaStep(
+                CONFIG.captchaConfirmDelayMin,
+                CONFIG.captchaConfirmDelayMax,
+                '验证通过，等待页面确认',
+                '关闭验证弹窗',
+                isAttemptActive,
+            )
+        )) {
             return false;
         }
 
@@ -1674,10 +1771,66 @@
           padding: 4px 6px;
           border-radius: 6px;
           background: rgba(109, 93, 252, 0.16);
-          color: rgba(255, 255, 255, 0.78);
+          color: #d8d8df;
           font-size: 10px;
           text-overflow: ellipsis;
           white-space: nowrap;
+        }
+
+        .stat-chip[data-tone="uncommon"] {
+          background: rgba(132, 204, 22, 0.14);
+          color: #84cc16;
+        }
+
+        .stat-chip[data-tone="common"] {
+          background: rgba(156, 163, 175, 0.14);
+          color: #9ca3af;
+        }
+
+        .stat-chip[data-tone="fine"] {
+          background: rgba(59, 130, 246, 0.14);
+          color: #3b82f6;
+        }
+
+        .stat-chip[data-tone="rare"] {
+          background: rgba(168, 85, 247, 0.14);
+          color: #a855f7;
+        }
+
+        .stat-chip[data-tone="epic"] {
+          background: rgba(236, 72, 153, 0.14);
+          color: #ec4899;
+        }
+
+        .stat-chip[data-tone="legendary"] {
+          background: rgba(245, 158, 11, 0.14);
+          color: #f59e0b;
+        }
+
+        .stat-chip[data-tone="mythic"] {
+          background: rgba(239, 68, 68, 0.14);
+          color: #ef4444;
+        }
+
+        .stat-chip[data-tone="exotic"] {
+          background: rgba(6, 182, 212, 0.14);
+          color: #06b6d4;
+        }
+
+        .stat-chip[data-tone="arcane"] {
+          background: rgba(168, 85, 247, 0.14);
+          color: #a855f7;
+        }
+
+        .stat-chip[data-tone="relic"],
+        .stat-chip[data-tone="treasure"] {
+          background: rgba(242, 204, 96, 0.14);
+          color: #f2cc60;
+        }
+
+        .stat-chip[data-tone="gear"] {
+          background: rgba(86, 212, 221, 0.14);
+          color: #7ce7ee;
         }
 
         .empty-stat {
@@ -1989,6 +2142,18 @@
         }).format(toNonNegativeNumber(value));
     }
 
+    function getEarningsCategoryDisplay(category) {
+        const originalLabel = normalizeText(category) || 'Unknown';
+        const display = EARNINGS_CATEGORY_DISPLAY[
+            originalLabel.toLowerCase()
+        ];
+
+        return display ?? {
+            label: originalLabel,
+            tone: 'unknown',
+        };
+    }
+
     function renderStatsList(container, entries, emptyText) {
         if (!container) {
             return;
@@ -2005,11 +2170,14 @@
             return;
         }
 
-        for (const [label, count] of entries) {
+        for (const [category, count] of entries) {
             const chip = document.createElement('span');
+            const display = getEarningsCategoryDisplay(category);
 
             chip.className = 'stat-chip';
-            chip.textContent = `${label} ×${formatStatNumber(count)}`;
+            chip.dataset.tone = display.tone;
+            chip.textContent =
+                `${display.label} ×${formatStatNumber(count)}`;
             chip.title = chip.textContent;
             container.appendChild(chip);
         }
