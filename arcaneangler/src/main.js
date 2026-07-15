@@ -15,6 +15,7 @@ import {
     saveEarningsStats,
     updateEarningsStats,
 } from './earnings.js';
+import { getCastEarningsContext } from './game-data.js';
 import { installFetchInterceptor } from './network/fetch-interceptor.js';
 import {
     requestBrowserNotificationPermission as requestNotificationPermission,
@@ -54,7 +55,11 @@ let panel = null;
 let schedule = null;
 
 function recordCastResult(result) {
-    earningsStats = updateEarningsStats(earningsStats, result);
+    earningsStats = updateEarningsStats(
+        earningsStats,
+        result,
+        getCastEarningsContext(result),
+    );
     saveEarningsStats(earningsStats);
     panel.renderEarningsStats();
 }

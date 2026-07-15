@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      1.8.1
+// @version      2.0.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @downloadURL  https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -295,13 +295,14 @@
 			stopIfChallengeFound: stopIfCaptchaChallengeFound
 		};
 	}
-	function createEmptyEarningsStats() {
+	function createEmptyEarningsCounters() {
 		return {
-			startedAt: Date.now(),
-			updatedAt: null,
 			casts: 0,
 			fish: 0,
 			gold: 0,
+			fishGold: 0,
+			baitCost: 0,
+			unknownBaitCostCasts: 0,
 			xp: 0,
 			relics: 0,
 			treasureChests: 0,
@@ -309,9 +310,76 @@
 			rarityCounts: {}
 		};
 	}
+	function createEmptyEarningsStats() {
+		return {
+			startedAt: Date.now(),
+			updatedAt: null,
+			...createEmptyEarningsCounters(),
+			breakdowns: {},
+			lastContext: null
+		};
+	}
 	function toNonNegativeNumber(value) {
 		const number = Number(value);
 		return Number.isFinite(number) && number > 0 ? number : 0;
+	}
+	function toNullableNonNegativeNumber(value) {
+		if (value === null || value === void 0 || value === "") return null;
+		const number = Number(value);
+		return Number.isFinite(number) && number >= 0 ? number : null;
+	}
+	function normalizeRarityCounts(rarityCounts) {
+		if (!rarityCounts || typeof rarityCounts !== "object") return {};
+		return Object.fromEntries(Object.entries(rarityCounts).map(([category, count]) => [String(category), toNonNegativeNumber(count)]).filter(([, count]) => count > 0));
+	}
+	function normalizeEarningsCounters(source) {
+		return {
+			casts: toNonNegativeNumber(source?.casts),
+			fish: toNonNegativeNumber(source?.fish),
+			gold: toNonNegativeNumber(source?.gold),
+			fishGold: toNonNegativeNumber(source?.fishGold),
+			baitCost: toNonNegativeNumber(source?.baitCost),
+			unknownBaitCostCasts: toNonNegativeNumber(source?.unknownBaitCostCasts),
+			xp: toNonNegativeNumber(source?.xp),
+			relics: toNonNegativeNumber(source?.relics),
+			treasureChests: toNonNegativeNumber(source?.treasureChests),
+			gears: toNonNegativeNumber(source?.gears),
+			rarityCounts: normalizeRarityCounts(source?.rarityCounts)
+		};
+	}
+	function normalizeDimensionId(value) {
+		return String(value ?? "").trim();
+	}
+	function normalizeEarningsContext(context) {
+		if (!context || typeof context !== "object") return null;
+		const biomeId = normalizeDimensionId(context.biomeId);
+		const baitId = normalizeDimensionId(context.baitId);
+		if (!biomeId || !baitId) return null;
+		return {
+			biomeId,
+			biomeName: String(context.biomeName ?? "").trim() || `地图 ${biomeId}`,
+			baitId,
+			baitName: String(context.baitName ?? "").trim() || baitId,
+			baitPrice: toNullableNonNegativeNumber(context.baitPrice)
+		};
+	}
+	function createBreakdownKey(context) {
+		return JSON.stringify([context.biomeId, context.baitId]);
+	}
+	function normalizeBreakdowns(breakdowns) {
+		if (!breakdowns || typeof breakdowns !== "object") return {};
+		const normalizedBreakdowns = {};
+		for (const breakdown of Object.values(breakdowns)) {
+			const context = normalizeEarningsContext(breakdown);
+			if (!context) continue;
+			normalizedBreakdowns[createBreakdownKey(context)] = {
+				...context,
+				startedAt: toNonNegativeNumber(breakdown.startedAt) || Date.now(),
+				updatedAt: toNonNegativeNumber(breakdown.updatedAt) || null,
+				...normalizeEarningsCounters(breakdown)
+			};
+		}
+		return normalizedBreakdowns;
 	}
 	function loadEarningsStats() {
 		const emptyStats = createEmptyEarningsStats();
@@ -319,17 +387,11 @@
 			const savedStats = JSON.parse(localStorage.getItem(EARNINGS_STORAGE_KEY));
 			if (!savedStats || typeof savedStats !== "object") return emptyStats;
 			return {
-				...emptyStats,
 				startedAt: toNonNegativeNumber(savedStats.startedAt) || emptyStats.startedAt,
 				updatedAt: toNonNegativeNumber(savedStats.updatedAt) || null,
-				casts: toNonNegativeNumber(savedStats.casts),
-				fish: toNonNegativeNumber(savedStats.fish),
-				gold: toNonNegativeNumber(savedStats.gold),
-				xp: toNonNegativeNumber(savedStats.xp),
-				relics: toNonNegativeNumber(savedStats.relics),
-				treasureChests: toNonNegativeNumber(savedStats.treasureChests),
-				gears: toNonNegativeNumber(savedStats.gears),
-				rarityCounts: savedStats.rarityCounts && typeof savedStats.rarityCounts === "object" ? savedStats.rarityCounts : {}
+				...normalizeEarningsCounters(savedStats),
+				breakdowns: normalizeBreakdowns(savedStats.breakdowns),
+				lastContext: normalizeEarningsContext(savedStats.lastContext)
 			};
 		} catch (error) {
 			console.warn("[收益统计] 无法读取本地统计：", error);
@@ -343,32 +405,151 @@
 			console.warn("[收益统计] 无法保存本地统计：", error);
 		}
 	}
-	function updateEarningsStats(earningsStats, result) {
+	function getCastEarnings(result, context) {
 		const rarity = String(result.rarity ?? "").trim();
 		const count = Math.max(1, toNonNegativeNumber(result.count));
 		const isTreasure = Boolean(result.treasureChest) || rarity === "Treasure Chest";
 		const isRelic = rarity === "Relic";
 		const isGear = rarity === "Gears" && Boolean(result.gear) && !result.inventoryFull;
 		const isFish = Boolean(result.fish?.name) && !isTreasure && !isRelic && rarity !== "Gears";
-		const gold = toNonNegativeNumber(result.goldGained);
-		const xp = toNonNegativeNumber(result.xpGained);
-		const relics = toNonNegativeNumber(result.relicsGained);
+		const baitPrice = toNullableNonNegativeNumber(context?.baitPrice);
+		const hasBait = Boolean(context?.baitId);
 		const category = isTreasure ? "Treasure Chest" : isRelic ? "Relic" : rarity === "Gears" ? "Gears" : rarity || "Unknown";
-		const earnedCount = isFish ? count : 1;
 		return {
-			...earningsStats,
-			updatedAt: Date.now(),
-			casts: earningsStats.casts + 1,
-			fish: earningsStats.fish + (isFish ? count : 0),
-			gold: earningsStats.gold + gold,
-			xp: earningsStats.xp + xp,
-			relics: earningsStats.relics + relics,
-			treasureChests: earningsStats.treasureChests + (isTreasure ? 1 : 0),
-			gears: earningsStats.gears + (isGear ? 1 : 0),
+			casts: 1,
+			fish: isFish ? count : 0,
+			gold: toNonNegativeNumber(result.goldGained),
+			fishGold: isFish ? toNonNegativeNumber(result.fish?.baseGold) * count : 0,
+			baitCost: baitPrice ?? 0,
+			unknownBaitCostCasts: hasBait && baitPrice === null ? 1 : 0,
+			xp: toNonNegativeNumber(result.xpGained),
+			relics: toNonNegativeNumber(result.relicsGained),
+			treasureChests: isTreasure ? 1 : 0,
+			gears: isGear ? 1 : 0,
+			category,
+			earnedCount: isFish ? count : 1
+		};
+	}
+	function incrementEarningsSummary(summary, castEarnings, updatedAt) {
+		return {
+			...summary,
+			updatedAt,
+			casts: summary.casts + castEarnings.casts,
+			fish: summary.fish + castEarnings.fish,
+			gold: summary.gold + castEarnings.gold,
+			fishGold: summary.fishGold + castEarnings.fishGold,
+			baitCost: summary.baitCost + castEarnings.baitCost,
+			unknownBaitCostCasts: summary.unknownBaitCostCasts + castEarnings.unknownBaitCostCasts,
+			xp: summary.xp + castEarnings.xp,
+			relics: summary.relics + castEarnings.relics,
+			treasureChests: summary.treasureChests + castEarnings.treasureChests,
+			gears: summary.gears + castEarnings.gears,
 			rarityCounts: {
-				...earningsStats.rarityCounts,
-				[category]: toNonNegativeNumber(earningsStats.rarityCounts[category]) + earnedCount
+				...summary.rarityCounts,
+				[castEarnings.category]: toNonNegativeNumber(summary.rarityCounts[castEarnings.category]) + castEarnings.earnedCount
 			}
+		};
+	}
+	function updateEarningsStats(earningsStats, result, context = null) {
+		const updatedAt = Date.now();
+		const normalizedContext = normalizeEarningsContext(context);
+		const castEarnings = getCastEarnings(result, normalizedContext);
+		const nextStats = incrementEarningsSummary(earningsStats, castEarnings, updatedAt);
+		if (!normalizedContext) return nextStats;
+		const key = createBreakdownKey(normalizedContext);
+		const nextBreakdown = incrementEarningsSummary({
+			...earningsStats.breakdowns?.[key] ?? {
+				...normalizedContext,
+				startedAt: updatedAt,
+				updatedAt: null,
+				...createEmptyEarningsCounters()
+			},
+			...normalizedContext
+		}, castEarnings, updatedAt);
+		return {
+			...nextStats,
+			breakdowns: {
+				...earningsStats.breakdowns,
+				[key]: nextBreakdown
+			},
+			lastContext: normalizedContext
+		};
+	}
+	function mergeRarityCounts(left, right) {
+		const merged = { ...left };
+		for (const [category, count] of Object.entries(right)) merged[category] = toNonNegativeNumber(merged[category]) + count;
+		return merged;
+	}
+	function filterEarningsStats(earningsStats, { biomeId = null, baitId = null } = {}) {
+		const normalizedBiomeId = biomeId === null ? null : String(biomeId);
+		const normalizedBaitId = baitId === null ? null : String(baitId);
+		if (normalizedBiomeId === null && normalizedBaitId === null) return earningsStats;
+		let filteredStats = {
+			startedAt: null,
+			updatedAt: null,
+			...createEmptyEarningsCounters()
+		};
+		for (const breakdown of Object.values(earningsStats.breakdowns ?? {})) {
+			if (normalizedBiomeId !== null && breakdown.biomeId !== normalizedBiomeId || normalizedBaitId !== null && breakdown.baitId !== normalizedBaitId) continue;
+			filteredStats = {
+				...filteredStats,
+				startedAt: filteredStats.startedAt === null ? breakdown.startedAt : Math.min(filteredStats.startedAt, breakdown.startedAt),
+				updatedAt: Math.max(filteredStats.updatedAt ?? 0, breakdown.updatedAt ?? 0),
+				casts: filteredStats.casts + breakdown.casts,
+				fish: filteredStats.fish + breakdown.fish,
+				gold: filteredStats.gold + breakdown.gold,
+				fishGold: filteredStats.fishGold + breakdown.fishGold,
+				baitCost: filteredStats.baitCost + breakdown.baitCost,
+				unknownBaitCostCasts: filteredStats.unknownBaitCostCasts + breakdown.unknownBaitCostCasts,
+				xp: filteredStats.xp + breakdown.xp,
+				relics: filteredStats.relics + breakdown.relics,
+				treasureChests: filteredStats.treasureChests + breakdown.treasureChests,
+				gears: filteredStats.gears + breakdown.gears,
+				rarityCounts: mergeRarityCounts(filteredStats.rarityCounts, breakdown.rarityCounts)
+			};
+		}
+		return filteredStats;
+	}
+	function listEarningsBreakdowns(earningsStats) {
+		return Object.values(earningsStats.breakdowns ?? {});
+	}
+	var cachedBaits = null;
+	var cachedBaitCatalog = new Map();
+	function normalizeId(value, fallback) {
+		return String(value ?? "").trim() || fallback;
+	}
+	function getBaitCatalog() {
+		const baits = Array.isArray(window.BAITS) ? window.BAITS : [];
+		if (baits !== cachedBaits) {
+			cachedBaits = baits;
+			cachedBaitCatalog = new Map(baits.filter((bait) => bait?.id).map((bait) => [String(bait.id), bait]));
+		}
+		return cachedBaitCatalog;
+	}
+	function getBaitById(baitId) {
+		if (typeof window.getBaitById === "function") try {
+			const bait = window.getBaitById(baitId);
+			if (bait) return bait;
+		} catch (error) {
+			console.warn("[收益统计] 无法从页面查询鱼饵信息：", error);
+		}
+		return getBaitCatalog().get(baitId) ?? null;
+	}
+	function normalizeBaitPrice(value) {
+		const price = Number(value);
+		return Number.isFinite(price) && price >= 0 ? price : null;
+	}
+	function getCastEarningsContext(result) {
+		const biomeId = normalizeId(result.currentBiome, "unknown");
+		const baitId = normalizeId(result.equippedBait, "unknown");
+		const biome = window.BIOMES?.[biomeId] ?? null;
+		const bait = getBaitById(baitId);
+		return {
+			biomeId,
+			biomeName: String(biome?.name ?? "").trim() || `地图 ${biomeId}`,
+			baitId,
+			baitName: String(bait?.name ?? "").trim() || baitId,
+			baitPrice: normalizeBaitPrice(bait?.price)
 		};
 	}
 	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult }) {
@@ -701,18 +882,20 @@
 			console.warn("[自动抛竿] 无法保存面板折叠状态：", error);
 		}
 	}
-	var panel_default = "* {\n    box-sizing: border-box;\n}\n\n.panel {\n    width: 250px;\n    max-width: calc(100vw - 32px);\n    padding: 14px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 12px;\n    background: rgba(18, 18, 24, 0.94);\n    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);\n    color: #ffffff;\n    backdrop-filter: blur(12px);\n}\n\n.panel[data-collapsed='true'] {\n    width: auto;\n    padding: 7px;\n}\n\n.panel[data-collapsed='true'] .panel-content,\n.panel[data-collapsed='true'] .title-text {\n    display: none;\n}\n\n.header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n}\n\n.title {\n    display: flex;\n    align-items: center;\n    gap: 5px;\n    font-size: 15px;\n    font-weight: 700;\n}\n\n.collapse-toggle {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    width: 26px;\n    height: 26px;\n    flex-shrink: 0;\n    padding: 0;\n    border: 1px solid rgba(255, 255, 255, 0.16);\n    border-radius: 7px;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 16px;\n    line-height: 1;\n    cursor: pointer;\n}\n\n.collapse-toggle:hover {\n    background: rgba(255, 255, 255, 0.14);\n}\n\n.panel-content {\n    margin-top: 10px;\n}\n\n.tabs {\n    display: grid;\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n    gap: 4px;\n    margin-bottom: 10px;\n    padding: 3px;\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.07);\n}\n\n.panel-tab {\n    padding: 6px 8px;\n    border: 0;\n    border-radius: 6px;\n    background: transparent;\n    color: rgba(255, 255, 255, 0.56);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.panel-tab[data-active='true'] {\n    background: #6d5dfc;\n    color: #ffffff;\n}\n\n.panel-view[hidden] {\n    display: none;\n}\n\n.row {\n    display: flex;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 7px;\n    font-size: 12px;\n    line-height: 1.4;\n}\n\n.label {\n    flex-shrink: 0;\n    color: rgba(255, 255, 255, 0.58);\n}\n\n.value {\n    min-width: 0;\n    overflow-wrap: anywhere;\n    text-align: right;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.field {\n    display: block;\n    margin-top: 12px;\n}\n\n.field-label {\n    display: block;\n    margin-bottom: 5px;\n    color: rgba(255, 255, 255, 0.58);\n    font-size: 12px;\n}\n\n.input {\n    width: 100%;\n    padding: 8px 9px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 7px;\n    outline: none;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.92);\n    font-size: 12px;\n}\n\n.input:focus {\n    border-color: #6d5dfc;\n}\n\n.input::placeholder {\n    color: rgba(255, 255, 255, 0.32);\n}\n\n.field-help {\n    margin-top: 6px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 11px;\n    line-height: 1.45;\n}\n\n.field-help[hidden] {\n    display: none;\n}\n\n.field-help a {\n    color: #9ea5ff;\n    text-decoration: underline;\n}\n\n.settings-section + .settings-section {\n    margin-top: 14px;\n    padding-top: 14px;\n    border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.settings-title {\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    font-weight: 700;\n}\n\n.choice-list {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n    margin-top: 8px;\n}\n\n.choice-option {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    padding: 7px 8px;\n    border: 1px solid rgba(255, 255, 255, 0.12);\n    border-radius: 7px;\n    color: rgba(255, 255, 255, 0.78);\n    font-size: 11px;\n    cursor: pointer;\n}\n\n.choice-option:has(input:checked) {\n    border-color: rgba(109, 93, 252, 0.72);\n    background: rgba(109, 93, 252, 0.14);\n    color: #ffffff;\n}\n\n.choice-option input {\n    margin: 0;\n    accent-color: #6d5dfc;\n}\n\n.settings-group[hidden] {\n    display: none;\n}\n\n.number-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n\n.secondary-button {\n    width: 100%;\n    margin-top: 9px;\n    padding: 7px 10px;\n    border: 1px solid rgba(109, 93, 252, 0.55);\n    border-radius: 7px;\n    background: rgba(109, 93, 252, 0.12);\n    color: #b9b5ff;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.secondary-button:hover {\n    background: rgba(109, 93, 252, 0.22);\n}\n\n.secondary-button:disabled {\n    cursor: default;\n    opacity: 0.48;\n}\n\n.toggle {\n    width: 100%;\n    margin-top: 12px;\n    padding: 9px 12px;\n    border: 0;\n    border-radius: 8px;\n    background: #6d5dfc;\n    color: #ffffff;\n    font-size: 13px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.toggle:hover {\n    filter: brightness(1.08);\n}\n\n.toggle[data-enabled='true'] {\n    background: #d34848;\n}\n\n.option-row {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 10px;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    cursor: pointer;\n}\n\n.switch {\n    position: relative;\n    width: 38px;\n    height: 22px;\n    flex-shrink: 0;\n}\n\n.switch input {\n    position: absolute;\n    width: 1px;\n    height: 1px;\n    opacity: 0;\n}\n\n.switch-track {\n    display: block;\n    width: 100%;\n    height: 100%;\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.2);\n    transition: background 0.15s ease;\n}\n\n.switch-track::after {\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #ffffff;\n    content: '';\n    transition: transform 0.15s ease;\n}\n\n.switch input:checked + .switch-track {\n    background: #6d5dfc;\n}\n\n.switch input:checked + .switch-track::after {\n    transform: translateX(16px);\n}\n\n.switch input:focus-visible + .switch-track {\n    outline: 2px solid #9ea5ff;\n    outline-offset: 2px;\n}\n\n.hint {\n    margin-top: 9px;\n    text-align: center;\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 11px;\n}\n\n.stats-start {\n    margin-bottom: 9px;\n    color: rgba(255, 255, 255, 0.48);\n    font-size: 10px;\n    text-align: center;\n}\n\n.stats-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n\n.stat-card {\n    min-width: 0;\n    padding: 8px;\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.055);\n}\n\n.stat-card-label {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stat-card-value {\n    display: block;\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.94);\n    font-size: 13px;\n    line-height: 1.25;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stats-section-title {\n    margin: 12px 0 6px;\n    color: rgba(255, 255, 255, 0.62);\n    font-size: 11px;\n    font-weight: 700;\n}\n\n.stats-list {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n\n.stat-chip {\n    max-width: 100%;\n    overflow: hidden;\n    padding: 4px 6px;\n    border-radius: 6px;\n    background: rgba(109, 93, 252, 0.16);\n    color: #d8d8df;\n    font-size: 10px;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-chip[data-tone='uncommon'] {\n    background: rgba(132, 204, 22, 0.14);\n    color: #84cc16;\n}\n\n.stat-chip[data-tone='common'] {\n    background: rgba(156, 163, 175, 0.14);\n    color: #9ca3af;\n}\n\n.stat-chip[data-tone='fine'] {\n    background: rgba(59, 130, 246, 0.14);\n    color: #3b82f6;\n}\n\n.stat-chip[data-tone='rare'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='epic'] {\n    background: rgba(236, 72, 153, 0.14);\n    color: #ec4899;\n}\n\n.stat-chip[data-tone='legendary'] {\n    background: rgba(245, 158, 11, 0.14);\n    color: #f59e0b;\n}\n\n.stat-chip[data-tone='mythic'] {\n    background: rgba(239, 68, 68, 0.14);\n    color: #ef4444;\n}\n\n.stat-chip[data-tone='exotic'] {\n    background: rgba(6, 182, 212, 0.14);\n    color: #06b6d4;\n}\n\n.stat-chip[data-tone='arcane'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='relic'],\n.stat-chip[data-tone='treasure'] {\n    background: rgba(242, 204, 96, 0.14);\n    color: #f2cc60;\n}\n\n.stat-chip[data-tone='gear'] {\n    background: rgba(86, 212, 221, 0.14);\n    color: #7ce7ee;\n}\n\n.empty-stat {\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 10px;\n    line-height: 1.45;\n}\n\n.reset-stats {\n    width: 100%;\n    margin-top: 12px;\n    padding: 7px 10px;\n    border: 1px solid rgba(211, 72, 72, 0.52);\n    border-radius: 7px;\n    background: rgba(211, 72, 72, 0.12);\n    color: #ff9d9d;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.reset-stats:hover {\n    background: rgba(211, 72, 72, 0.22);\n}\n";
+	var panel_default = "* {\n    box-sizing: border-box;\n}\n\n.panel {\n    width: 280px;\n    max-width: calc(100vw - 32px);\n    padding: 14px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 12px;\n    background: rgba(18, 18, 24, 0.94);\n    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);\n    color: #ffffff;\n    backdrop-filter: blur(12px);\n}\n\n.panel[data-collapsed='true'] {\n    width: auto;\n    padding: 7px;\n}\n\n.panel[data-collapsed='true'] .panel-content,\n.panel[data-collapsed='true'] .title-text {\n    display: none;\n}\n\n.header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n}\n\n.title {\n    display: flex;\n    align-items: center;\n    gap: 5px;\n    font-size: 15px;\n    font-weight: 700;\n}\n\n.collapse-toggle {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    width: 26px;\n    height: 26px;\n    flex-shrink: 0;\n    padding: 0;\n    border: 1px solid rgba(255, 255, 255, 0.16);\n    border-radius: 7px;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 16px;\n    line-height: 1;\n    cursor: pointer;\n}\n\n.collapse-toggle:hover {\n    background: rgba(255, 255, 255, 0.14);\n}\n\n.panel-content {\n    margin-top: 10px;\n}\n\n.tabs {\n    display: grid;\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n    gap: 4px;\n    margin-bottom: 10px;\n    padding: 3px;\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.07);\n}\n\n.panel-tab {\n    padding: 6px 8px;\n    border: 0;\n    border-radius: 6px;\n    background: transparent;\n    color: rgba(255, 255, 255, 0.56);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.panel-tab[data-active='true'] {\n    background: #6d5dfc;\n    color: #ffffff;\n}\n\n.panel-view[hidden] {\n    display: none;\n}\n\n.row {\n    display: flex;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 7px;\n    font-size: 12px;\n    line-height: 1.4;\n}\n\n.label {\n    flex-shrink: 0;\n    color: rgba(255, 255, 255, 0.58);\n}\n\n.value {\n    min-width: 0;\n    overflow-wrap: anywhere;\n    text-align: right;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.field {\n    display: block;\n    margin-top: 12px;\n}\n\n.field-label {\n    display: block;\n    margin-bottom: 5px;\n    color: rgba(255, 255, 255, 0.58);\n    font-size: 12px;\n}\n\n.input {\n    width: 100%;\n    padding: 8px 9px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 7px;\n    outline: none;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.92);\n    font-size: 12px;\n}\n\n.input:focus {\n    border-color: #6d5dfc;\n}\n\n.input::placeholder {\n    color: rgba(255, 255, 255, 0.32);\n}\n\n.field-help {\n    margin-top: 6px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 11px;\n    line-height: 1.45;\n}\n\n.field-help[hidden] {\n    display: none;\n}\n\n.field-help a {\n    color: #9ea5ff;\n    text-decoration: underline;\n}\n\n.settings-section + .settings-section {\n    margin-top: 14px;\n    padding-top: 14px;\n    border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.settings-title {\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    font-weight: 700;\n}\n\n.choice-list {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n    margin-top: 8px;\n}\n\n.choice-option {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    padding: 7px 8px;\n    border: 1px solid rgba(255, 255, 255, 0.12);\n    border-radius: 7px;\n    color: rgba(255, 255, 255, 0.78);\n    font-size: 11px;\n    cursor: pointer;\n}\n\n.choice-option:has(input:checked) {\n    border-color: rgba(109, 93, 252, 0.72);\n    background: rgba(109, 93, 252, 0.14);\n    color: #ffffff;\n}\n\n.choice-option input {\n    margin: 0;\n    accent-color: #6d5dfc;\n}\n\n.settings-group[hidden] {\n    display: none;\n}\n\n.number-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n\n.secondary-button {\n    width: 100%;\n    margin-top: 9px;\n    padding: 7px 10px;\n    border: 1px solid rgba(109, 93, 252, 0.55);\n    border-radius: 7px;\n    background: rgba(109, 93, 252, 0.12);\n    color: #b9b5ff;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.secondary-button:hover {\n    background: rgba(109, 93, 252, 0.22);\n}\n\n.secondary-button:disabled {\n    cursor: default;\n    opacity: 0.48;\n}\n\n.toggle {\n    width: 100%;\n    margin-top: 12px;\n    padding: 9px 12px;\n    border: 0;\n    border-radius: 8px;\n    background: #6d5dfc;\n    color: #ffffff;\n    font-size: 13px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.toggle:hover {\n    filter: brightness(1.08);\n}\n\n.toggle[data-enabled='true'] {\n    background: #d34848;\n}\n\n.option-row {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 10px;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    cursor: pointer;\n}\n\n.switch {\n    position: relative;\n    width: 38px;\n    height: 22px;\n    flex-shrink: 0;\n}\n\n.switch input {\n    position: absolute;\n    width: 1px;\n    height: 1px;\n    opacity: 0;\n}\n\n.switch-track {\n    display: block;\n    width: 100%;\n    height: 100%;\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.2);\n    transition: background 0.15s ease;\n}\n\n.switch-track::after {\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #ffffff;\n    content: '';\n    transition: transform 0.15s ease;\n}\n\n.switch input:checked + .switch-track {\n    background: #6d5dfc;\n}\n\n.switch input:checked + .switch-track::after {\n    transform: translateX(16px);\n}\n\n.switch input:focus-visible + .switch-track {\n    outline: 2px solid #9ea5ff;\n    outline-offset: 2px;\n}\n\n.hint {\n    margin-top: 9px;\n    text-align: center;\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 11px;\n}\n\n.stats-filters {\n    display: grid;\n    gap: 6px;\n    margin-bottom: 8px;\n}\n\n.stats-filter span {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stats-select {\n    width: 100%;\n    padding: 6px 7px;\n    border: 1px solid rgba(255, 255, 255, 0.14);\n    border-radius: 6px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.9);\n    font-size: 10px;\n}\n\n.stats-select:focus {\n    border-color: #6d5dfc;\n}\n\n.stats-scope {\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.72);\n    font-size: 10px;\n    font-weight: 700;\n    text-align: center;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stats-start {\n    margin: 3px 0 9px;\n    color: rgba(255, 255, 255, 0.48);\n    font-size: 10px;\n    text-align: center;\n}\n\n.stats-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n\n.stat-card {\n    min-width: 0;\n    padding: 8px;\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.055);\n}\n\n.stat-card-label {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stat-card-value {\n    display: block;\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.94);\n    font-size: 13px;\n    line-height: 1.25;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stats-section-title {\n    margin: 12px 0 6px;\n    color: rgba(255, 255, 255, 0.62);\n    font-size: 11px;\n    font-weight: 700;\n}\n\n.stats-list {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n\n.stat-chip {\n    max-width: 100%;\n    overflow: hidden;\n    padding: 4px 6px;\n    border-radius: 6px;\n    background: rgba(109, 93, 252, 0.16);\n    color: #d8d8df;\n    font-size: 10px;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-chip[data-tone='uncommon'] {\n    background: rgba(132, 204, 22, 0.14);\n    color: #84cc16;\n}\n\n.stat-chip[data-tone='common'] {\n    background: rgba(156, 163, 175, 0.14);\n    color: #9ca3af;\n}\n\n.stat-chip[data-tone='fine'] {\n    background: rgba(59, 130, 246, 0.14);\n    color: #3b82f6;\n}\n\n.stat-chip[data-tone='rare'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='epic'] {\n    background: rgba(236, 72, 153, 0.14);\n    color: #ec4899;\n}\n\n.stat-chip[data-tone='legendary'] {\n    background: rgba(245, 158, 11, 0.14);\n    color: #f59e0b;\n}\n\n.stat-chip[data-tone='mythic'] {\n    background: rgba(239, 68, 68, 0.14);\n    color: #ef4444;\n}\n\n.stat-chip[data-tone='exotic'] {\n    background: rgba(6, 182, 212, 0.14);\n    color: #06b6d4;\n}\n\n.stat-chip[data-tone='arcane'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='relic'],\n.stat-chip[data-tone='treasure'] {\n    background: rgba(242, 204, 96, 0.14);\n    color: #f2cc60;\n}\n\n.stat-chip[data-tone='gear'] {\n    background: rgba(86, 212, 221, 0.14);\n    color: #7ce7ee;\n}\n\n.empty-stat {\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 10px;\n    line-height: 1.45;\n}\n\n.stats-cost-note {\n    margin-top: 7px;\n    color: #fbbf24;\n    font-size: 10px;\n    line-height: 1.4;\n}\n\n.stats-cost-note[hidden] {\n    display: none;\n}\n\n.reset-stats {\n    width: 100%;\n    margin-top: 12px;\n    padding: 7px 10px;\n    border: 1px solid rgba(211, 72, 72, 0.52);\n    border-radius: 7px;\n    background: rgba(211, 72, 72, 0.12);\n    color: #ff9d9d;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.reset-stats:hover {\n    background: rgba(211, 72, 72, 0.22);\n}\n";
 	function createPanelController({ actions, formatScheduleDuration, getState }) {
 		let panelCollapsed = loadPanelCollapsed();
 		let panelView = "control";
+		let earningsBiomeFilter = "current";
+		let earningsBaitFilter = "current";
 		let ui = null;
 		const { requestBrowserNotificationPermission, resetEarningsStats, setCaptchaBypassEnabled, setEnabled, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
-		function toNonNegativeNumber(value) {
+		function toFiniteNumber(value) {
 			const number = Number(value);
-			return Number.isFinite(number) && number > 0 ? number : 0;
+			return Number.isFinite(number) ? number : 0;
 		}
 		function createPanel() {
 			if (document.getElementById("arcane-angler-auto-cast-panel-host")) return;
@@ -824,6 +1007,18 @@
         aria-labelledby="earnings-tab"
         hidden
       >
+        <div class="stats-filters">
+          <label class="stats-filter">
+            <span>地图范围</span>
+            <select id="stats-biome-filter" class="stats-select"></select>
+          </label>
+          <label class="stats-filter">
+            <span>鱼饵范围</span>
+            <select id="stats-bait-filter" class="stats-select"></select>
+          </label>
+        </div>
+
+        <div id="stats-scope" class="stats-scope">—</div>
         <div id="stats-start" class="stats-start">—</div>
 
         <div class="stats-grid">
@@ -836,8 +1031,20 @@
             <strong id="stats-fish" class="stat-card-value">0</strong>
           </div>
           <div class="stat-card">
-            <span class="stat-card-label">金币</span>
+            <span class="stat-card-label">直接金币</span>
             <strong id="stats-gold" class="stat-card-value">0</strong>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card-label">鱼获价值</span>
+            <strong id="stats-fish-gold" class="stat-card-value">0</strong>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card-label">鱼饵成本</span>
+            <strong id="stats-bait-cost" class="stat-card-value">0</strong>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card-label">净收益</span>
+            <strong id="stats-net-gold" class="stat-card-value">0</strong>
           </div>
           <div class="stat-card">
             <span class="stat-card-label">经验</span>
@@ -856,10 +1063,12 @@
             <strong id="stats-gears" class="stat-card-value">0</strong>
           </div>
           <div class="stat-card">
-            <span class="stat-card-label">每竿金币</span>
-            <strong id="stats-gold-average" class="stat-card-value">0</strong>
+            <span class="stat-card-label">每竿净收益</span>
+            <strong id="stats-net-average" class="stat-card-value">0</strong>
           </div>
         </div>
+
+        <div id="stats-cost-note" class="stats-cost-note" hidden></div>
 
         <div class="stats-section-title">收获分类</div>
         <div id="rarity-stats" class="stats-list"></div>
@@ -1034,15 +1243,22 @@
 				scheduleWorkMinutes: shadowRoot.querySelector("#schedule-work-minutes"),
 				scheduleRestMinutes: shadowRoot.querySelector("#schedule-rest-minutes"),
 				scheduleStatus: shadowRoot.querySelector("#schedule-status"),
+				statsBiomeFilter: shadowRoot.querySelector("#stats-biome-filter"),
+				statsBaitFilter: shadowRoot.querySelector("#stats-bait-filter"),
+				statsScope: shadowRoot.querySelector("#stats-scope"),
 				statsStart: shadowRoot.querySelector("#stats-start"),
 				statsCasts: shadowRoot.querySelector("#stats-casts"),
 				statsFish: shadowRoot.querySelector("#stats-fish"),
 				statsGold: shadowRoot.querySelector("#stats-gold"),
+				statsFishGold: shadowRoot.querySelector("#stats-fish-gold"),
+				statsBaitCost: shadowRoot.querySelector("#stats-bait-cost"),
+				statsNetGold: shadowRoot.querySelector("#stats-net-gold"),
 				statsXp: shadowRoot.querySelector("#stats-xp"),
 				statsRelics: shadowRoot.querySelector("#stats-relics"),
 				statsTreasures: shadowRoot.querySelector("#stats-treasures"),
 				statsGears: shadowRoot.querySelector("#stats-gears"),
-				statsGoldAverage: shadowRoot.querySelector("#stats-gold-average"),
+				statsNetAverage: shadowRoot.querySelector("#stats-net-average"),
+				statsCostNote: shadowRoot.querySelector("#stats-cost-note"),
 				rarityStats: shadowRoot.querySelector("#rarity-stats"),
 				resetStats: shadowRoot.querySelector("#reset-stats"),
 				collapseToggle: shadowRoot.querySelector("#collapse-toggle"),
@@ -1088,6 +1304,15 @@
 			});
 			ui.resetStats.addEventListener("click", () => {
 				resetEarningsStats();
+			});
+			ui.statsBiomeFilter.addEventListener("change", (event) => {
+				earningsBiomeFilter = event.currentTarget.value;
+				earningsBaitFilter = earningsBiomeFilter === "current" ? "current" : "all";
+				renderEarningsStats();
+			});
+			ui.statsBaitFilter.addEventListener("change", (event) => {
+				earningsBaitFilter = event.currentTarget.value;
+				renderEarningsStats();
 			});
 			renderToggle();
 			renderCaptchaBypassToggle();
@@ -1140,7 +1365,103 @@
 			}
 		}
 		function formatStatNumber(value, maximumFractionDigits = 0) {
-			return new Intl.NumberFormat("zh-CN", { maximumFractionDigits }).format(toNonNegativeNumber(value));
+			return new Intl.NumberFormat("zh-CN", { maximumFractionDigits }).format(toFiniteNumber(value));
+		}
+		function compareDimensionIds(left, right) {
+			const leftNumber = Number(left);
+			const rightNumber = Number(right);
+			if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) return leftNumber - rightNumber;
+			return String(left).localeCompare(String(right));
+		}
+		function formatBiomeLabel(context) {
+			return context.biomeId === "unknown" ? context.biomeName : `[B${context.biomeId}] ${context.biomeName}`;
+		}
+		function formatBaitLabel(context) {
+			const cost = context.baitPrice === null ? "成本未知" : `${formatStatNumber(context.baitPrice, 2)} 金币/竿`;
+			return `${context.baitName} · ${cost}`;
+		}
+		function replaceSelectOptions(select, options, selectedValue) {
+			select.replaceChildren();
+			for (const optionData of options) {
+				const option = document.createElement("option");
+				option.value = optionData.value;
+				option.textContent = optionData.label;
+				option.disabled = Boolean(optionData.disabled);
+				select.appendChild(option);
+			}
+			select.value = options.find((option) => option.value === selectedValue) ? selectedValue : "all";
+			return select.value;
+		}
+		function getResolvedBiomeId(earningsStats) {
+			if (earningsBiomeFilter === "current") return earningsStats.lastContext?.biomeId ?? null;
+			return earningsBiomeFilter === "all" ? null : earningsBiomeFilter.slice(6);
+		}
+		function renderEarningsFilters(earningsStats) {
+			const breakdowns = listEarningsBreakdowns(earningsStats);
+			const currentContext = earningsStats.lastContext;
+			const biomeContexts = new Map();
+			for (const breakdown of breakdowns) biomeContexts.set(breakdown.biomeId, breakdown);
+			if (currentContext) biomeContexts.set(currentContext.biomeId, currentContext);
+			const sortedBiomeContexts = [...biomeContexts.values()].sort((left, right) => compareDimensionIds(left.biomeId, right.biomeId));
+			const biomeOptions = [
+				{
+					value: "current",
+					label: currentContext ? `当前 · ${formatBiomeLabel(currentContext)}` : "当前地图（等待首次抛竿）",
+					disabled: !currentContext
+				},
+				{
+					value: "all",
+					label: "全部地图"
+				},
+				...sortedBiomeContexts.map((context) => ({
+					value: `biome:${context.biomeId}`,
+					label: formatBiomeLabel(context)
+				}))
+			];
+			earningsBiomeFilter = replaceSelectOptions(ui.statsBiomeFilter, biomeOptions, earningsBiomeFilter);
+			const resolvedBiomeId = getResolvedBiomeId(earningsStats);
+			const baitContexts = new Map();
+			for (const breakdown of breakdowns) {
+				if (resolvedBiomeId !== null && breakdown.biomeId !== resolvedBiomeId) continue;
+				baitContexts.set(breakdown.baitId, breakdown);
+			}
+			const currentBaitAvailable = currentContext && (resolvedBiomeId === null || resolvedBiomeId === currentContext.biomeId);
+			if (currentBaitAvailable) baitContexts.set(currentContext.baitId, currentContext);
+			const sortedBaitContexts = [...baitContexts.values()].sort((left, right) => left.baitName.localeCompare(right.baitName));
+			const baitOptions = [
+				{
+					value: "current",
+					label: currentBaitAvailable ? `当前 · ${formatBaitLabel(currentContext)}` : "当前鱼饵（不在所选地图）",
+					disabled: !currentBaitAvailable
+				},
+				{
+					value: "all",
+					label: "全部鱼饵"
+				},
+				...sortedBaitContexts.map((context) => ({
+					value: `bait:${context.baitId}`,
+					label: formatBaitLabel(context)
+				}))
+			];
+			earningsBaitFilter = replaceSelectOptions(ui.statsBaitFilter, baitOptions, earningsBaitFilter);
+		}
+		function resolveEarningsFilter(earningsStats) {
+			const currentContext = earningsStats.lastContext;
+			return {
+				ready: !(earningsBiomeFilter === "current" && !currentContext) && !(earningsBaitFilter === "current" && !currentContext),
+				biomeId: earningsBiomeFilter === "current" ? currentContext?.biomeId : earningsBiomeFilter === "all" ? null : earningsBiomeFilter.slice(6),
+				baitId: earningsBaitFilter === "current" ? currentContext?.baitId : earningsBaitFilter === "all" ? null : earningsBaitFilter.slice(5)
+			};
+		}
+		function getEarningsScopeLabel(earningsStats, filter) {
+			if (!filter.ready) return "等待首次抛竿确认当前地图和鱼饵";
+			const breakdowns = listEarningsBreakdowns(earningsStats);
+			const biomeContext = earningsStats.lastContext?.biomeId === filter.biomeId ? earningsStats.lastContext : breakdowns.find((breakdown) => breakdown.biomeId === filter.biomeId);
+			const baitContext = earningsStats.lastContext?.baitId === filter.baitId ? earningsStats.lastContext : breakdowns.find((breakdown) => breakdown.baitId === filter.baitId);
+			return `${filter.biomeId === null ? "全部地图" : formatBiomeLabel(biomeContext ?? {
+				biomeId: filter.biomeId,
+				biomeName: `地图 ${filter.biomeId}`
+			})} · ${filter.baitId === null ? "全部鱼饵" : baitContext?.baitName ?? filter.baitId}`;
 		}
 		function getEarningsCategoryDisplay(category) {
 			const originalLabel = normalizeText(category) || "Unknown";
@@ -1172,17 +1493,30 @@
 		function renderEarningsStats() {
 			if (!ui?.statsCasts) return;
 			const { earningsStats } = getState();
-			const averageGold = earningsStats.casts > 0 ? earningsStats.gold / earningsStats.casts : 0;
-			ui.statsStart.textContent = `统计起点：${new Date(earningsStats.startedAt).toLocaleString()}`;
-			ui.statsCasts.textContent = formatStatNumber(earningsStats.casts);
-			ui.statsFish.textContent = formatStatNumber(earningsStats.fish);
-			ui.statsGold.textContent = formatStatNumber(earningsStats.gold, 2);
-			ui.statsXp.textContent = formatStatNumber(earningsStats.xp, 2);
-			ui.statsRelics.textContent = formatStatNumber(earningsStats.relics, 2);
-			ui.statsTreasures.textContent = formatStatNumber(earningsStats.treasureChests);
-			ui.statsGears.textContent = formatStatNumber(earningsStats.gears);
-			ui.statsGoldAverage.textContent = formatStatNumber(averageGold, 1);
-			const rarityEntries = Object.entries(earningsStats.rarityCounts).sort((left, right) => right[1] - left[1]);
+			renderEarningsFilters(earningsStats);
+			const filter = resolveEarningsFilter(earningsStats);
+			const filteredStats = filter.ready ? filterEarningsStats(earningsStats, filter) : filterEarningsStats(earningsStats, {
+				biomeId: "__missing__",
+				baitId: "__missing__"
+			});
+			const netGold = filteredStats.gold + filteredStats.fishGold - filteredStats.baitCost;
+			const averageNetGold = filteredStats.casts > 0 ? netGold / filteredStats.casts : 0;
+			ui.statsScope.textContent = getEarningsScopeLabel(earningsStats, filter);
+			ui.statsStart.textContent = filteredStats.startedAt ? `统计起点：${new Date(filteredStats.startedAt).toLocaleString()}` : "当前范围暂无数据";
+			ui.statsCasts.textContent = formatStatNumber(filteredStats.casts);
+			ui.statsFish.textContent = formatStatNumber(filteredStats.fish);
+			ui.statsGold.textContent = formatStatNumber(filteredStats.gold, 2);
+			ui.statsFishGold.textContent = formatStatNumber(filteredStats.fishGold, 2);
+			ui.statsBaitCost.textContent = formatStatNumber(filteredStats.baitCost, 2);
+			ui.statsNetGold.textContent = formatStatNumber(netGold, 2);
+			ui.statsXp.textContent = formatStatNumber(filteredStats.xp, 2);
+			ui.statsRelics.textContent = formatStatNumber(filteredStats.relics, 2);
+			ui.statsTreasures.textContent = formatStatNumber(filteredStats.treasureChests);
+			ui.statsGears.textContent = formatStatNumber(filteredStats.gears);
+			ui.statsNetAverage.textContent = formatStatNumber(averageNetGold, 1);
+			ui.statsCostNote.hidden = filteredStats.unknownBaitCostCasts === 0;
+			ui.statsCostNote.textContent = filteredStats.unknownBaitCostCasts > 0 ? `${formatStatNumber(filteredStats.unknownBaitCostCasts)} 次抛竿未获取到鱼饵价格，成本和净收益暂未包含。` : "";
+			const rarityEntries = Object.entries(filteredStats.rarityCounts).sort((left, right) => right[1] - left[1]);
 			renderStatsList(ui.rarityStats, rarityEntries, "暂无收获");
 		}
 		function setPanelCollapsed(nextCollapsed) {
@@ -1287,7 +1621,7 @@
 	var panel = null;
 	var schedule = null;
 	function recordCastResult(result) {
-		earningsStats = updateEarningsStats(earningsStats, result);
+		earningsStats = updateEarningsStats(earningsStats, result, getCastEarningsContext(result));
 		saveEarningsStats(earningsStats);
 		panel.renderEarningsStats();
 	}

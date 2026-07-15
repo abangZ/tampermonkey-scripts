@@ -1,4 +1,5 @@
 import { EARNINGS_CATEGORY_DISPLAY, PANEL_ID } from '../config.js';
+import { filterEarningsStats, listEarningsBreakdowns } from '../earnings.js';
 import { loadPanelCollapsed, savePanelCollapsed } from '../storage.js';
 import panelStyles from './panel.css?raw';
 
@@ -9,6 +10,8 @@ export function createPanelController({
 }) {
     let panelCollapsed = loadPanelCollapsed();
     let panelView = 'control';
+    let earningsBiomeFilter = 'current';
+    let earningsBaitFilter = 'current';
     let ui = null;
 
     const {
@@ -28,10 +31,10 @@ export function createPanelController({
             .trim();
     }
 
-    function toNonNegativeNumber(value) {
+    function toFiniteNumber(value) {
         const number = Number(value);
 
-        return Number.isFinite(number) && number > 0 ? number : 0;
+        return Number.isFinite(number) ? number : 0;
     }
 
     /**
@@ -155,6 +158,18 @@ export function createPanelController({
         aria-labelledby="earnings-tab"
         hidden
       >
+        <div class="stats-filters">
+          <label class="stats-filter">
+            <span>地图范围</span>
+            <select id="stats-biome-filter" class="stats-select"></select>
+          </label>
+          <label class="stats-filter">
+            <span>鱼饵范围</span>
+            <select id="stats-bait-filter" class="stats-select"></select>
+          </label>
+        </div>
+
+        <div id="stats-scope" class="stats-scope">—</div>
         <div id="stats-start" class="stats-start">—</div>
 
         <div class="stats-grid">
@@ -167,8 +182,20 @@ export function createPanelController({
             <strong id="stats-fish" class="stat-card-value">0</strong>
           </div>
           <div class="stat-card">
-            <span class="stat-card-label">金币</span>
+            <span class="stat-card-label">直接金币</span>
             <strong id="stats-gold" class="stat-card-value">0</strong>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card-label">鱼获价值</span>
+            <strong id="stats-fish-gold" class="stat-card-value">0</strong>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card-label">鱼饵成本</span>
+            <strong id="stats-bait-cost" class="stat-card-value">0</strong>
+          </div>
+          <div class="stat-card">
+            <span class="stat-card-label">净收益</span>
+            <strong id="stats-net-gold" class="stat-card-value">0</strong>
           </div>
           <div class="stat-card">
             <span class="stat-card-label">经验</span>
@@ -187,10 +214,12 @@ export function createPanelController({
             <strong id="stats-gears" class="stat-card-value">0</strong>
           </div>
           <div class="stat-card">
-            <span class="stat-card-label">每竿金币</span>
-            <strong id="stats-gold-average" class="stat-card-value">0</strong>
+            <span class="stat-card-label">每竿净收益</span>
+            <strong id="stats-net-average" class="stat-card-value">0</strong>
           </div>
         </div>
+
+        <div id="stats-cost-note" class="stats-cost-note" hidden></div>
 
         <div class="stats-section-title">收获分类</div>
         <div id="rarity-stats" class="stats-list"></div>
@@ -385,15 +414,22 @@ export function createPanelController({
                 '#schedule-rest-minutes',
             ),
             scheduleStatus: shadowRoot.querySelector('#schedule-status'),
+            statsBiomeFilter: shadowRoot.querySelector('#stats-biome-filter'),
+            statsBaitFilter: shadowRoot.querySelector('#stats-bait-filter'),
+            statsScope: shadowRoot.querySelector('#stats-scope'),
             statsStart: shadowRoot.querySelector('#stats-start'),
             statsCasts: shadowRoot.querySelector('#stats-casts'),
             statsFish: shadowRoot.querySelector('#stats-fish'),
             statsGold: shadowRoot.querySelector('#stats-gold'),
+            statsFishGold: shadowRoot.querySelector('#stats-fish-gold'),
+            statsBaitCost: shadowRoot.querySelector('#stats-bait-cost'),
+            statsNetGold: shadowRoot.querySelector('#stats-net-gold'),
             statsXp: shadowRoot.querySelector('#stats-xp'),
             statsRelics: shadowRoot.querySelector('#stats-relics'),
             statsTreasures: shadowRoot.querySelector('#stats-treasures'),
             statsGears: shadowRoot.querySelector('#stats-gears'),
-            statsGoldAverage: shadowRoot.querySelector('#stats-gold-average'),
+            statsNetAverage: shadowRoot.querySelector('#stats-net-average'),
+            statsCostNote: shadowRoot.querySelector('#stats-cost-note'),
             rarityStats: shadowRoot.querySelector('#rarity-stats'),
             resetStats: shadowRoot.querySelector('#reset-stats'),
             collapseToggle: shadowRoot.querySelector('#collapse-toggle'),
@@ -457,6 +493,18 @@ export function createPanelController({
 
         ui.resetStats.addEventListener('click', () => {
             resetEarningsStats();
+        });
+
+        ui.statsBiomeFilter.addEventListener('change', (event) => {
+            earningsBiomeFilter = event.currentTarget.value;
+            earningsBaitFilter =
+                earningsBiomeFilter === 'current' ? 'current' : 'all';
+            renderEarningsStats();
+        });
+
+        ui.statsBaitFilter.addEventListener('change', (event) => {
+            earningsBaitFilter = event.currentTarget.value;
+            renderEarningsStats();
         });
 
         renderToggle();
@@ -529,7 +577,213 @@ export function createPanelController({
     function formatStatNumber(value, maximumFractionDigits = 0) {
         return new Intl.NumberFormat('zh-CN', {
             maximumFractionDigits,
-        }).format(toNonNegativeNumber(value));
+        }).format(toFiniteNumber(value));
+    }
+
+    function compareDimensionIds(left, right) {
+        const leftNumber = Number(left);
+        const rightNumber = Number(right);
+
+        if (Number.isFinite(leftNumber) && Number.isFinite(rightNumber)) {
+            return leftNumber - rightNumber;
+        }
+
+        return String(left).localeCompare(String(right));
+    }
+
+    function formatBiomeLabel(context) {
+        return context.biomeId === 'unknown'
+            ? context.biomeName
+            : `[B${context.biomeId}] ${context.biomeName}`;
+    }
+
+    function formatBaitLabel(context) {
+        const cost =
+            context.baitPrice === null
+                ? '成本未知'
+                : `${formatStatNumber(context.baitPrice, 2)} 金币/竿`;
+
+        return `${context.baitName} · ${cost}`;
+    }
+
+    function replaceSelectOptions(select, options, selectedValue) {
+        select.replaceChildren();
+
+        for (const optionData of options) {
+            const option = document.createElement('option');
+
+            option.value = optionData.value;
+            option.textContent = optionData.label;
+            option.disabled = Boolean(optionData.disabled);
+            select.appendChild(option);
+        }
+
+        const selectedOption = options.find(
+            (option) => option.value === selectedValue,
+        );
+
+        select.value = selectedOption ? selectedValue : 'all';
+        return select.value;
+    }
+
+    function getResolvedBiomeId(earningsStats) {
+        if (earningsBiomeFilter === 'current') {
+            return earningsStats.lastContext?.biomeId ?? null;
+        }
+
+        return earningsBiomeFilter === 'all'
+            ? null
+            : earningsBiomeFilter.slice('biome:'.length);
+    }
+
+    function renderEarningsFilters(earningsStats) {
+        const breakdowns = listEarningsBreakdowns(earningsStats);
+        const currentContext = earningsStats.lastContext;
+        const biomeContexts = new Map();
+
+        for (const breakdown of breakdowns) {
+            biomeContexts.set(breakdown.biomeId, breakdown);
+        }
+
+        if (currentContext) {
+            biomeContexts.set(currentContext.biomeId, currentContext);
+        }
+
+        const sortedBiomeContexts = [...biomeContexts.values()].sort(
+            (left, right) => compareDimensionIds(left.biomeId, right.biomeId),
+        );
+        const biomeOptions = [
+            {
+                value: 'current',
+                label: currentContext
+                    ? `当前 · ${formatBiomeLabel(currentContext)}`
+                    : '当前地图（等待首次抛竿）',
+                disabled: !currentContext,
+            },
+            {
+                value: 'all',
+                label: '全部地图',
+            },
+            ...sortedBiomeContexts.map((context) => ({
+                value: `biome:${context.biomeId}`,
+                label: formatBiomeLabel(context),
+            })),
+        ];
+
+        earningsBiomeFilter = replaceSelectOptions(
+            ui.statsBiomeFilter,
+            biomeOptions,
+            earningsBiomeFilter,
+        );
+
+        const resolvedBiomeId = getResolvedBiomeId(earningsStats);
+        const baitContexts = new Map();
+
+        for (const breakdown of breakdowns) {
+            if (
+                resolvedBiomeId !== null &&
+                breakdown.biomeId !== resolvedBiomeId
+            ) {
+                continue;
+            }
+
+            baitContexts.set(breakdown.baitId, breakdown);
+        }
+
+        const currentBaitAvailable =
+            currentContext &&
+            (resolvedBiomeId === null ||
+                resolvedBiomeId === currentContext.biomeId);
+
+        if (currentBaitAvailable) {
+            baitContexts.set(currentContext.baitId, currentContext);
+        }
+
+        const sortedBaitContexts = [...baitContexts.values()].sort(
+            (left, right) => left.baitName.localeCompare(right.baitName),
+        );
+        const baitOptions = [
+            {
+                value: 'current',
+                label: currentBaitAvailable
+                    ? `当前 · ${formatBaitLabel(currentContext)}`
+                    : '当前鱼饵（不在所选地图）',
+                disabled: !currentBaitAvailable,
+            },
+            {
+                value: 'all',
+                label: '全部鱼饵',
+            },
+            ...sortedBaitContexts.map((context) => ({
+                value: `bait:${context.baitId}`,
+                label: formatBaitLabel(context),
+            })),
+        ];
+
+        earningsBaitFilter = replaceSelectOptions(
+            ui.statsBaitFilter,
+            baitOptions,
+            earningsBaitFilter,
+        );
+    }
+
+    function resolveEarningsFilter(earningsStats) {
+        const currentContext = earningsStats.lastContext;
+        const currentBiomeMissing =
+            earningsBiomeFilter === 'current' && !currentContext;
+        const currentBaitMissing =
+            earningsBaitFilter === 'current' && !currentContext;
+
+        return {
+            ready: !currentBiomeMissing && !currentBaitMissing,
+            biomeId:
+                earningsBiomeFilter === 'current'
+                    ? currentContext?.biomeId
+                    : earningsBiomeFilter === 'all'
+                      ? null
+                      : earningsBiomeFilter.slice('biome:'.length),
+            baitId:
+                earningsBaitFilter === 'current'
+                    ? currentContext?.baitId
+                    : earningsBaitFilter === 'all'
+                      ? null
+                      : earningsBaitFilter.slice('bait:'.length),
+        };
+    }
+
+    function getEarningsScopeLabel(earningsStats, filter) {
+        if (!filter.ready) {
+            return '等待首次抛竿确认当前地图和鱼饵';
+        }
+
+        const breakdowns = listEarningsBreakdowns(earningsStats);
+        const biomeContext =
+            earningsStats.lastContext?.biomeId === filter.biomeId
+                ? earningsStats.lastContext
+                : breakdowns.find(
+                      (breakdown) => breakdown.biomeId === filter.biomeId,
+                  );
+        const baitContext =
+            earningsStats.lastContext?.baitId === filter.baitId
+                ? earningsStats.lastContext
+                : breakdowns.find(
+                      (breakdown) => breakdown.baitId === filter.baitId,
+                  );
+        const biomeLabel =
+            filter.biomeId === null
+                ? '全部地图'
+                : formatBiomeLabel(
+                      biomeContext ?? {
+                          biomeId: filter.biomeId,
+                          biomeName: `地图 ${filter.biomeId}`,
+                      },
+                  );
+        const baitLabel =
+            filter.baitId === null
+                ? '全部鱼饵'
+                : (baitContext?.baitName ?? filter.baitId);
+
+        return `${biomeLabel} · ${baitLabel}`;
     }
 
     function getEarningsCategoryDisplay(category) {
@@ -578,24 +832,56 @@ export function createPanelController({
         }
 
         const { earningsStats } = getState();
-        const averageGold =
-            earningsStats.casts > 0
-                ? earningsStats.gold / earningsStats.casts
-                : 0;
+        renderEarningsFilters(earningsStats);
 
-        ui.statsStart.textContent = `统计起点：${new Date(earningsStats.startedAt).toLocaleString()}`;
-        ui.statsCasts.textContent = formatStatNumber(earningsStats.casts);
-        ui.statsFish.textContent = formatStatNumber(earningsStats.fish);
-        ui.statsGold.textContent = formatStatNumber(earningsStats.gold, 2);
-        ui.statsXp.textContent = formatStatNumber(earningsStats.xp, 2);
-        ui.statsRelics.textContent = formatStatNumber(earningsStats.relics, 2);
-        ui.statsTreasures.textContent = formatStatNumber(
-            earningsStats.treasureChests,
+        const filter = resolveEarningsFilter(earningsStats);
+        const filteredStats = filter.ready
+            ? filterEarningsStats(earningsStats, filter)
+            : filterEarningsStats(earningsStats, {
+                  biomeId: '__missing__',
+                  baitId: '__missing__',
+              });
+        const netGold =
+            filteredStats.gold +
+            filteredStats.fishGold -
+            filteredStats.baitCost;
+        const averageNetGold =
+            filteredStats.casts > 0 ? netGold / filteredStats.casts : 0;
+
+        ui.statsScope.textContent = getEarningsScopeLabel(
+            earningsStats,
+            filter,
         );
-        ui.statsGears.textContent = formatStatNumber(earningsStats.gears);
-        ui.statsGoldAverage.textContent = formatStatNumber(averageGold, 1);
+        ui.statsStart.textContent = filteredStats.startedAt
+            ? `统计起点：${new Date(filteredStats.startedAt).toLocaleString()}`
+            : '当前范围暂无数据';
+        ui.statsCasts.textContent = formatStatNumber(filteredStats.casts);
+        ui.statsFish.textContent = formatStatNumber(filteredStats.fish);
+        ui.statsGold.textContent = formatStatNumber(filteredStats.gold, 2);
+        ui.statsFishGold.textContent = formatStatNumber(
+            filteredStats.fishGold,
+            2,
+        );
+        ui.statsBaitCost.textContent = formatStatNumber(
+            filteredStats.baitCost,
+            2,
+        );
+        ui.statsNetGold.textContent = formatStatNumber(netGold, 2);
+        ui.statsXp.textContent = formatStatNumber(filteredStats.xp, 2);
+        ui.statsRelics.textContent = formatStatNumber(filteredStats.relics, 2);
+        ui.statsTreasures.textContent = formatStatNumber(
+            filteredStats.treasureChests,
+        );
+        ui.statsGears.textContent = formatStatNumber(filteredStats.gears);
+        ui.statsNetAverage.textContent = formatStatNumber(averageNetGold, 1);
 
-        const rarityEntries = Object.entries(earningsStats.rarityCounts).sort(
+        ui.statsCostNote.hidden = filteredStats.unknownBaitCostCasts === 0;
+        ui.statsCostNote.textContent =
+            filteredStats.unknownBaitCostCasts > 0
+                ? `${formatStatNumber(filteredStats.unknownBaitCostCasts)} 次抛竿未获取到鱼饵价格，成本和净收益暂未包含。`
+                : '';
+
+        const rarityEntries = Object.entries(filteredStats.rarityCounts).sort(
             (left, right) => right[1] - left[1],
         );
 
