@@ -62,10 +62,35 @@
 
 .panel-content {
     max-height: calc(100vh - 96px);
+    overflow-x: hidden;
     overflow-y: auto;
     overscroll-behavior: contain;
     margin-top: 10px;
     padding-right: 2px;
+    scrollbar-color: rgba(255, 255, 255, 0.28) transparent;
+    scrollbar-width: thin;
+}
+
+.panel-content::-webkit-scrollbar {
+    width: 6px;
+    height: 0;
+}
+
+.panel-content::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.panel-content::-webkit-scrollbar-thumb {
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.24);
+}
+
+.panel-content::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.38);
+}
+
+.panel-content::-webkit-scrollbar-corner {
+    background: transparent;
 }
 
 .tabs {
