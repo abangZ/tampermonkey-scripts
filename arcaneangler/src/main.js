@@ -69,6 +69,8 @@ let schedule = null;
 let autoBiome = null;
 let autoBait = null;
 let forceNextAutoBaitCheck = false;
+let pendingCaptchaChallenge = null;
+const pendingCompetitionResponses = new Map();
 
 function recordCastResult(result) {
     earningsStats = updateEarningsStats(
@@ -77,10 +79,33 @@ function recordCastResult(result) {
         getCastEarningsContext(result),
     );
     saveEarningsStats(earningsStats);
-    panel.renderEarningsStats();
+    panel?.renderEarningsStats();
     autoBiome?.handleCastResult(result);
     autoBait?.handleCastResult(result);
 }
+
+// 尽早安装 fetch hook，避免漏掉游戏初始化阶段的比赛与公会响应。
+installFetchInterceptor({
+    onCastResult: recordCastResult,
+    onCaptchaChallenge(challenge) {
+        if (captcha) {
+            captcha.handleChallenge(challenge);
+        } else {
+            pendingCaptchaChallenge = challenge;
+        }
+    },
+    onCaptchaVerified() {
+        pendingCaptchaChallenge = null;
+        captcha?.clearChallenge();
+    },
+    onCompetitionResponse(response) {
+        if (autoBiome) {
+            autoBiome.handleCompetitionResponse(response);
+        } else {
+            pendingCompetitionResponses.set(response.pathname, response);
+        }
+    },
+});
 
 function setPushKey(nextPushKey) {
     pushKey = String(nextPushKey ?? '').trim();
@@ -114,6 +139,12 @@ function getPanelState() {
         pushKey,
         scheduleSettings,
         ...(autoBiome?.getSnapshot() ?? {
+            autoBiomeCompetitionBiomes: {
+                guildTournamentBiomeId: null,
+                personalDerbyBiomeId: null,
+            },
+            autoBiomeCompetitionStatus: '自动换图开启后检测',
+            autoBiomeCompetitionUpdatedAt: 0,
             autoBiomeLastUpdatedAt: 0,
             autoBiomeStatus: '等待天气数据',
             autoBiomeTarget: null,
@@ -646,6 +677,16 @@ function setAutoBiomeWeight(nextWeight) {
     handleAutomationStateChanged();
 }
 
+function setAutoBiomePreferCompetition(nextEnabled) {
+    autoBiomeSettings = {
+        ...autoBiomeSettings,
+        preferCompetitionBiomes: Boolean(nextEnabled),
+    };
+    saveAutoBiomeSettings(autoBiomeSettings);
+    panel.renderAutoBiomeSettings();
+    handleAutomationStateChanged();
+}
+
 function updateAutoBaitSettings(nextSettings) {
     autoBaitSettings = {
         ...autoBaitSettings,
@@ -747,102 +788,111 @@ document.addEventListener(
     true,
 );
 
-schedule = createScheduleController({
-    getCaptcha() {
-        return captcha;
-    },
-    getState() {
-        return {
-            enabled,
-            loopId,
-            scheduleSettings,
-        };
-    },
-    renderSettings() {
-        panel?.renderScheduleSettings();
-    },
-    renderStatus(remaining) {
-        panel?.renderScheduleStatus(remaining);
-    },
-    setNextDelay(text) {
-        panel?.setNextDelay(text);
-    },
-    setStatus(text) {
-        panel?.setStatus(text);
-    },
-});
+function initialize() {
+    schedule = createScheduleController({
+        getCaptcha() {
+            return captcha;
+        },
+        getState() {
+            return {
+                enabled,
+                loopId,
+                scheduleSettings,
+            };
+        },
+        renderSettings() {
+            panel?.renderScheduleSettings();
+        },
+        renderStatus(remaining) {
+            panel?.renderScheduleStatus(remaining);
+        },
+        setNextDelay(text) {
+            panel?.setNextDelay(text);
+        },
+        setStatus(text) {
+            panel?.setStatus(text);
+        },
+    });
 
-panel = createPanelController({
-    actions: {
-        requestBrowserNotificationPermission,
-        resetEarningsStats,
-        setAutoBaitEnabled,
-        setAutoBaitGrade,
-        setAutoBaitMinimumQuantity,
-        setAutoBaitPurchaseQuantity,
-        setAutoBiomeEnabled,
-        setAutoBiomeWeight,
-        setCaptchaBypassEnabled,
+    panel = createPanelController({
+        actions: {
+            requestBrowserNotificationPermission,
+            resetEarningsStats,
+            setAutoBaitEnabled,
+            setAutoBaitGrade,
+            setAutoBaitMinimumQuantity,
+            setAutoBaitPurchaseQuantity,
+            setAutoBiomeEnabled,
+            setAutoBiomePreferCompetition,
+            setAutoBiomeWeight,
+            setCaptchaBypassEnabled,
+            setEnabled,
+            setNotificationMode,
+            setPushKey,
+            setScheduleEnabled,
+            setScheduleMinutes,
+        },
+        formatScheduleDuration,
+        getState: getPanelState,
+    });
+
+    captcha = createCaptchaController({
+        getState() {
+            return {
+                captchaBypassEnabled,
+                enabled,
+            };
+        },
+        notify() {
+            return sendVerificationNotification({
+                notificationMode,
+                pushKey,
+            });
+        },
         setEnabled,
-        setNotificationMode,
-        setPushKey,
-        setScheduleEnabled,
-        setScheduleMinutes,
-    },
-    formatScheduleDuration,
-    getState: getPanelState,
-});
+        setNextDelay: panel.setNextDelay,
+        setStatus: panel.setStatus,
+    });
 
-captcha = createCaptchaController({
-    getState() {
-        return {
-            captchaBypassEnabled,
-            enabled,
-        };
-    },
-    notify() {
-        return sendVerificationNotification({
-            notificationMode,
-            pushKey,
-        });
-    },
-    setEnabled,
-    setNextDelay: panel.setNextDelay,
-    setStatus: panel.setStatus,
-});
+    autoBait = createAutoBaitController({
+        getState: getPanelState,
+        onStateChange() {
+            panel?.renderAutoBaitSettings();
+        },
+    });
 
-autoBait = createAutoBaitController({
-    getState: getPanelState,
-    onStateChange() {
-        panel?.renderAutoBaitSettings();
-    },
-});
+    autoBiome = createAutoBiomeController({
+        getState: getPanelState,
+        onBiomeReady(biomeId) {
+            const force = forceNextAutoBaitCheck;
 
-autoBiome = createAutoBiomeController({
-    getState: getPanelState,
-    onBiomeReady(biomeId) {
-        const force = forceNextAutoBaitCheck;
+            forceNextAutoBaitCheck = false;
+            return autoBait?.checkNow({ biomeId, force });
+        },
+        onStateChange() {
+            panel?.renderAutoBiomeSettings();
+        },
+    });
 
-        forceNextAutoBaitCheck = false;
-        return autoBait?.checkNow({ biomeId, force });
-    },
-    onStateChange() {
-        panel?.renderAutoBiomeSettings();
-    },
-});
+    for (const response of pendingCompetitionResponses.values()) {
+        autoBiome.handleCompetitionResponse(response);
+    }
+    pendingCompetitionResponses.clear();
 
-installFetchInterceptor({
-    onCastResult: recordCastResult,
-    onCaptchaChallenge(challenge) {
-        captcha.handleChallenge(challenge);
-    },
-    onCaptchaVerified() {
-        captcha.clearChallenge();
-    },
-});
+    if (pendingCaptchaChallenge) {
+        captcha.handleChallenge(pendingCaptchaChallenge);
+        pendingCaptchaChallenge = null;
+    }
 
-// 第一次安装默认关闭；之后恢复上次保存的状态
-setEnabled(enabled);
-autoBiome.start();
+    // 第一次安装默认关闭；之后恢复上次保存的状态
+    setEnabled(enabled);
+    autoBiome.start();
 
-console.info('[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。');
+    console.info('[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。');
+}
+
+if (document.body) {
+    initialize();
+} else {
+    document.addEventListener('DOMContentLoaded', initialize, { once: true });
+}

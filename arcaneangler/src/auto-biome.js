@@ -9,6 +9,7 @@ const WEATHER_LABELS = {
     gold_breeze: '黄金微风',
     arcane_surge: '奥术涌动',
 };
+const COMPETITION_HOOK_DEBOUNCE = 1000;
 
 function normalizeBiomeId(value) {
     const biomeId = Number(value);
@@ -90,7 +91,57 @@ export function findAvailableBaitForBiome(player, biomeId) {
     return null;
 }
 
-export function selectBestBiome({ biomeWeight, player, weatherByBiome }) {
+function getCompetitionType(biomeId, competitionBiomes) {
+    if (
+        biomeId === normalizeBiomeId(competitionBiomes?.guildTournamentBiomeId)
+    ) {
+        return 'guild';
+    }
+
+    if (biomeId === normalizeBiomeId(competitionBiomes?.personalDerbyBiomeId)) {
+        return 'personal';
+    }
+
+    return null;
+}
+
+export function resolveCompetitionBiomes({
+    derbyResponse,
+    guildResponse,
+    tournamentResponse,
+    tournamentStandingsResponse,
+}) {
+    const activeTournament = tournamentResponse?.active;
+    const activeDerby = derbyResponse?.active;
+    const guildId = normalizeBiomeId(guildResponse?.guild?.guild_id);
+    const standings = Array.isArray(tournamentStandingsResponse?.standings)
+        ? tournamentStandingsResponse.standings
+        : [];
+    const guildRegistered =
+        activeTournament?.is_registered === true ||
+        (guildId !== null &&
+            standings.some(
+                (entry) => normalizeBiomeId(entry?.guild_id) === guildId,
+            ));
+
+    return {
+        guildTournamentBiomeId: guildRegistered
+            ? normalizeBiomeId(activeTournament?.biome_id)
+            : null,
+        personalDerbyBiomeId:
+            activeDerby?.is_registered === true
+                ? normalizeBiomeId(activeDerby.biome_id)
+                : null,
+    };
+}
+
+export function selectBestBiome({
+    biomeWeight,
+    competitionBiomes,
+    player,
+    preferCompetitionBiomes = false,
+    weatherByBiome,
+}) {
     const unlockedBiomes = Array.isArray(player?.unlockedBiomes)
         ? player.unlockedBiomes
         : [player?.currentBiome ?? 1];
@@ -104,9 +155,20 @@ export function selectBestBiome({ biomeWeight, player, weatherByBiome }) {
             continue;
         }
 
+        const competitionType = preferCompetitionBiomes
+            ? getCompetitionType(biomeId, competitionBiomes)
+            : null;
+
         candidates.push({
             baitId: findAvailableBaitForBiome(player, biomeId),
             biomeId,
+            competitionPriority:
+                competitionType === 'guild'
+                    ? 2
+                    : competitionType === 'personal'
+                      ? 1
+                      : 0,
+            ...(competitionType ? { competitionType } : {}),
             score: getBiomeScore(biomeId, weather.xpBonus, biomeWeight),
             weather: weather.weather,
             xpBonus: weather.xpBonus,
@@ -115,10 +177,18 @@ export function selectBestBiome({ biomeWeight, player, weatherByBiome }) {
 
     candidates.sort(
         (left, right) =>
-            right.score - left.score || right.biomeId - left.biomeId,
+            right.competitionPriority - left.competitionPriority ||
+            right.score - left.score ||
+            right.biomeId - left.biomeId,
     );
 
-    return candidates[0] ?? null;
+    if (candidates.length === 0) {
+        return null;
+    }
+
+    const { competitionPriority, ...bestBiome } = candidates[0];
+
+    return bestBiome;
 }
 
 function getBiomeName(biomeId) {
@@ -140,7 +210,14 @@ function formatTargetSummary(target) {
     const signedXpBonus =
         target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
 
-    return `${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
+    const competitionLabel =
+        target.competitionType === 'guild'
+            ? '公会锦标赛优先 · '
+            : target.competitionType === 'personal'
+              ? '个人比赛优先 · '
+              : '';
+
+    return `${competitionLabel}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
 }
 
 function getErrorMessage(error) {
@@ -203,6 +280,18 @@ export function createAutoBiomeController({
     let evaluationId = 0;
     let eventSource = null;
     let fallbackTimer = null;
+    let competitionHookTimer = null;
+    let competitionHookPending = false;
+    let derbyResponse;
+    let guildResponse;
+    let tournamentResponse;
+    const tournamentStandingsById = new Map();
+    let competitionBiomes = {
+        guildTournamentBiomeId: null,
+        personalDerbyBiomeId: null,
+    };
+    let competitionStatus = '自动换图开启后检测';
+    let competitionUpdatedAt = 0;
     let lastUpdatedAt = 0;
     let status = '等待天气数据';
     let switching = false;
@@ -221,11 +310,102 @@ export function createAutoBiomeController({
 
     function getSnapshot() {
         return {
+            autoBiomeCompetitionBiomes: competitionBiomes,
+            autoBiomeCompetitionStatus: competitionStatus,
+            autoBiomeCompetitionUpdatedAt: competitionUpdatedAt,
             autoBiomeLastUpdatedAt: lastUpdatedAt,
             autoBiomeStatus: status,
             autoBiomeTarget: target,
             autoBiomeWeatherByBiome: weatherByBiome,
         };
+    }
+
+    function formatCompetitionStatus(biomes) {
+        const labels = [];
+
+        if (biomes.guildTournamentBiomeId) {
+            labels.push(`公会 B${biomes.guildTournamentBiomeId}`);
+        }
+
+        if (biomes.personalDerbyBiomeId) {
+            labels.push(`个人 B${biomes.personalDerbyBiomeId}`);
+        }
+
+        return labels.length > 0 ? labels.join(' · ') : '暂无已参与的比赛';
+    }
+
+    function updateCompetitionState() {
+        competitionBiomes = resolveCompetitionBiomes({
+            derbyResponse,
+            guildResponse,
+            tournamentResponse,
+            tournamentStandingsResponse: tournamentStandingsById.get(
+                String(tournamentResponse?.active?.id ?? ''),
+            ),
+        });
+        competitionStatus = formatCompetitionStatus(competitionBiomes);
+        competitionUpdatedAt = Date.now();
+        notifyStateChanged();
+    }
+
+    function hasCompetitionSnapshot() {
+        if (derbyResponse === undefined || tournamentResponse === undefined) {
+            return false;
+        }
+
+        const activeTournamentId = tournamentResponse?.active?.id;
+
+        if (!activeTournamentId) {
+            return true;
+        }
+
+        if (tournamentResponse.active.is_registered === true) {
+            return true;
+        }
+
+        return (
+            guildResponse !== undefined &&
+            tournamentStandingsById.has(String(activeTournamentId))
+        );
+    }
+
+    function scheduleCompetitionEvaluation() {
+        competitionHookPending = true;
+        window.clearTimeout(competitionHookTimer);
+        competitionHookTimer = window.setTimeout(() => {
+            competitionHookPending = false;
+            void evaluateBestBiome();
+        }, COMPETITION_HOOK_DEBOUNCE);
+    }
+
+    function handleCompetitionResponse({ pathname, payload }) {
+        let matched = true;
+
+        if (pathname === '/api/guild/tournaments/current') {
+            tournamentResponse = payload;
+        } else if (pathname === '/api/derby/current') {
+            derbyResponse = payload;
+        } else if (pathname === '/api/guild/my-guild') {
+            guildResponse = payload;
+        } else {
+            const standingsMatch = pathname.match(
+                /^\/api\/guild\/tournaments\/([^/]+)\/standings$/,
+            );
+
+            if (standingsMatch) {
+                tournamentStandingsById.set(standingsMatch[1], payload);
+            } else {
+                matched = false;
+            }
+        }
+
+        if (!matched) {
+            return false;
+        }
+
+        updateCompetitionState();
+        scheduleCompetitionEvaluation();
+        return true;
     }
 
     async function notifyBiomeReady(biomeId) {
@@ -331,12 +511,20 @@ export function createAutoBiomeController({
 
         if (!autoBiomeSettings.enabled) {
             target = null;
+            competitionStatus =
+                autoBiomeSettings.preferCompetitionBiomes !== false
+                    ? '自动换图开启后检测'
+                    : '已关闭';
             setStatus('未启用');
             return;
         }
 
         if (!enabled) {
             target = null;
+            competitionStatus =
+                autoBiomeSettings.preferCompetitionBiomes !== false
+                    ? '脚本启动后检测'
+                    : '已关闭';
             setStatus('脚本启动后自动选择地图');
             return;
         }
@@ -347,6 +535,15 @@ export function createAutoBiomeController({
         }
 
         if (switching) {
+            return;
+        }
+
+        if (
+            autoBiomeSettings.preferCompetitionBiomes !== false &&
+            (!hasCompetitionSnapshot() || competitionHookPending)
+        ) {
+            competitionStatus = '等待游戏比赛轮询';
+            setStatus('等待游戏比赛数据');
             return;
         }
 
@@ -383,7 +580,10 @@ export function createAutoBiomeController({
 
         target = selectBestBiome({
             biomeWeight: autoBiomeSettings.biomeWeight,
+            competitionBiomes,
             player,
+            preferCompetitionBiomes:
+                autoBiomeSettings.preferCompetitionBiomes !== false,
             weatherByBiome,
         });
 
@@ -393,7 +593,6 @@ export function createAutoBiomeController({
             return;
         }
 
-        const targetLabel = formatBiomeTarget(target);
         const summary = formatTargetSummary(target);
 
         if (normalizeBiomeId(player.currentBiome) === target.biomeId) {
@@ -415,7 +614,7 @@ export function createAutoBiomeController({
             await autoEquipForBiome(player, target, {
                 skipBait: autoBaitSettings?.enabled === true,
             });
-            setStatus(`已切换到 ${targetLabel}，等待下一竿同步页面`);
+            setStatus(`已切换到 ${summary}，等待下一竿同步页面`);
             await notifyBiomeReady(target.biomeId);
         } catch (error) {
             console.error('[自动换图] 切换地图失败：', error);
@@ -447,12 +646,14 @@ export function createAutoBiomeController({
     function destroy() {
         eventSource?.close();
         window.clearTimeout(fallbackTimer);
+        window.clearTimeout(competitionHookTimer);
     }
 
     return {
         destroy,
         getSnapshot,
         handleCastResult,
+        handleCompetitionResponse,
         handleStateChanged,
         isSwitching() {
             return switching;

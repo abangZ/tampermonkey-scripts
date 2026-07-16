@@ -95,6 +95,7 @@ export function loadAutoBiomeSettings() {
     const defaults = {
         enabled: false,
         biomeWeight: 5,
+        preferCompetitionBiomes: true,
     };
 
     try {
@@ -112,6 +113,8 @@ export function loadAutoBiomeSettings() {
                 savedSettings.biomeWeight,
                 defaults.biomeWeight,
             ),
+            preferCompetitionBiomes:
+                savedSettings.preferCompetitionBiomes !== false,
         };
     } catch (error) {
         console.warn('[自动换图] 无法读取设置：', error);

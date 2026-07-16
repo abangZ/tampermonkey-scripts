@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.2.0
+// @version      2.3.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -10,7 +10,7 @@
 // @match        https://arcaneangler.com/*
 // @match        https://www.arcaneangler.com/*
 // @grant        none
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 /* 此文件由 pnpm build 自动生成，请修改 arcaneangler/src 下的源码。 */
@@ -34,6 +34,7 @@
 		gold_breeze: "黄金微风",
 		arcane_surge: "奥术涌动"
 	};
+	var COMPETITION_HOOK_DEBOUNCE = 1e3;
 	function normalizeBiomeId$1(value) {
 		const biomeId = Number(value);
 		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
@@ -79,23 +80,43 @@
 		}
 		return null;
 	}
-	function selectBestBiome({ biomeWeight, player, weatherByBiome }) {
+	function getCompetitionType(biomeId, competitionBiomes) {
+		if (biomeId === normalizeBiomeId$1(competitionBiomes?.guildTournamentBiomeId)) return "guild";
+		if (biomeId === normalizeBiomeId$1(competitionBiomes?.personalDerbyBiomeId)) return "personal";
+		return null;
+	}
+	function resolveCompetitionBiomes({ derbyResponse, guildResponse, tournamentResponse, tournamentStandingsResponse }) {
+		const activeTournament = tournamentResponse?.active;
+		const activeDerby = derbyResponse?.active;
+		const guildId = normalizeBiomeId$1(guildResponse?.guild?.guild_id);
+		const standings = Array.isArray(tournamentStandingsResponse?.standings) ? tournamentStandingsResponse.standings : [];
+		return {
+			guildTournamentBiomeId: activeTournament?.is_registered === true || guildId !== null && standings.some((entry) => normalizeBiomeId$1(entry?.guild_id) === guildId) ? normalizeBiomeId$1(activeTournament?.biome_id) : null,
+			personalDerbyBiomeId: activeDerby?.is_registered === true ? normalizeBiomeId$1(activeDerby.biome_id) : null
+		};
+	}
+	function selectBestBiome({ biomeWeight, competitionBiomes, player, preferCompetitionBiomes = false, weatherByBiome }) {
 		const unlockedBiomes = Array.isArray(player?.unlockedBiomes) ? player.unlockedBiomes : [player?.currentBiome ?? 1];
 		const candidates = [];
 		for (const rawBiomeId of unlockedBiomes) {
 			const biomeId = normalizeBiomeId$1(rawBiomeId);
 			const weather = weatherByBiome?.[biomeId];
 			if (!biomeId || !weather) continue;
+			const competitionType = preferCompetitionBiomes ? getCompetitionType(biomeId, competitionBiomes) : null;
 			candidates.push({
 				baitId: findAvailableBaitForBiome(player, biomeId),
 				biomeId,
+				competitionPriority: competitionType === "guild" ? 2 : competitionType === "personal" ? 1 : 0,
+				...competitionType ? { competitionType } : {},
 				score: getBiomeScore(biomeId, weather.xpBonus, biomeWeight),
 				weather: weather.weather,
 				xpBonus: weather.xpBonus
 			});
 		}
-		candidates.sort((left, right) => right.score - left.score || right.biomeId - left.biomeId);
-		return candidates[0] ?? null;
+		candidates.sort((left, right) => right.competitionPriority - left.competitionPriority || right.score - left.score || right.biomeId - left.biomeId);
+		if (candidates.length === 0) return null;
+		const { competitionPriority, ...bestBiome } = candidates[0];
+		return bestBiome;
 	}
 	function getBiomeName(biomeId) {
 		return String(window.BIOMES?.[biomeId]?.name ?? "").trim() || `地图 ${biomeId}`;
@@ -109,7 +130,7 @@
 	function formatTargetSummary(target) {
 		const weatherLabel = getWeatherLabel(target.weather);
 		const signedXpBonus = target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
-		return `${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
+		return `${target.competitionType === "guild" ? "公会锦标赛优先 · " : target.competitionType === "personal" ? "个人比赛优先 · " : ""}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
 	}
 	function getErrorMessage$1(error) {
 		return String(error?.message ?? error ?? "未知错误");
@@ -147,6 +168,18 @@
 		let evaluationId = 0;
 		let eventSource = null;
 		let fallbackTimer = null;
+		let competitionHookTimer = null;
+		let competitionHookPending = false;
+		let derbyResponse;
+		let guildResponse;
+		let tournamentResponse;
+		const tournamentStandingsById = new Map();
+		let competitionBiomes = {
+			guildTournamentBiomeId: null,
+			personalDerbyBiomeId: null
+		};
+		let competitionStatus = "自动换图开启后检测";
+		let competitionUpdatedAt = 0;
 		let lastUpdatedAt = 0;
 		let status = "等待天气数据";
 		let switching = false;
@@ -162,11 +195,61 @@
 		}
 		function getSnapshot() {
 			return {
+				autoBiomeCompetitionBiomes: competitionBiomes,
+				autoBiomeCompetitionStatus: competitionStatus,
+				autoBiomeCompetitionUpdatedAt: competitionUpdatedAt,
 				autoBiomeLastUpdatedAt: lastUpdatedAt,
 				autoBiomeStatus: status,
 				autoBiomeTarget: target,
 				autoBiomeWeatherByBiome: weatherByBiome
 			};
+		}
+		function formatCompetitionStatus(biomes) {
+			const labels = [];
+			if (biomes.guildTournamentBiomeId) labels.push(`公会 B${biomes.guildTournamentBiomeId}`);
+			if (biomes.personalDerbyBiomeId) labels.push(`个人 B${biomes.personalDerbyBiomeId}`);
+			return labels.length > 0 ? labels.join(" · ") : "暂无已参与的比赛";
+		}
+		function updateCompetitionState() {
+			competitionBiomes = resolveCompetitionBiomes({
+				derbyResponse,
+				guildResponse,
+				tournamentResponse,
+				tournamentStandingsResponse: tournamentStandingsById.get(String(tournamentResponse?.active?.id ?? ""))
+			});
+			competitionStatus = formatCompetitionStatus(competitionBiomes);
+			competitionUpdatedAt = Date.now();
+			notifyStateChanged();
+		}
+		function hasCompetitionSnapshot() {
+			if (derbyResponse === void 0 || tournamentResponse === void 0) return false;
+			const activeTournamentId = tournamentResponse?.active?.id;
+			if (!activeTournamentId) return true;
+			if (tournamentResponse.active.is_registered === true) return true;
+			return guildResponse !== void 0 && tournamentStandingsById.has(String(activeTournamentId));
+		}
+		function scheduleCompetitionEvaluation() {
+			competitionHookPending = true;
+			window.clearTimeout(competitionHookTimer);
+			competitionHookTimer = window.setTimeout(() => {
+				competitionHookPending = false;
+				evaluateBestBiome();
+			}, COMPETITION_HOOK_DEBOUNCE);
+		}
+		function handleCompetitionResponse({ pathname, payload }) {
+			let matched = true;
+			if (pathname === "/api/guild/tournaments/current") tournamentResponse = payload;
+			else if (pathname === "/api/derby/current") derbyResponse = payload;
+			else if (pathname === "/api/guild/my-guild") guildResponse = payload;
+			else {
+				const standingsMatch = pathname.match(/^\/api\/guild\/tournaments\/([^/]+)\/standings$/);
+				if (standingsMatch) tournamentStandingsById.set(standingsMatch[1], payload);
+				else matched = false;
+			}
+			if (!matched) return false;
+			updateCompetitionState();
+			scheduleCompetitionEvaluation();
+			return true;
 		}
 		async function notifyBiomeReady(biomeId) {
 			try {
@@ -233,11 +316,13 @@
 			const { autoBaitSettings, autoBiomeSettings, enabled } = getState();
 			if (!autoBiomeSettings.enabled) {
 				target = null;
+				competitionStatus = autoBiomeSettings.preferCompetitionBiomes !== false ? "自动换图开启后检测" : "已关闭";
 				setStatus("未启用");
 				return;
 			}
 			if (!enabled) {
 				target = null;
+				competitionStatus = autoBiomeSettings.preferCompetitionBiomes !== false ? "脚本启动后检测" : "已关闭";
 				setStatus("脚本启动后自动选择地图");
 				return;
 			}
@@ -246,6 +331,11 @@
 				return;
 			}
 			if (switching) return;
+			if (autoBiomeSettings.preferCompetitionBiomes !== false && (!hasCompetitionSnapshot() || competitionHookPending)) {
+				competitionStatus = "等待游戏比赛轮询";
+				setStatus("等待游戏比赛数据");
+				return;
+			}
 			const api = window.ApiService;
 			if (typeof api?.getPlayerData !== "function" || typeof api?.changeBiome !== "function") {
 				setStatus("等待游戏角色数据");
@@ -268,7 +358,9 @@
 			}
 			target = selectBestBiome({
 				biomeWeight: autoBiomeSettings.biomeWeight,
+				competitionBiomes,
 				player,
+				preferCompetitionBiomes: autoBiomeSettings.preferCompetitionBiomes !== false,
 				weatherByBiome
 			});
 			if (!target) {
@@ -276,7 +368,6 @@
 				await notifyBiomeReady(normalizeBiomeId$1(player.currentBiome));
 				return;
 			}
-			const targetLabel = formatBiomeTarget(target);
 			const summary = formatTargetSummary(target);
 			if (normalizeBiomeId$1(player.currentBiome) === target.biomeId) {
 				setStatus(`已在 ${summary}`);
@@ -289,7 +380,7 @@
 				const result = await api.changeBiome(target.biomeId);
 				if (result?.success !== true) throw new Error(result?.message ?? "游戏未确认切图成功");
 				await autoEquipForBiome(player, target, { skipBait: autoBaitSettings?.enabled === true });
-				setStatus(`已切换到 ${targetLabel}，等待下一竿同步页面`);
+				setStatus(`已切换到 ${summary}，等待下一竿同步页面`);
 				await notifyBiomeReady(target.biomeId);
 			} catch (error) {
 				console.error("[自动换图] 切换地图失败：", error);
@@ -312,11 +403,13 @@
 		function destroy() {
 			eventSource?.close();
 			window.clearTimeout(fallbackTimer);
+			window.clearTimeout(competitionHookTimer);
 		}
 		return {
 			destroy,
 			getSnapshot,
 			handleCastResult,
+			handleCompetitionResponse,
 			handleStateChanged,
 			isSwitching() {
 				return switching;
@@ -1087,7 +1180,7 @@
 			baitPrice: normalizeBaitPrice(bait?.price)
 		};
 	}
-	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult }) {
+	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult, onCompetitionResponse }) {
 		const originalFetch = window.fetch;
 		window.fetch = async function(input, init) {
 			const request = input instanceof Request ? input : null;
@@ -1113,8 +1206,16 @@
 				console.warn("[自动过验证] 无法复制验证码 challenge 响应：", error);
 			}
 			else if (method === "POST" && url?.pathname === "/api/game/captcha-verified" && response.ok) onCaptchaVerified();
+			else if (method === "GET" && isCompetitionResponsePath(url?.pathname)) try {
+				collectCompetitionResponse(response.clone(), url.pathname, onCompetitionResponse);
+			} catch (error) {
+				console.warn("[自动换图] 无法复制游戏比赛轮询响应：", error);
+			}
 			return response;
 		};
+	}
+	function isCompetitionResponsePath(pathname) {
+		return pathname === "/api/guild/tournaments/current" || pathname === "/api/derby/current" || pathname === "/api/guild/my-guild" || /^\/api\/guild\/tournaments\/[^/]+\/standings$/.test(pathname ?? "");
 	}
 	async function modifyCastRequest(input, request, init) {
 		try {
@@ -1175,6 +1276,17 @@
 			onCaptchaChallenge(challenge);
 		} catch (error) {
 			console.warn("[自动过验证] 无法读取验证码 challenge 响应：", error);
+		}
+	}
+	async function collectCompetitionResponse(response, pathname, callback) {
+		if (!response.ok || typeof callback !== "function") return;
+		try {
+			callback({
+				pathname,
+				payload: await response.json()
+			});
+		} catch (error) {
+			console.warn("[自动换图] 无法读取游戏比赛轮询响应：", error);
 		}
 	}
 	async function sendHumanVerificationNotification({ notificationMode, pushKey }) {
@@ -1390,14 +1502,16 @@
 	function loadAutoBiomeSettings() {
 		const defaults = {
 			enabled: false,
-			biomeWeight: 5
+			biomeWeight: 5,
+			preferCompetitionBiomes: true
 		};
 		try {
 			const savedSettings = JSON.parse(localStorage.getItem(AUTO_BIOME_SETTINGS_STORAGE_KEY));
 			if (!savedSettings || typeof savedSettings !== "object") return defaults;
 			return {
 				enabled: savedSettings.enabled === true,
-				biomeWeight: normalizeAutoBiomeWeight(savedSettings.biomeWeight, defaults.biomeWeight)
+				biomeWeight: normalizeAutoBiomeWeight(savedSettings.biomeWeight, defaults.biomeWeight),
+				preferCompetitionBiomes: savedSettings.preferCompetitionBiomes !== false
 			};
 		} catch (error) {
 			console.warn("[自动换图] 无法读取设置：", error);
@@ -1505,7 +1619,7 @@
 		let earningsBiomeFilter = "current";
 		let earningsBaitFilter = "current";
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitMinimumQuantity, setAutoBaitPurchaseQuantity, setAutoBiomeEnabled, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitMinimumQuantity, setAutoBaitPurchaseQuantity, setAutoBiomeEnabled, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
@@ -1760,6 +1874,23 @@
         <section class="settings-section">
           <div class="settings-title">自动换地图</div>
 
+          <label class="option-row">
+            <span>优先比赛地图</span>
+            <span class="switch">
+              <input
+                id="auto-biome-competition-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="自动换图时优先比赛地图"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
+          <div class="field-help">
+            仅优先已参与且已解锁的比赛地图；公会锦标赛优先于个人比赛。
+          </div>
+
           <div
             class="choice-list choice-list-three"
             role="radiogroup"
@@ -1792,7 +1923,12 @@
           </div>
 
           <div class="field-help">
-            评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+            无可用比赛地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+          </div>
+
+          <div class="row">
+            <span class="label">比赛地图</span>
+            <span id="auto-biome-competition-status" class="value">自动换图开启后检测</span>
           </div>
 
           <div class="row">
@@ -1991,6 +2127,8 @@
 				clickCount: shadowRoot.querySelector("#click-count"),
 				autoBiomeStatus: shadowRoot.querySelector("#auto-biome-status"),
 				autoBiomeToggle: shadowRoot.querySelector("#auto-biome-toggle"),
+				autoBiomeCompetitionToggle: shadowRoot.querySelector("#auto-biome-competition-toggle"),
+				autoBiomeCompetitionStatus: shadowRoot.querySelector("#auto-biome-competition-status"),
 				autoBiomeWeightInputs: shadowRoot.querySelectorAll("input[name=\"auto-biome-weight\"]"),
 				autoBiomeUpdatedAt: shadowRoot.querySelector("#auto-biome-updated-at"),
 				autoBaitStatus: shadowRoot.querySelector("#auto-bait-status"),
@@ -2056,6 +2194,9 @@
 			});
 			ui.autoBiomeToggle.addEventListener("change", (event) => {
 				setAutoBiomeEnabled(event.currentTarget.checked);
+			});
+			ui.autoBiomeCompetitionToggle.addEventListener("change", (event) => {
+				setAutoBiomePreferCompetition(event.currentTarget.checked);
 			});
 			ui.autoBaitToggle.addEventListener("change", (event) => {
 				setAutoBaitEnabled(event.currentTarget.checked);
@@ -2389,10 +2530,13 @@
 		}
 		function renderAutoBiomeSettings() {
 			if (!ui?.autoBiomeToggle) return;
-			const { autoBiomeLastUpdatedAt, autoBiomeSettings, autoBiomeStatus } = getState();
+			const { autoBiomeCompetitionStatus, autoBiomeLastUpdatedAt, autoBiomeSettings, autoBiomeStatus } = getState();
 			ui.autoBiomeToggle.checked = autoBiomeSettings.enabled;
 			ui.autoBiomeToggle.setAttribute("aria-checked", autoBiomeSettings.enabled ? "true" : "false");
 			ui.autoBiomeStatus.textContent = autoBiomeStatus;
+			ui.autoBiomeCompetitionToggle.checked = autoBiomeSettings.preferCompetitionBiomes;
+			ui.autoBiomeCompetitionToggle.setAttribute("aria-checked", autoBiomeSettings.preferCompetitionBiomes ? "true" : "false");
+			ui.autoBiomeCompetitionStatus.textContent = autoBiomeCompetitionStatus;
 			for (const input of ui.autoBiomeWeightInputs) input.checked = Number(input.value) === autoBiomeSettings.biomeWeight;
 			ui.autoBiomeUpdatedAt.textContent = autoBiomeLastUpdatedAt ? new Date(autoBiomeLastUpdatedAt).toLocaleTimeString() : "等待接口数据";
 		}
@@ -2451,13 +2595,30 @@
 	var autoBiome = null;
 	var autoBait = null;
 	var forceNextAutoBaitCheck = false;
+	var pendingCaptchaChallenge = null;
+	var pendingCompetitionResponses = new Map();
 	function recordCastResult(result) {
 		earningsStats = updateEarningsStats(earningsStats, result, getCastEarningsContext(result));
 		saveEarningsStats(earningsStats);
-		panel.renderEarningsStats();
+		panel?.renderEarningsStats();
 		autoBiome?.handleCastResult(result);
 		autoBait?.handleCastResult(result);
 	}
+	installFetchInterceptor({
+		onCastResult: recordCastResult,
+		onCaptchaChallenge(challenge) {
+			if (captcha) captcha.handleChallenge(challenge);
+			else pendingCaptchaChallenge = challenge;
+		},
+		onCaptchaVerified() {
+			pendingCaptchaChallenge = null;
+			captcha?.clearChallenge();
+		},
+		onCompetitionResponse(response) {
+			if (autoBiome) autoBiome.handleCompetitionResponse(response);
+			else pendingCompetitionResponses.set(response.pathname, response);
+		}
+	});
 	function setPushKey(nextPushKey) {
 		pushKey = String(nextPushKey ?? "").trim();
 		savePushKey(pushKey);
@@ -2484,6 +2645,12 @@
 			pushKey,
 			scheduleSettings,
 			...autoBiome?.getSnapshot() ?? {
+				autoBiomeCompetitionBiomes: {
+					guildTournamentBiomeId: null,
+					personalDerbyBiomeId: null
+				},
+				autoBiomeCompetitionStatus: "自动换图开启后检测",
+				autoBiomeCompetitionUpdatedAt: 0,
 				autoBiomeLastUpdatedAt: 0,
 				autoBiomeStatus: "等待天气数据",
 				autoBiomeTarget: null,
@@ -2767,6 +2934,15 @@
 		panel.renderAutoBiomeSettings();
 		handleAutomationStateChanged();
 	}
+	function setAutoBiomePreferCompetition(nextEnabled) {
+		autoBiomeSettings = {
+			...autoBiomeSettings,
+			preferCompetitionBiomes: Boolean(nextEnabled)
+		};
+		saveAutoBiomeSettings(autoBiomeSettings);
+		panel.renderAutoBiomeSettings();
+		handleAutomationStateChanged();
+	}
 	function updateAutoBaitSettings(nextSettings) {
 		autoBaitSettings = {
 			...autoBaitSettings,
@@ -2816,97 +2992,99 @@
 			setEnabled(!enabled);
 		}
 	}, true);
-	schedule = createScheduleController({
-		getCaptcha() {
-			return captcha;
-		},
-		getState() {
-			return {
-				enabled,
-				loopId,
-				scheduleSettings
-			};
-		},
-		renderSettings() {
-			panel?.renderScheduleSettings();
-		},
-		renderStatus(remaining) {
-			panel?.renderScheduleStatus(remaining);
-		},
-		setNextDelay(text) {
-			panel?.setNextDelay(text);
-		},
-		setStatus(text) {
-			panel?.setStatus(text);
-		}
-	});
-	panel = createPanelController({
-		actions: {
-			requestBrowserNotificationPermission,
-			resetEarningsStats,
-			setAutoBaitEnabled,
-			setAutoBaitGrade,
-			setAutoBaitMinimumQuantity,
-			setAutoBaitPurchaseQuantity,
-			setAutoBiomeEnabled,
-			setAutoBiomeWeight,
-			setCaptchaBypassEnabled,
+	function initialize() {
+		schedule = createScheduleController({
+			getCaptcha() {
+				return captcha;
+			},
+			getState() {
+				return {
+					enabled,
+					loopId,
+					scheduleSettings
+				};
+			},
+			renderSettings() {
+				panel?.renderScheduleSettings();
+			},
+			renderStatus(remaining) {
+				panel?.renderScheduleStatus(remaining);
+			},
+			setNextDelay(text) {
+				panel?.setNextDelay(text);
+			},
+			setStatus(text) {
+				panel?.setStatus(text);
+			}
+		});
+		panel = createPanelController({
+			actions: {
+				requestBrowserNotificationPermission,
+				resetEarningsStats,
+				setAutoBaitEnabled,
+				setAutoBaitGrade,
+				setAutoBaitMinimumQuantity,
+				setAutoBaitPurchaseQuantity,
+				setAutoBiomeEnabled,
+				setAutoBiomePreferCompetition,
+				setAutoBiomeWeight,
+				setCaptchaBypassEnabled,
+				setEnabled,
+				setNotificationMode,
+				setPushKey,
+				setScheduleEnabled,
+				setScheduleMinutes
+			},
+			formatScheduleDuration,
+			getState: getPanelState
+		});
+		captcha = createCaptchaController({
+			getState() {
+				return {
+					captchaBypassEnabled,
+					enabled
+				};
+			},
+			notify() {
+				return sendHumanVerificationNotification({
+					notificationMode,
+					pushKey
+				});
+			},
 			setEnabled,
-			setNotificationMode,
-			setPushKey,
-			setScheduleEnabled,
-			setScheduleMinutes
-		},
-		formatScheduleDuration,
-		getState: getPanelState
-	});
-	captcha = createCaptchaController({
-		getState() {
-			return {
-				captchaBypassEnabled,
-				enabled
-			};
-		},
-		notify() {
-			return sendHumanVerificationNotification({
-				notificationMode,
-				pushKey
-			});
-		},
-		setEnabled,
-		setNextDelay: panel.setNextDelay,
-		setStatus: panel.setStatus
-	});
-	autoBait = createAutoBaitController({
-		getState: getPanelState,
-		onStateChange() {
-			panel?.renderAutoBaitSettings();
+			setNextDelay: panel.setNextDelay,
+			setStatus: panel.setStatus
+		});
+		autoBait = createAutoBaitController({
+			getState: getPanelState,
+			onStateChange() {
+				panel?.renderAutoBaitSettings();
+			}
+		});
+		autoBiome = createAutoBiomeController({
+			getState: getPanelState,
+			onBiomeReady(biomeId) {
+				const force = forceNextAutoBaitCheck;
+				forceNextAutoBaitCheck = false;
+				return autoBait?.checkNow({
+					biomeId,
+					force
+				});
+			},
+			onStateChange() {
+				panel?.renderAutoBiomeSettings();
+			}
+		});
+		for (const response of pendingCompetitionResponses.values()) autoBiome.handleCompetitionResponse(response);
+		pendingCompetitionResponses.clear();
+		if (pendingCaptchaChallenge) {
+			captcha.handleChallenge(pendingCaptchaChallenge);
+			pendingCaptchaChallenge = null;
 		}
-	});
-	autoBiome = createAutoBiomeController({
-		getState: getPanelState,
-		onBiomeReady(biomeId) {
-			const force = forceNextAutoBaitCheck;
-			forceNextAutoBaitCheck = false;
-			return autoBait?.checkNow({
-				biomeId,
-				force
-			});
-		},
-		onStateChange() {
-			panel?.renderAutoBiomeSettings();
-		}
-	});
-	installFetchInterceptor({
-		onCastResult: recordCastResult,
-		onCaptchaChallenge(challenge) {
-			captcha.handleChallenge(challenge);
-		},
-		onCaptchaVerified() {
-			captcha.clearChallenge();
-		}
-	});
-	setEnabled(enabled);
-	autoBiome.start();
-	console.info("[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。");
+		setEnabled(enabled);
+		autoBiome.start();
+		console.info("[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。");
+	}
+	if (document.body) initialize();
+	else document.addEventListener("DOMContentLoaded", initialize, { once: true });
 })();

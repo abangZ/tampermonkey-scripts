@@ -22,6 +22,7 @@ export function createPanelController({
         setAutoBaitMinimumQuantity,
         setAutoBaitPurchaseQuantity,
         setAutoBiomeEnabled,
+        setAutoBiomePreferCompetition,
         setAutoBiomeWeight,
         setCaptchaBypassEnabled,
         setEnabled,
@@ -301,6 +302,23 @@ export function createPanelController({
         <section class="settings-section">
           <div class="settings-title">自动换地图</div>
 
+          <label class="option-row">
+            <span>优先比赛地图</span>
+            <span class="switch">
+              <input
+                id="auto-biome-competition-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="自动换图时优先比赛地图"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
+          <div class="field-help">
+            仅优先已参与且已解锁的比赛地图；公会锦标赛优先于个人比赛。
+          </div>
+
           <div
             class="choice-list choice-list-three"
             role="radiogroup"
@@ -333,7 +351,12 @@ export function createPanelController({
           </div>
 
           <div class="field-help">
-            评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+            无可用比赛地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+          </div>
+
+          <div class="row">
+            <span class="label">比赛地图</span>
+            <span id="auto-biome-competition-status" class="value">自动换图开启后检测</span>
           </div>
 
           <div class="row">
@@ -534,6 +557,12 @@ export function createPanelController({
             clickCount: shadowRoot.querySelector('#click-count'),
             autoBiomeStatus: shadowRoot.querySelector('#auto-biome-status'),
             autoBiomeToggle: shadowRoot.querySelector('#auto-biome-toggle'),
+            autoBiomeCompetitionToggle: shadowRoot.querySelector(
+                '#auto-biome-competition-toggle',
+            ),
+            autoBiomeCompetitionStatus: shadowRoot.querySelector(
+                '#auto-biome-competition-status',
+            ),
             autoBiomeWeightInputs: shadowRoot.querySelectorAll(
                 'input[name="auto-biome-weight"]',
             ),
@@ -635,6 +664,10 @@ export function createPanelController({
 
         ui.autoBiomeToggle.addEventListener('change', (event) => {
             setAutoBiomeEnabled(event.currentTarget.checked);
+        });
+
+        ui.autoBiomeCompetitionToggle.addEventListener('change', (event) => {
+            setAutoBiomePreferCompetition(event.currentTarget.checked);
         });
 
         ui.autoBaitToggle.addEventListener('change', (event) => {
@@ -1241,8 +1274,12 @@ export function createPanelController({
             return;
         }
 
-        const { autoBiomeLastUpdatedAt, autoBiomeSettings, autoBiomeStatus } =
-            getState();
+        const {
+            autoBiomeCompetitionStatus,
+            autoBiomeLastUpdatedAt,
+            autoBiomeSettings,
+            autoBiomeStatus,
+        } = getState();
 
         ui.autoBiomeToggle.checked = autoBiomeSettings.enabled;
         ui.autoBiomeToggle.setAttribute(
@@ -1250,6 +1287,13 @@ export function createPanelController({
             autoBiomeSettings.enabled ? 'true' : 'false',
         );
         ui.autoBiomeStatus.textContent = autoBiomeStatus;
+        ui.autoBiomeCompetitionToggle.checked =
+            autoBiomeSettings.preferCompetitionBiomes;
+        ui.autoBiomeCompetitionToggle.setAttribute(
+            'aria-checked',
+            autoBiomeSettings.preferCompetitionBiomes ? 'true' : 'false',
+        );
+        ui.autoBiomeCompetitionStatus.textContent = autoBiomeCompetitionStatus;
 
         for (const input of ui.autoBiomeWeightInputs) {
             input.checked =

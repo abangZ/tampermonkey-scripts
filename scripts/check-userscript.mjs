@@ -11,7 +11,7 @@ const userscript = await readFile(userscriptPath, 'utf8');
 const requiredMetadata = [
     '// ==UserScript==',
     `// @version      ${userscriptVersion}`,
-    '// @run-at       document-idle',
+    '// @run-at       document-start',
     '// @grant        none',
     '// ==/UserScript==',
 ];

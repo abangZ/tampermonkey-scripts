@@ -62,7 +62,21 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
             'utf8',
         );
 
+        window.document.body.remove();
         Function(userscript)();
+
+        assert.notEqual(window.fetch, originalFetch);
+        assert.equal(
+            window.document.getElementById(
+                'arcane-angler-auto-cast-panel-host',
+            ),
+            null,
+        );
+
+        window.document.documentElement.appendChild(
+            window.document.createElement('body'),
+        );
+        window.document.dispatchEvent(new window.Event('DOMContentLoaded'));
 
         const host = window.document.getElementById(
             'arcane-angler-auto-cast-panel-host',
@@ -72,6 +86,11 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         assert.ok(host.shadowRoot);
         assert.match(host.shadowRoot.textContent, /自动抛竿/);
         assert.ok(host.shadowRoot.querySelector('#auto-biome-toggle'));
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-biome-competition-toggle')
+                .checked,
+            true,
+        );
         assert.ok(host.shadowRoot.querySelector('#auto-bait-toggle'));
         assert.equal(
             host.shadowRoot.querySelector('#auto-bait-status').textContent,
@@ -108,8 +127,6 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
             host.shadowRoot.querySelector('#auto-biome-status').textContent,
             '未启用',
         );
-        assert.notEqual(window.fetch, originalFetch);
-
         await window.fetch('/api/game/cast', {
             body: '{}',
             method: 'POST',

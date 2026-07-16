@@ -5,6 +5,7 @@ export function installFetchInterceptor({
     onCaptchaChallenge,
     onCaptchaVerified,
     onCastResult,
+    onCompetitionResponse,
 }) {
     const originalFetch = window.fetch;
 
@@ -69,10 +70,32 @@ export function installFetchInterceptor({
             response.ok
         ) {
             onCaptchaVerified();
+        } else if (
+            method === 'GET' &&
+            isCompetitionResponsePath(url?.pathname)
+        ) {
+            try {
+                void collectCompetitionResponse(
+                    response.clone(),
+                    url.pathname,
+                    onCompetitionResponse,
+                );
+            } catch (error) {
+                console.warn('[自动换图] 无法复制游戏比赛轮询响应：', error);
+            }
         }
 
         return response;
     };
+}
+
+export function isCompetitionResponsePath(pathname) {
+    return (
+        pathname === '/api/guild/tournaments/current' ||
+        pathname === '/api/derby/current' ||
+        pathname === '/api/guild/my-guild' ||
+        /^\/api\/guild\/tournaments\/[^/]+\/standings$/.test(pathname ?? '')
+    );
 }
 
 export async function modifyCastRequest(input, request, init) {
@@ -194,5 +217,19 @@ async function collectCaptchaChallengeResponse(response, onCaptchaChallenge) {
         onCaptchaChallenge(challenge);
     } catch (error) {
         console.warn('[自动过验证] 无法读取验证码 challenge 响应：', error);
+    }
+}
+
+async function collectCompetitionResponse(response, pathname, callback) {
+    if (!response.ok || typeof callback !== 'function') {
+        return;
+    }
+
+    try {
+        const payload = await response.json();
+
+        callback({ pathname, payload });
+    } catch (error) {
+        console.warn('[自动换图] 无法读取游戏比赛轮询响应：', error);
     }
 }
