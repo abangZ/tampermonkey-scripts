@@ -2,6 +2,7 @@ import {
     AUTO_BAIT_SETTINGS_STORAGE_KEY,
     AUTO_BIOME_SETTINGS_STORAGE_KEY,
     CAPTCHA_BYPASS_STORAGE_KEY,
+    CLICK_DELAY_SETTINGS_STORAGE_KEY,
     IDLE_RELOAD_SETTINGS_STORAGE_KEY,
     NOTIFICATION_MODE_STORAGE_KEY,
     PANEL_COLLAPSED_STORAGE_KEY,
@@ -9,10 +10,41 @@ import {
     SCHEDULE_SETTINGS_STORAGE_KEY,
     STORAGE_KEY,
 } from './config.js';
+import {
+    DEFAULT_CLICK_DELAY_SETTINGS,
+    normalizeClickDelaySettings,
+} from './click-delay.js';
 
 export const AUTO_BIOME_WEIGHTS = [0, 5, 10];
 export const AUTO_BAIT_GRADES = ['default', 'low', 'medium', 'high', 'super'];
 export const AUTO_BAIT_PURCHASE_QUANTITIES = [100, 1000];
+
+export function loadClickDelaySettings() {
+    try {
+        const savedSettings = JSON.parse(
+            localStorage.getItem(CLICK_DELAY_SETTINGS_STORAGE_KEY),
+        );
+
+        return normalizeClickDelaySettings(
+            savedSettings,
+            DEFAULT_CLICK_DELAY_SETTINGS,
+        );
+    } catch (error) {
+        console.warn('[自动抛竿] 无法读取点击间隔设置：', error);
+        return { ...DEFAULT_CLICK_DELAY_SETTINGS };
+    }
+}
+
+export function saveClickDelaySettings(clickDelaySettings) {
+    try {
+        localStorage.setItem(
+            CLICK_DELAY_SETTINGS_STORAGE_KEY,
+            JSON.stringify(clickDelaySettings),
+        );
+    } catch (error) {
+        console.warn('[自动抛竿] 无法保存点击间隔设置：', error);
+    }
+}
 
 export function loadEnabled() {
     try {

@@ -126,8 +126,45 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
             '5',
         );
         assert.equal(
+            host.shadowRoot.querySelector('#short-delay-min-seconds').value,
+            '0.5',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#short-delay-max-seconds').value,
+            '2',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#long-delay-min-seconds').value,
+            '5',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#long-delay-max-seconds').value,
+            '10',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#long-delay-chance-percent').value,
+            '8',
+        );
+
+        const longDelayChanceInput = host.shadowRoot.querySelector(
+            '#long-delay-chance-percent',
+        );
+
+        longDelayChanceInput.value = '12.5';
+        longDelayChanceInput.dispatchEvent(
+            new window.Event('change', { bubbles: true }),
+        );
+        assert.equal(
+            JSON.parse(
+                window.localStorage.getItem(
+                    'arcane-angler-click-delay-settings-v1',
+                ),
+            ).longDelayChancePercent,
+            12.5,
+        );
+        assert.equal(
             host.shadowRoot.querySelectorAll('details.settings-section').length,
-            5,
+            6,
         );
         assert.equal(
             host.shadowRoot.querySelector('details.settings-section').open,
@@ -136,6 +173,39 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         assert.equal(
             host.shadowRoot.querySelector('#auto-bait-purchase-quantity').value,
             '100',
+        );
+
+        const autoBaitMinimumQuantity = host.shadowRoot.querySelector(
+            '#auto-bait-minimum-quantity',
+        );
+        const autoBaitPurchaseQuantity = host.shadowRoot.querySelector(
+            '#auto-bait-purchase-quantity',
+        );
+
+        autoBaitMinimumQuantity.value = '700';
+        autoBaitMinimumQuantity.dispatchEvent(
+            new window.Event('input', { bubbles: true }),
+        );
+        autoBaitPurchaseQuantity.value = '1000';
+        autoBaitPurchaseQuantity.dispatchEvent(
+            new window.Event('change', { bubbles: true }),
+        );
+
+        assert.deepEqual(
+            JSON.parse(
+                window.localStorage.getItem(
+                    'arcane-angler-auto-bait-settings-v1',
+                ),
+            ),
+            {
+                enabled: false,
+                goldBreezeBaitGrade: 'default',
+                guildCompetitionBaitGrade: 'low',
+                minimumQuantity: 700,
+                personalCompetitionBaitGrade: 'low',
+                purchaseQuantity: 1000,
+                regularBaitGrade: 'low',
+            },
         );
 
         const autoBaitToggle =

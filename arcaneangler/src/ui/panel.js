@@ -12,6 +12,8 @@ export function createPanelController({
     let panelView = 'control';
     let earningsBiomeFilter = 'current';
     let earningsBaitFilter = 'current';
+    let autoBaitPurchaseSaveTimer = null;
+    let autoBaitPurchaseSettingsDirty = false;
     let ui = null;
 
     const {
@@ -19,13 +21,13 @@ export function createPanelController({
         resetEarningsStats,
         setAutoBaitEnabled,
         setAutoBaitGrade,
-        setAutoBaitMinimumQuantity,
-        setAutoBaitPurchaseQuantity,
+        setAutoBaitPurchaseSettings,
         setAutoBiomeEnabled,
         setAutoBiomeChaseGoldBreeze,
         setAutoBiomePreferCompetition,
         setAutoBiomeWeight,
         setCaptchaBypassEnabled,
+        setClickDelaySetting,
         setEnabled,
         setIdleReloadMinutes,
         setNotificationMode,
@@ -44,6 +46,30 @@ export function createPanelController({
         const number = Number(value);
 
         return Number.isFinite(number) ? number : 0;
+    }
+
+    function flushAutoBaitPurchaseSettings() {
+        window.clearTimeout(autoBaitPurchaseSaveTimer);
+        autoBaitPurchaseSaveTimer = null;
+
+        if (!autoBaitPurchaseSettingsDirty || !ui) {
+            return;
+        }
+
+        autoBaitPurchaseSettingsDirty = false;
+        setAutoBaitPurchaseSettings({
+            minimumQuantity: ui.autoBaitMinimumQuantity.value,
+            purchaseQuantity: ui.autoBaitPurchaseQuantity.value,
+        });
+    }
+
+    function scheduleAutoBaitPurchaseSettingsSave() {
+        autoBaitPurchaseSettingsDirty = true;
+        window.clearTimeout(autoBaitPurchaseSaveTimer);
+        autoBaitPurchaseSaveTimer = window.setTimeout(
+            flushAutoBaitPurchaseSettings,
+            300,
+        );
     }
 
     /**
@@ -308,6 +334,81 @@ export function createPanelController({
         aria-labelledby="settings-tab"
         hidden
       >
+        <details class="settings-section">
+          <summary class="settings-title">自动点击间隔</summary>
+
+          <div class="number-grid">
+            <label class="field">
+              <span class="field-label">小间隔最短（秒）</span>
+              <input
+                id="short-delay-min-seconds"
+                class="input"
+                type="number"
+                min="0.1"
+                max="3600"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </label>
+
+            <label class="field">
+              <span class="field-label">小间隔最长（秒）</span>
+              <input
+                id="short-delay-max-seconds"
+                class="input"
+                type="number"
+                min="0.1"
+                max="3600"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </label>
+
+            <label class="field">
+              <span class="field-label">大间隔最短（秒）</span>
+              <input
+                id="long-delay-min-seconds"
+                class="input"
+                type="number"
+                min="0.1"
+                max="3600"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </label>
+
+            <label class="field">
+              <span class="field-label">大间隔最长（秒）</span>
+              <input
+                id="long-delay-max-seconds"
+                class="input"
+                type="number"
+                min="0.1"
+                max="3600"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </label>
+          </div>
+
+          <label class="field">
+            <span class="field-label">大间隔概率（%）</span>
+            <input
+              id="long-delay-chance-percent"
+              class="input"
+              type="number"
+              min="0"
+              max="100"
+              step="0.1"
+              inputmode="decimal"
+            />
+          </label>
+
+          <div class="field-help">
+            每次自动点击前先按概率选择大间隔或小间隔，再在对应的最短与最长时间内随机等待。
+          </div>
+        </details>
+
         <details class="settings-section">
           <summary class="settings-title">自动换地图</summary>
 
@@ -619,6 +720,21 @@ export function createPanelController({
             status: shadowRoot.querySelector('#status'),
             nextDelay: shadowRoot.querySelector('#next-delay'),
             clickCount: shadowRoot.querySelector('#click-count'),
+            shortDelayMinSeconds: shadowRoot.querySelector(
+                '#short-delay-min-seconds',
+            ),
+            shortDelayMaxSeconds: shadowRoot.querySelector(
+                '#short-delay-max-seconds',
+            ),
+            longDelayMinSeconds: shadowRoot.querySelector(
+                '#long-delay-min-seconds',
+            ),
+            longDelayMaxSeconds: shadowRoot.querySelector(
+                '#long-delay-max-seconds',
+            ),
+            longDelayChancePercent: shadowRoot.querySelector(
+                '#long-delay-chance-percent',
+            ),
             autoBiomeStatus: shadowRoot.querySelector('#auto-biome-status'),
             autoBiomeToggle: shadowRoot.querySelector('#auto-biome-toggle'),
             autoBiomeCompetitionToggle: shadowRoot.querySelector(
@@ -779,13 +895,31 @@ export function createPanelController({
             setAutoBaitGrade('goldBreezeBaitGrade', event.currentTarget.value);
         });
 
-        ui.autoBaitMinimumQuantity.addEventListener('change', (event) => {
-            setAutoBaitMinimumQuantity(event.currentTarget.value);
+        ui.autoBaitMinimumQuantity.addEventListener('input', () => {
+            scheduleAutoBaitPurchaseSettingsSave();
         });
 
-        ui.autoBaitPurchaseQuantity.addEventListener('change', (event) => {
-            setAutoBaitPurchaseQuantity(event.currentTarget.value);
+        ui.autoBaitMinimumQuantity.addEventListener('change', () => {
+            autoBaitPurchaseSettingsDirty = true;
+            flushAutoBaitPurchaseSettings();
         });
+
+        ui.autoBaitPurchaseQuantity.addEventListener('change', () => {
+            autoBaitPurchaseSettingsDirty = true;
+            flushAutoBaitPurchaseSettings();
+        });
+
+        for (const [input, field] of [
+            [ui.shortDelayMinSeconds, 'shortDelayMinSeconds'],
+            [ui.shortDelayMaxSeconds, 'shortDelayMaxSeconds'],
+            [ui.longDelayMinSeconds, 'longDelayMinSeconds'],
+            [ui.longDelayMaxSeconds, 'longDelayMaxSeconds'],
+            [ui.longDelayChancePercent, 'longDelayChancePercent'],
+        ]) {
+            input.addEventListener('change', (event) => {
+                setClickDelaySetting(field, event.currentTarget.value);
+            });
+        }
 
         ui.idleReloadMinutes.addEventListener('change', (event) => {
             setIdleReloadMinutes(event.currentTarget.value);
@@ -855,6 +989,7 @@ export function createPanelController({
         renderAutoBaitSettings();
         renderAutoBiomeSettings();
         renderCaptchaBypassToggle();
+        renderClickDelaySettings();
         renderIdleReloadSettings();
         renderPanelCollapsed();
         renderNotificationSettings();
@@ -918,6 +1053,7 @@ export function createPanelController({
         } else if (panelView === 'settings') {
             renderAutoBaitSettings();
             renderAutoBiomeSettings();
+            renderClickDelaySettings();
             renderIdleReloadSettings();
             renderNotificationSettings();
             renderScheduleSettings();
@@ -1465,6 +1601,30 @@ export function createPanelController({
         );
     }
 
+    function renderClickDelaySettings() {
+        if (!ui?.shortDelayMinSeconds) {
+            return;
+        }
+
+        const { clickDelaySettings } = getState();
+
+        ui.shortDelayMinSeconds.value = String(
+            clickDelaySettings.shortDelayMinSeconds,
+        );
+        ui.shortDelayMaxSeconds.value = String(
+            clickDelaySettings.shortDelayMaxSeconds,
+        );
+        ui.longDelayMinSeconds.value = String(
+            clickDelaySettings.longDelayMinSeconds,
+        );
+        ui.longDelayMaxSeconds.value = String(
+            clickDelaySettings.longDelayMaxSeconds,
+        );
+        ui.longDelayChancePercent.value = String(
+            clickDelaySettings.longDelayChancePercent,
+        );
+    }
+
     function renderToggle() {
         if (!ui?.toggle) {
             return;
@@ -1496,6 +1656,7 @@ export function createPanelController({
         renderAutoBaitSettings,
         renderAutoBiomeSettings,
         renderCaptchaBypassToggle,
+        renderClickDelaySettings,
         renderEarningsStats,
         renderIdleReloadSettings,
         renderNotificationSettings,

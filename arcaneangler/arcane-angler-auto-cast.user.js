@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.6.0
+// @version      2.7.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -667,11 +667,6 @@
 	}
 	var CONFIG = {
 		buttonText: "抛竿线",
-		normalDelayMin: 500,
-		normalDelayMax: 2e3,
-		longDelayMin: 5e3,
-		longDelayMax: 1e4,
-		longDelayChance: .08,
 		buttonPollInterval: 250,
 		cooldownButtonText: "冷却时间",
 		cooldownReloadDelay: 1e4,
@@ -687,6 +682,7 @@
 		scheduleRandomExtraRatioMax: .1
 	};
 	var STORAGE_KEY = "arcane-angler-auto-cast-enabled-v1";
+	var CLICK_DELAY_SETTINGS_STORAGE_KEY = "arcane-angler-click-delay-settings-v1";
 	var CAPTCHA_BYPASS_STORAGE_KEY = "arcane-angler-captcha-bypass-enabled-v1";
 	var PUSH_KEY_STORAGE_KEY = "arcane-angler-push-key-v1";
 	var NOTIFICATION_MODE_STORAGE_KEY = "arcane-angler-notification-mode-v1";
@@ -941,6 +937,51 @@
 				return captchaBypassInProgress;
 			},
 			stopIfChallengeFound: stopIfCaptchaChallengeFound
+		};
+	}
+	var DEFAULT_CLICK_DELAY_SETTINGS = Object.freeze({
+		longDelayChancePercent: 8,
+		longDelayMaxSeconds: 10,
+		longDelayMinSeconds: 5,
+		shortDelayMaxSeconds: 2,
+		shortDelayMinSeconds: .5
+	});
+	var MIN_DELAY_SECONDS = .1;
+	var MAX_DELAY_SECONDS = 3600;
+	function normalizeDelaySeconds(value, fallback) {
+		const seconds = Number(value);
+		if (!Number.isFinite(seconds)) return fallback;
+		return Math.min(MAX_DELAY_SECONDS, Math.max(MIN_DELAY_SECONDS, Math.round(seconds * 10) / 10));
+	}
+	function normalizeChancePercent(value, fallback) {
+		const percent = Number(value);
+		if (!Number.isFinite(percent)) return fallback;
+		return Math.min(100, Math.max(0, Math.round(percent * 10) / 10));
+	}
+	function normalizeClickDelaySettings(settings, fallback = DEFAULT_CLICK_DELAY_SETTINGS) {
+		const shortDelayMinSeconds = normalizeDelaySeconds(settings?.shortDelayMinSeconds, fallback.shortDelayMinSeconds);
+		const shortDelayMaxSeconds = normalizeDelaySeconds(settings?.shortDelayMaxSeconds, fallback.shortDelayMaxSeconds);
+		const longDelayMinSeconds = normalizeDelaySeconds(settings?.longDelayMinSeconds, fallback.longDelayMinSeconds);
+		const longDelayMaxSeconds = normalizeDelaySeconds(settings?.longDelayMaxSeconds, fallback.longDelayMaxSeconds);
+		return {
+			longDelayChancePercent: normalizeChancePercent(settings?.longDelayChancePercent, fallback.longDelayChancePercent),
+			longDelayMaxSeconds: Math.max(longDelayMinSeconds, longDelayMaxSeconds),
+			longDelayMinSeconds: Math.min(longDelayMinSeconds, longDelayMaxSeconds),
+			shortDelayMaxSeconds: Math.max(shortDelayMinSeconds, shortDelayMaxSeconds),
+			shortDelayMinSeconds: Math.min(shortDelayMinSeconds, shortDelayMaxSeconds)
+		};
+	}
+	function secondsToMilliseconds(seconds) {
+		return Math.round(seconds * 1e3);
+	}
+	function getRandomClickDelay(settings, random = Math.random) {
+		const normalizedSettings = normalizeClickDelaySettings(settings);
+		const isLongDelay = random() < normalizedSettings.longDelayChancePercent / 100;
+		const minimum = secondsToMilliseconds(isLongDelay ? normalizedSettings.longDelayMinSeconds : normalizedSettings.shortDelayMinSeconds);
+		const maximum = secondsToMilliseconds(isLongDelay ? normalizedSettings.longDelayMaxSeconds : normalizedSettings.shortDelayMaxSeconds);
+		return {
+			milliseconds: Math.floor(random() * (maximum - minimum + 1)) + minimum,
+			isLongDelay
 		};
 	}
 	function isCooldownButton(button, buttonText) {
@@ -1710,6 +1751,21 @@
 		"super"
 	];
 	var AUTO_BAIT_PURCHASE_QUANTITIES = [100, 1e3];
+	function loadClickDelaySettings() {
+		try {
+			return normalizeClickDelaySettings(JSON.parse(localStorage.getItem(CLICK_DELAY_SETTINGS_STORAGE_KEY)), DEFAULT_CLICK_DELAY_SETTINGS);
+		} catch (error) {
+			console.warn("[自动抛竿] 无法读取点击间隔设置：", error);
+			return { ...DEFAULT_CLICK_DELAY_SETTINGS };
+		}
+	}
+	function saveClickDelaySettings(clickDelaySettings) {
+		try {
+			localStorage.setItem(CLICK_DELAY_SETTINGS_STORAGE_KEY, JSON.stringify(clickDelaySettings));
+		} catch (error) {
+			console.warn("[自动抛竿] 无法保存点击间隔设置：", error);
+		}
+	}
 	function loadEnabled() {
 		try {
 			return localStorage.getItem(STORAGE_KEY) === "1";
@@ -1923,14 +1979,31 @@
 		let panelView = "control";
 		let earningsBiomeFilter = "current";
 		let earningsBaitFilter = "current";
+		let autoBaitPurchaseSaveTimer = null;
+		let autoBaitPurchaseSettingsDirty = false;
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitMinimumQuantity, setAutoBaitPurchaseQuantity, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitPurchaseSettings, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setClickDelaySetting, setEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
 		function toFiniteNumber(value) {
 			const number = Number(value);
 			return Number.isFinite(number) ? number : 0;
+		}
+		function flushAutoBaitPurchaseSettings() {
+			window.clearTimeout(autoBaitPurchaseSaveTimer);
+			autoBaitPurchaseSaveTimer = null;
+			if (!autoBaitPurchaseSettingsDirty || !ui) return;
+			autoBaitPurchaseSettingsDirty = false;
+			setAutoBaitPurchaseSettings({
+				minimumQuantity: ui.autoBaitMinimumQuantity.value,
+				purchaseQuantity: ui.autoBaitPurchaseQuantity.value
+			});
+		}
+		function scheduleAutoBaitPurchaseSettingsSave() {
+			autoBaitPurchaseSettingsDirty = true;
+			window.clearTimeout(autoBaitPurchaseSaveTimer);
+			autoBaitPurchaseSaveTimer = window.setTimeout(flushAutoBaitPurchaseSettings, 300);
 		}
 		function createPanel() {
 			if (document.getElementById("arcane-angler-auto-cast-panel-host")) return;
@@ -2183,6 +2256,81 @@
         aria-labelledby="settings-tab"
         hidden
       >
+        <details class="settings-section">
+          <summary class="settings-title">自动点击间隔</summary>
+
+          <div class="number-grid">
+            <label class="field">
+              <span class="field-label">小间隔最短（秒）</span>
+              <input
+                id="short-delay-min-seconds"
+                class="input"
+                type="number"
+                min="0.1"
+                max="3600"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </label>
+
+            <label class="field">
+              <span class="field-label">小间隔最长（秒）</span>
+              <input
+                id="short-delay-max-seconds"
+                class="input"
+                type="number"
+                min="0.1"
+                max="3600"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </label>
+
+            <label class="field">
+              <span class="field-label">大间隔最短（秒）</span>
+              <input
+                id="long-delay-min-seconds"
+                class="input"
+                type="number"
+                min="0.1"
+                max="3600"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </label>
+
+            <label class="field">
+              <span class="field-label">大间隔最长（秒）</span>
+              <input
+                id="long-delay-max-seconds"
+                class="input"
+                type="number"
+                min="0.1"
+                max="3600"
+                step="0.1"
+                inputmode="decimal"
+              />
+            </label>
+          </div>
+
+          <label class="field">
+            <span class="field-label">大间隔概率（%）</span>
+            <input
+              id="long-delay-chance-percent"
+              class="input"
+              type="number"
+              min="0"
+              max="100"
+              step="0.1"
+              inputmode="decimal"
+            />
+          </label>
+
+          <div class="field-help">
+            每次自动点击前先按概率选择大间隔或小间隔，再在对应的最短与最长时间内随机等待。
+          </div>
+        </details>
+
         <details class="settings-section">
           <summary class="settings-title">自动换地图</summary>
 
@@ -2492,6 +2640,11 @@
 				status: shadowRoot.querySelector("#status"),
 				nextDelay: shadowRoot.querySelector("#next-delay"),
 				clickCount: shadowRoot.querySelector("#click-count"),
+				shortDelayMinSeconds: shadowRoot.querySelector("#short-delay-min-seconds"),
+				shortDelayMaxSeconds: shadowRoot.querySelector("#short-delay-max-seconds"),
+				longDelayMinSeconds: shadowRoot.querySelector("#long-delay-min-seconds"),
+				longDelayMaxSeconds: shadowRoot.querySelector("#long-delay-max-seconds"),
+				longDelayChancePercent: shadowRoot.querySelector("#long-delay-chance-percent"),
 				autoBiomeStatus: shadowRoot.querySelector("#auto-biome-status"),
 				autoBiomeToggle: shadowRoot.querySelector("#auto-biome-toggle"),
 				autoBiomeCompetitionToggle: shadowRoot.querySelector("#auto-biome-competition-toggle"),
@@ -2588,11 +2741,25 @@
 			ui.autoBaitGoldBreezeGrade.addEventListener("change", (event) => {
 				setAutoBaitGrade("goldBreezeBaitGrade", event.currentTarget.value);
 			});
-			ui.autoBaitMinimumQuantity.addEventListener("change", (event) => {
-				setAutoBaitMinimumQuantity(event.currentTarget.value);
+			ui.autoBaitMinimumQuantity.addEventListener("input", () => {
+				scheduleAutoBaitPurchaseSettingsSave();
 			});
-			ui.autoBaitPurchaseQuantity.addEventListener("change", (event) => {
-				setAutoBaitPurchaseQuantity(event.currentTarget.value);
+			ui.autoBaitMinimumQuantity.addEventListener("change", () => {
+				autoBaitPurchaseSettingsDirty = true;
+				flushAutoBaitPurchaseSettings();
+			});
+			ui.autoBaitPurchaseQuantity.addEventListener("change", () => {
+				autoBaitPurchaseSettingsDirty = true;
+				flushAutoBaitPurchaseSettings();
+			});
+			for (const [input, field] of [
+				[ui.shortDelayMinSeconds, "shortDelayMinSeconds"],
+				[ui.shortDelayMaxSeconds, "shortDelayMaxSeconds"],
+				[ui.longDelayMinSeconds, "longDelayMinSeconds"],
+				[ui.longDelayMaxSeconds, "longDelayMaxSeconds"],
+				[ui.longDelayChancePercent, "longDelayChancePercent"]
+			]) input.addEventListener("change", (event) => {
+				setClickDelaySetting(field, event.currentTarget.value);
 			});
 			ui.idleReloadMinutes.addEventListener("change", (event) => {
 				setIdleReloadMinutes(event.currentTarget.value);
@@ -2640,6 +2807,7 @@
 			renderAutoBaitSettings();
 			renderAutoBiomeSettings();
 			renderCaptchaBypassToggle();
+			renderClickDelaySettings();
 			renderIdleReloadSettings();
 			renderPanelCollapsed();
 			renderNotificationSettings();
@@ -2687,6 +2855,7 @@
 			else if (panelView === "settings") {
 				renderAutoBaitSettings();
 				renderAutoBiomeSettings();
+				renderClickDelaySettings();
 				renderIdleReloadSettings();
 				renderNotificationSettings();
 				renderScheduleSettings();
@@ -2951,6 +3120,15 @@
 			if (!ui?.idleReloadMinutes) return;
 			ui.idleReloadMinutes.value = String(getState().idleReloadSettings.minutes);
 		}
+		function renderClickDelaySettings() {
+			if (!ui?.shortDelayMinSeconds) return;
+			const { clickDelaySettings } = getState();
+			ui.shortDelayMinSeconds.value = String(clickDelaySettings.shortDelayMinSeconds);
+			ui.shortDelayMaxSeconds.value = String(clickDelaySettings.shortDelayMaxSeconds);
+			ui.longDelayMinSeconds.value = String(clickDelaySettings.longDelayMinSeconds);
+			ui.longDelayMaxSeconds.value = String(clickDelaySettings.longDelayMaxSeconds);
+			ui.longDelayChancePercent.value = String(clickDelaySettings.longDelayChancePercent);
+		}
 		function renderToggle() {
 			if (!ui?.toggle) return;
 			const { enabled } = getState();
@@ -2968,6 +3146,7 @@
 			renderAutoBaitSettings,
 			renderAutoBiomeSettings,
 			renderCaptchaBypassToggle,
+			renderClickDelaySettings,
 			renderEarningsStats,
 			renderIdleReloadSettings,
 			renderNotificationSettings,
@@ -2983,6 +3162,7 @@
 	var captchaBypassEnabled = loadCaptchaBypassEnabled();
 	var pushKey = loadPushKey();
 	var notificationMode = loadNotificationMode();
+	var clickDelaySettings = loadClickDelaySettings();
 	var scheduleSettings = loadScheduleSettings();
 	var autoBiomeSettings = loadAutoBiomeSettings();
 	var autoBaitSettings = loadAutoBaitSettings();
@@ -3001,6 +3181,13 @@
 	var pendingWeatherResponses = new Map();
 	var gameState = createGameStateStore();
 	var fishingActivityWatchdog = createFishingActivityWatchdog();
+	var CLICK_DELAY_SETTING_FIELDS = new Set([
+		"longDelayChancePercent",
+		"longDelayMaxSeconds",
+		"longDelayMinSeconds",
+		"shortDelayMaxSeconds",
+		"shortDelayMinSeconds"
+	]);
 	var AUTO_BAIT_GRADE_FIELDS = new Set([
 		"goldBreezeBaitGrade",
 		"guildCompetitionBaitGrade",
@@ -3065,6 +3252,7 @@
 	function getPanelState() {
 		return {
 			captchaBypassEnabled,
+			clickDelaySettings,
 			clickCount,
 			earningsStats,
 			enabled,
@@ -3134,16 +3322,6 @@
 			return button;
 		}
 		return null;
-	}
-	function getRandomDelay() {
-		if (Math.random() < CONFIG.longDelayChance) return {
-			milliseconds: randomInt(CONFIG.longDelayMin, CONFIG.longDelayMax),
-			isLongDelay: true
-		};
-		return {
-			milliseconds: randomInt(CONFIG.normalDelayMin, CONFIG.normalDelayMax),
-			isLongDelay: false
-		};
 	}
 	function dispatchPointerEvent(target, type, options) {
 		if (typeof window.PointerEvent !== "function") return;
@@ -3294,7 +3472,7 @@
 				if (schedule.shouldEnterRest(currentLoopId)) continue;
 				return;
 			}
-			const delay = getRandomDelay();
+			const delay = getRandomClickDelay(clickDelaySettings);
 			if (!await waitWithCountdown(delay.milliseconds, delay.isLongDelay, currentLoopId)) {
 				if (schedule.shouldEnterRest(currentLoopId)) continue;
 				return;
@@ -3411,11 +3589,20 @@
 		if (!AUTO_BAIT_GRADE_FIELDS.has(field)) return;
 		updateAutoBaitSettings({ [field]: normalizeAutoBaitGrade(nextGrade, autoBaitSettings[field]) });
 	}
-	function setAutoBaitMinimumQuantity(nextQuantity) {
-		updateAutoBaitSettings({ minimumQuantity: normalizeAutoBaitMinimumQuantity(nextQuantity, autoBaitSettings.minimumQuantity) });
+	function setAutoBaitPurchaseSettings({ minimumQuantity, purchaseQuantity }) {
+		updateAutoBaitSettings({
+			minimumQuantity: normalizeAutoBaitMinimumQuantity(minimumQuantity, autoBaitSettings.minimumQuantity),
+			purchaseQuantity: normalizeAutoBaitPurchaseQuantity(purchaseQuantity, autoBaitSettings.purchaseQuantity)
+		});
 	}
-	function setAutoBaitPurchaseQuantity(nextQuantity) {
-		updateAutoBaitSettings({ purchaseQuantity: normalizeAutoBaitPurchaseQuantity(nextQuantity, autoBaitSettings.purchaseQuantity) });
+	function setClickDelaySetting(field, value) {
+		if (!CLICK_DELAY_SETTING_FIELDS.has(field)) return;
+		clickDelaySettings = normalizeClickDelaySettings({
+			...clickDelaySettings,
+			[field]: value
+		}, clickDelaySettings);
+		saveClickDelaySettings(clickDelaySettings);
+		panel.renderClickDelaySettings();
 	}
 	function setIdleReloadMinutes(nextMinutes) {
 		idleReloadSettings = { minutes: normalizeIdleReloadMinutes(nextMinutes, idleReloadSettings.minutes) };
@@ -3487,13 +3674,13 @@
 				resetEarningsStats,
 				setAutoBaitEnabled,
 				setAutoBaitGrade,
-				setAutoBaitMinimumQuantity,
-				setAutoBaitPurchaseQuantity,
+				setAutoBaitPurchaseSettings,
 				setAutoBiomeEnabled,
 				setAutoBiomeChaseGoldBreeze,
 				setAutoBiomePreferCompetition,
 				setAutoBiomeWeight,
 				setCaptchaBypassEnabled,
+				setClickDelaySetting,
 				setEnabled,
 				setIdleReloadMinutes,
 				setNotificationMode,

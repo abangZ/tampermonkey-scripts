@@ -5,17 +5,6 @@ export const CONFIG = {
     // 目标按钮文字，按钮实际显示为：🎣 抛竿线
     buttonText: '抛竿线',
 
-    // 正常等待时间：1～2 秒
-    normalDelayMin: 500,
-    normalDelayMax: 2000,
-
-    // 长等待时间：5～10 秒
-    longDelayMin: 5000,
-    longDelayMax: 10000,
-
-    // 长等待概率：0.08 = 8%
-    longDelayChance: 0.08,
-
     // 按钮未出现时的检查间隔
     buttonPollInterval: 250,
 
@@ -41,6 +30,8 @@ export const CONFIG = {
 };
 
 export const STORAGE_KEY = 'arcane-angler-auto-cast-enabled-v1';
+export const CLICK_DELAY_SETTINGS_STORAGE_KEY =
+    'arcane-angler-click-delay-settings-v1';
 export const CAPTCHA_BYPASS_STORAGE_KEY =
     'arcane-angler-captcha-bypass-enabled-v1';
 export const PUSH_KEY_STORAGE_KEY = 'arcane-angler-push-key-v1';

@@ -10,6 +10,10 @@
 import { createAutoBiomeController } from './auto-biome.js';
 import { createAutoBaitController } from './auto-bait.js';
 import { createCaptchaController } from './captcha.js';
+import {
+    getRandomClickDelay,
+    normalizeClickDelaySettings,
+} from './click-delay.js';
 import { CONFIG } from './config.js';
 import {
     createCooldownWatchdog,
@@ -38,6 +42,7 @@ import {
     loadAutoBaitSettings,
     loadAutoBiomeSettings,
     loadCaptchaBypassEnabled,
+    loadClickDelaySettings,
     loadEnabled,
     loadIdleReloadSettings,
     loadNotificationMode,
@@ -52,6 +57,7 @@ import {
     saveAutoBaitSettings,
     saveAutoBiomeSettings,
     saveCaptchaBypassEnabled,
+    saveClickDelaySettings,
     saveEnabled,
     saveIdleReloadSettings,
     saveNotificationMode,
@@ -66,6 +72,7 @@ let enabled = loadEnabled();
 let captchaBypassEnabled = loadCaptchaBypassEnabled();
 let pushKey = loadPushKey();
 let notificationMode = loadNotificationMode();
+let clickDelaySettings = loadClickDelaySettings();
 let scheduleSettings = loadScheduleSettings();
 let autoBiomeSettings = loadAutoBiomeSettings();
 let autoBaitSettings = loadAutoBaitSettings();
@@ -84,6 +91,13 @@ const pendingCompetitionResponses = new Map();
 const pendingWeatherResponses = new Map();
 const gameState = createGameStateStore();
 const fishingActivityWatchdog = createFishingActivityWatchdog();
+const CLICK_DELAY_SETTING_FIELDS = new Set([
+    'longDelayChancePercent',
+    'longDelayMaxSeconds',
+    'longDelayMinSeconds',
+    'shortDelayMaxSeconds',
+    'shortDelayMinSeconds',
+]);
 const AUTO_BAIT_GRADE_FIELDS = new Set([
     'goldBreezeBaitGrade',
     'guildCompetitionBaitGrade',
@@ -183,6 +197,7 @@ function resetEarningsStats() {
 function getPanelState() {
     return {
         captchaBypassEnabled,
+        clickDelaySettings,
         clickCount,
         earningsStats,
         enabled,
@@ -304,22 +319,6 @@ function findCooldownButton() {
     }
 
     return null;
-}
-
-function getRandomDelay() {
-    const isLongDelay = Math.random() < CONFIG.longDelayChance;
-
-    if (isLongDelay) {
-        return {
-            milliseconds: randomInt(CONFIG.longDelayMin, CONFIG.longDelayMax),
-            isLongDelay: true,
-        };
-    }
-
-    return {
-        milliseconds: randomInt(CONFIG.normalDelayMin, CONFIG.normalDelayMax),
-        isLongDelay: false,
-    };
 }
 
 /**
@@ -607,7 +606,7 @@ async function runLoop(currentLoopId) {
             return;
         }
 
-        const delay = getRandomDelay();
+        const delay = getRandomClickDelay(clickDelaySettings);
 
         const completed = await waitWithCountdown(
             delay.milliseconds,
@@ -806,22 +805,33 @@ function setAutoBaitGrade(field, nextGrade) {
     });
 }
 
-function setAutoBaitMinimumQuantity(nextQuantity) {
+function setAutoBaitPurchaseSettings({ minimumQuantity, purchaseQuantity }) {
     updateAutoBaitSettings({
         minimumQuantity: normalizeAutoBaitMinimumQuantity(
-            nextQuantity,
+            minimumQuantity,
             autoBaitSettings.minimumQuantity,
+        ),
+        purchaseQuantity: normalizeAutoBaitPurchaseQuantity(
+            purchaseQuantity,
+            autoBaitSettings.purchaseQuantity,
         ),
     });
 }
 
-function setAutoBaitPurchaseQuantity(nextQuantity) {
-    updateAutoBaitSettings({
-        purchaseQuantity: normalizeAutoBaitPurchaseQuantity(
-            nextQuantity,
-            autoBaitSettings.purchaseQuantity,
-        ),
-    });
+function setClickDelaySetting(field, value) {
+    if (!CLICK_DELAY_SETTING_FIELDS.has(field)) {
+        return;
+    }
+
+    clickDelaySettings = normalizeClickDelaySettings(
+        {
+            ...clickDelaySettings,
+            [field]: value,
+        },
+        clickDelaySettings,
+    );
+    saveClickDelaySettings(clickDelaySettings);
+    panel.renderClickDelaySettings();
 }
 
 function setIdleReloadMinutes(nextMinutes) {
@@ -933,13 +943,13 @@ function initialize() {
             resetEarningsStats,
             setAutoBaitEnabled,
             setAutoBaitGrade,
-            setAutoBaitMinimumQuantity,
-            setAutoBaitPurchaseQuantity,
+            setAutoBaitPurchaseSettings,
             setAutoBiomeEnabled,
             setAutoBiomeChaseGoldBreeze,
             setAutoBiomePreferCompetition,
             setAutoBiomeWeight,
             setCaptchaBypassEnabled,
+            setClickDelaySetting,
             setEnabled,
             setIdleReloadMinutes,
             setNotificationMode,
