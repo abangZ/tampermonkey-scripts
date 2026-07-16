@@ -66,6 +66,8 @@ https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/
 
 发布新版本时，需要递增脚本元数据中的 `@version`，Tampermonkey 才会识别为可用更新。
 
+完整版本更新记录见 [CHANGELOG.md](./CHANGELOG.md)。
+
 ### 开发与构建
 
 项目使用 Vite 和 `vite-plugin-monkey` 维护模块化源码，最终仍生成可直接安装的单文件 userscript。
