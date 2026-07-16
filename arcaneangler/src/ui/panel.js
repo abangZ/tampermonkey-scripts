@@ -26,6 +26,7 @@ export function createPanelController({
         setAutoBiomeWeight,
         setCaptchaBypassEnabled,
         setEnabled,
+        setIdleReloadMinutes,
         setNotificationMode,
         setPushKey,
         setScheduleEnabled,
@@ -66,6 +67,13 @@ export function createPanelController({
         const shadowRoot = host.attachShadow({
             mode: 'open',
         });
+        const baitGradeOptions = `
+              <option value="default">默认饵（无限，不购买）</option>
+              <option value="low">低级饵</option>
+              <option value="medium">中级饵（+250 幸运）</option>
+              <option value="high">高级饵（+500 幸运）</option>
+              <option value="super">超级饵（+1000 幸运）</option>
+        `;
 
         shadowRoot.innerHTML = `
   <style>${panelStyles}</style>
@@ -299,8 +307,8 @@ export function createPanelController({
         aria-labelledby="settings-tab"
         hidden
       >
-        <section class="settings-section">
-          <div class="settings-title">自动换地图</div>
+        <details class="settings-section">
+          <summary class="settings-title">自动换地图</summary>
 
           <label class="option-row">
             <span>优先比赛地图</span>
@@ -363,19 +371,29 @@ export function createPanelController({
             <span class="label">天气更新</span>
             <span id="auto-biome-updated-at" class="value">等待接口数据</span>
           </div>
-        </section>
+        </details>
 
-        <section class="settings-section">
-          <div class="settings-title">自动买鱼饵</div>
+        <details class="settings-section">
+          <summary class="settings-title">自动买鱼饵</summary>
 
           <label class="field">
-            <span class="field-label">使用鱼饵等级</span>
-            <select id="auto-bait-grade" class="input">
-              <option value="default">默认饵（无限，不购买）</option>
-              <option value="low">低级饵</option>
-              <option value="medium">中级饵（+250 幸运）</option>
-              <option value="high">高级饵（+500 幸运）</option>
-              <option value="super">超级饵（+1000 幸运）</option>
+            <span class="field-label">常规鱼饵</span>
+            <select id="auto-bait-regular-grade" class="input">
+              ${baitGradeOptions}
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">个人赛鱼饵</span>
+            <select id="auto-bait-personal-grade" class="input">
+              ${baitGradeOptions}
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">公会赛鱼饵</span>
+            <select id="auto-bait-guild-grade" class="input">
+              ${baitGradeOptions}
             </select>
           </label>
 
@@ -404,7 +422,7 @@ export function createPanelController({
             </div>
 
             <div class="field-help">
-              每次抛竿后检查当前地图对应等级的鱼饵；库存低于设置值时购买。阈值按 100 的倍数保存。
+              根据当前地图是否为个人赛或公会赛地图选择鱼饵；同一地图同时匹配时优先公会赛设置。库存低于设置值时购买，阈值按 100 的倍数保存。
             </div>
           </div>
 
@@ -412,10 +430,31 @@ export function createPanelController({
             <span class="label">上次购买</span>
             <span id="auto-bait-last-purchased-at" class="value">暂无</span>
           </div>
-        </section>
+        </details>
 
-        <section class="settings-section">
-          <div class="settings-title">消息通知</div>
+        <details class="settings-section">
+          <summary class="settings-title">卡住自动恢复</summary>
+
+          <label class="field">
+            <span class="field-label">连续未钓鱼（分钟）</span>
+            <input
+              id="idle-reload-minutes"
+              class="input"
+              type="number"
+              min="1"
+              max="1440"
+              step="1"
+              inputmode="numeric"
+            />
+          </label>
+
+          <div class="field-help">
+            自动抛竿运行期间，连续超过该时间未收到钓鱼结果时刷新一次页面；定时休息期间不计时。
+          </div>
+        </details>
+
+        <details class="settings-section">
+          <summary class="settings-title">消息通知</summary>
 
           <div
             class="choice-list"
@@ -487,10 +526,10 @@ export function createPanelController({
               浏览器通知仅在当前浏览器和站点授权后可用。
             </div>
           </div>
-        </section>
+        </details>
 
-        <section class="settings-section">
-          <div class="settings-title">定时休息</div>
+        <details class="settings-section">
+          <summary class="settings-title">定时休息</summary>
 
           <label class="option-row">
             <span>启用运行/休息周期</span>
@@ -542,7 +581,7 @@ export function createPanelController({
               每轮实际运行和休息时长，都会在设置值上加入 -5%～+10% 的随机时间。
             </div>
           </div>
-        </section>
+        </details>
       </div>
     </div>
   </div>
@@ -571,7 +610,15 @@ export function createPanelController({
             ),
             autoBaitStatus: shadowRoot.querySelector('#auto-bait-status'),
             autoBaitToggle: shadowRoot.querySelector('#auto-bait-toggle'),
-            autoBaitGrade: shadowRoot.querySelector('#auto-bait-grade'),
+            autoBaitRegularGrade: shadowRoot.querySelector(
+                '#auto-bait-regular-grade',
+            ),
+            autoBaitPersonalGrade: shadowRoot.querySelector(
+                '#auto-bait-personal-grade',
+            ),
+            autoBaitGuildGrade: shadowRoot.querySelector(
+                '#auto-bait-guild-grade',
+            ),
             autoBaitPurchaseSettings: shadowRoot.querySelector(
                 '#auto-bait-purchase-settings',
             ),
@@ -584,6 +631,7 @@ export function createPanelController({
             autoBaitLastPurchasedAt: shadowRoot.querySelector(
                 '#auto-bait-last-purchased-at',
             ),
+            idleReloadMinutes: shadowRoot.querySelector('#idle-reload-minutes'),
             pushKeyInput: shadowRoot.querySelector('#push-key'),
             pushKeyHelp: shadowRoot.querySelector('#push-key-help'),
             captchaBypassToggle: shadowRoot.querySelector(
@@ -674,8 +722,22 @@ export function createPanelController({
             setAutoBaitEnabled(event.currentTarget.checked);
         });
 
-        ui.autoBaitGrade.addEventListener('change', (event) => {
-            setAutoBaitGrade(event.currentTarget.value);
+        ui.autoBaitRegularGrade.addEventListener('change', (event) => {
+            setAutoBaitGrade('regularBaitGrade', event.currentTarget.value);
+        });
+
+        ui.autoBaitPersonalGrade.addEventListener('change', (event) => {
+            setAutoBaitGrade(
+                'personalCompetitionBaitGrade',
+                event.currentTarget.value,
+            );
+        });
+
+        ui.autoBaitGuildGrade.addEventListener('change', (event) => {
+            setAutoBaitGrade(
+                'guildCompetitionBaitGrade',
+                event.currentTarget.value,
+            );
         });
 
         ui.autoBaitMinimumQuantity.addEventListener('change', (event) => {
@@ -684,6 +746,10 @@ export function createPanelController({
 
         ui.autoBaitPurchaseQuantity.addEventListener('change', (event) => {
             setAutoBaitPurchaseQuantity(event.currentTarget.value);
+        });
+
+        ui.idleReloadMinutes.addEventListener('change', (event) => {
+            setIdleReloadMinutes(event.currentTarget.value);
         });
 
         for (const input of ui.autoBiomeWeightInputs) {
@@ -750,6 +816,7 @@ export function createPanelController({
         renderAutoBaitSettings();
         renderAutoBiomeSettings();
         renderCaptchaBypassToggle();
+        renderIdleReloadSettings();
         renderPanelCollapsed();
         renderNotificationSettings();
         renderScheduleSettings();
@@ -810,7 +877,9 @@ export function createPanelController({
         if (panelView === 'earnings') {
             renderEarningsStats();
         } else if (panelView === 'settings') {
+            renderAutoBaitSettings();
             renderAutoBiomeSettings();
+            renderIdleReloadSettings();
             renderNotificationSettings();
             renderScheduleSettings();
         }
@@ -1319,9 +1388,15 @@ export function createPanelController({
             autoBaitSettings.enabled ? 'true' : 'false',
         );
         ui.autoBaitStatus.textContent = autoBaitStatus;
-        ui.autoBaitGrade.value = autoBaitSettings.baitGrade;
+        ui.autoBaitRegularGrade.value = autoBaitSettings.regularBaitGrade;
+        ui.autoBaitPersonalGrade.value =
+            autoBaitSettings.personalCompetitionBaitGrade;
+        ui.autoBaitGuildGrade.value =
+            autoBaitSettings.guildCompetitionBaitGrade;
         ui.autoBaitPurchaseSettings.hidden =
-            autoBaitSettings.baitGrade === 'default';
+            autoBaitSettings.regularBaitGrade === 'default' &&
+            autoBaitSettings.personalCompetitionBaitGrade === 'default' &&
+            autoBaitSettings.guildCompetitionBaitGrade === 'default';
         ui.autoBaitMinimumQuantity.value = String(
             autoBaitSettings.minimumQuantity,
         );
@@ -1331,6 +1406,16 @@ export function createPanelController({
         ui.autoBaitLastPurchasedAt.textContent = autoBaitLastPurchasedAt
             ? new Date(autoBaitLastPurchasedAt).toLocaleTimeString()
             : '暂无';
+    }
+
+    function renderIdleReloadSettings() {
+        if (!ui?.idleReloadMinutes) {
+            return;
+        }
+
+        ui.idleReloadMinutes.value = String(
+            getState().idleReloadSettings.minutes,
+        );
     }
 
     function renderToggle() {
@@ -1365,6 +1450,7 @@ export function createPanelController({
         renderAutoBiomeSettings,
         renderCaptchaBypassToggle,
         renderEarningsStats,
+        renderIdleReloadSettings,
         renderNotificationSettings,
         renderScheduleSettings,
         renderScheduleStatus,

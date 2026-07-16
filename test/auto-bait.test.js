@@ -3,13 +3,17 @@ import test from 'node:test';
 
 import {
     createAutoBaitController,
+    getAutoBaitContext,
+    getBaitGradeForBiome,
     getBaitIdForBiome,
     shouldPurchaseBait,
 } from '../arcaneangler/src/auto-bait.js';
 import {
+    loadAutoBaitSettings,
     normalizeAutoBaitGrade,
     normalizeAutoBaitMinimumQuantity,
     normalizeAutoBaitPurchaseQuantity,
+    normalizeIdleReloadMinutes,
 } from '../arcaneangler/src/storage.js';
 
 test('按当前地图和设置等级生成鱼饵 ID', () => {
@@ -26,6 +30,46 @@ test('只有付费饵库存严格低于阈值时才购买', () => {
     assert.equal(shouldPurchaseBait(0, 100, 'default'), false);
 });
 
+test('按常规、个人赛和公会赛地图选择鱼饵等级', () => {
+    const settings = {
+        guildCompetitionBaitGrade: 'super',
+        personalCompetitionBaitGrade: 'high',
+        regularBaitGrade: 'low',
+    };
+    const competitionBiomes = {
+        guildTournamentBiomeId: 8,
+        personalDerbyBiomeId: 6,
+    };
+
+    assert.equal(getAutoBaitContext(4, competitionBiomes), 'regular');
+    assert.equal(getAutoBaitContext(6, competitionBiomes), 'personal');
+    assert.equal(getAutoBaitContext(8, competitionBiomes), 'guild');
+    assert.equal(getBaitGradeForBiome(4, settings, competitionBiomes), 'low');
+    assert.equal(getBaitGradeForBiome(6, settings, competitionBiomes), 'high');
+    assert.equal(getBaitGradeForBiome(8, settings, competitionBiomes), 'super');
+});
+
+test('同一地图同时属于个人赛和公会赛时优先公会赛鱼饵', () => {
+    const competitionBiomes = {
+        guildTournamentBiomeId: 9,
+        personalDerbyBiomeId: 9,
+    };
+
+    assert.equal(getAutoBaitContext(9, competitionBiomes), 'guild');
+    assert.equal(
+        getBaitGradeForBiome(
+            9,
+            {
+                guildCompetitionBaitGrade: 'super',
+                personalCompetitionBaitGrade: 'medium',
+                regularBaitGrade: 'low',
+            },
+            competitionBiomes,
+        ),
+        'super',
+    );
+});
+
 test('自动买鱼饵设置会限制等级、阈值和商店购买数量', () => {
     assert.equal(normalizeAutoBaitGrade('super'), 'super');
     assert.equal(normalizeAutoBaitGrade('unknown'), 'low');
@@ -33,6 +77,43 @@ test('自动买鱼饵设置会限制等级、阈值和商店购买数量', () =>
     assert.equal(normalizeAutoBaitMinimumQuantity(151), 200);
     assert.equal(normalizeAutoBaitPurchaseQuantity(1000), 1000);
     assert.equal(normalizeAutoBaitPurchaseQuantity(500), 100);
+    assert.equal(normalizeIdleReloadMinutes(5), 5);
+    assert.equal(normalizeIdleReloadMinutes(0), 5);
+    assert.equal(normalizeIdleReloadMinutes(2000), 1440);
+});
+
+test('旧版单一鱼饵等级会迁移到三个使用场景', () => {
+    const previousLocalStorage = globalThis.localStorage;
+    const values = new Map([
+        [
+            'arcane-angler-auto-bait-settings-v1',
+            JSON.stringify({
+                baitGrade: 'high',
+                enabled: true,
+                minimumQuantity: 200,
+                purchaseQuantity: 1000,
+            }),
+        ],
+    ]);
+
+    globalThis.localStorage = {
+        getItem(key) {
+            return values.get(key) ?? null;
+        },
+    };
+
+    try {
+        assert.deepEqual(loadAutoBaitSettings(), {
+            enabled: true,
+            guildCompetitionBaitGrade: 'high',
+            minimumQuantity: 200,
+            personalCompetitionBaitGrade: 'high',
+            purchaseQuantity: 1000,
+            regularBaitGrade: 'high',
+        });
+    } finally {
+        globalThis.localStorage = previousLocalStorage;
+    }
 });
 
 test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async () => {
@@ -78,10 +159,16 @@ test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async
             getState() {
                 return {
                     autoBaitSettings: {
-                        baitGrade: 'medium',
                         enabled: true,
+                        guildCompetitionBaitGrade: 'super',
                         minimumQuantity: 100,
+                        personalCompetitionBaitGrade: 'medium',
                         purchaseQuantity: 100,
+                        regularBaitGrade: 'low',
+                    },
+                    autoBiomeCompetitionBiomes: {
+                        guildTournamentBiomeId: 5,
+                        personalDerbyBiomeId: 3,
                     },
                     enabled: true,
                 };
@@ -96,6 +183,7 @@ test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async
         ]);
         assert.equal(controller.getSnapshot().autoBaitCurrentQuantity, 150);
         assert.match(controller.getSnapshot().autoBaitStatus, /已购买/);
+        assert.match(controller.getSnapshot().autoBaitStatus, /个人赛/);
     } finally {
         globalThis.window = previousWindow;
     }

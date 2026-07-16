@@ -9,6 +9,12 @@ export const BAIT_GRADE_LABELS = {
     super: '超级饵（+1000 幸运）',
 };
 
+export const AUTO_BAIT_CONTEXT_LABELS = {
+    guild: '公会赛',
+    personal: '个人赛',
+    regular: '常规',
+};
+
 function normalizeBiomeId(value) {
     const biomeId = Number(value);
 
@@ -31,6 +37,52 @@ export function getBaitIdForBiome(biomeId, baitGrade) {
     const normalizedBiomeId = normalizeBiomeId(biomeId);
 
     return normalizedBiomeId ? `bait_${normalizedBiomeId}_${baitGrade}` : null;
+}
+
+export function getAutoBaitContext(biomeId, competitionBiomes) {
+    const normalizedBiomeId = normalizeBiomeId(biomeId);
+
+    if (
+        normalizedBiomeId &&
+        normalizedBiomeId ===
+            normalizeBiomeId(competitionBiomes?.guildTournamentBiomeId)
+    ) {
+        return 'guild';
+    }
+
+    if (
+        normalizedBiomeId &&
+        normalizedBiomeId ===
+            normalizeBiomeId(competitionBiomes?.personalDerbyBiomeId)
+    ) {
+        return 'personal';
+    }
+
+    return 'regular';
+}
+
+export function getBaitGradeForBiome(
+    biomeId,
+    autoBaitSettings,
+    competitionBiomes,
+) {
+    const regularBaitGrade =
+        autoBaitSettings?.regularBaitGrade ??
+        autoBaitSettings?.baitGrade ??
+        'low';
+    const context = getAutoBaitContext(biomeId, competitionBiomes);
+
+    if (context === 'guild') {
+        return autoBaitSettings?.guildCompetitionBaitGrade ?? regularBaitGrade;
+    }
+
+    if (context === 'personal') {
+        return (
+            autoBaitSettings?.personalCompetitionBaitGrade ?? regularBaitGrade
+        );
+    }
+
+    return regularBaitGrade;
 }
 
 export function shouldPurchaseBait(quantity, minimumQuantity, baitGrade) {
@@ -134,7 +186,8 @@ export function createAutoBaitController({
         biomeId: requestedBiomeId = null,
         force = false,
     }) {
-        const { autoBaitSettings, enabled } = getState();
+        const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } =
+            getState();
 
         if (!autoBaitSettings.enabled) {
             updateSnapshot({
@@ -154,27 +207,9 @@ export function createAutoBaitController({
             return;
         }
 
-        const requestedBaitId = getBaitIdForBiome(
-            requestedBiomeId,
-            autoBaitSettings.baitGrade,
-        );
-
-        if (
-            !force &&
-            requestedBaitId &&
-            requestedBaitId === retryBaitId &&
-            Date.now() < retryAfter
-        ) {
-            return;
-        }
-
         const api = window.ApiService;
 
-        if (
-            typeof api?.equipBait !== 'function' ||
-            (autoBaitSettings.baitGrade !== 'default' &&
-                typeof api?.buyBait !== 'function')
-        ) {
+        if (typeof api?.equipBait !== 'function') {
             updateSnapshot({ nextStatus: '等待游戏鱼饵接口' });
             return;
         }
@@ -188,36 +223,51 @@ export function createAutoBaitController({
 
         checking = true;
         updateSnapshot({ nextStatus: '正在检查鱼饵库存' });
+        let attemptedBaitId = null;
 
         try {
             const biomeId =
                 normalizeBiomeId(requestedBiomeId) ??
                 normalizeBiomeId(player?.currentBiome);
-            const baitId = getBaitIdForBiome(
+            const baitContext = getAutoBaitContext(
                 biomeId,
-                autoBaitSettings.baitGrade,
+                autoBiomeCompetitionBiomes,
             );
+            const baitGrade = getBaitGradeForBiome(
+                biomeId,
+                autoBaitSettings,
+                autoBiomeCompetitionBiomes,
+            );
+            const baitId = getBaitIdForBiome(biomeId, baitGrade);
+
+            attemptedBaitId = baitId;
 
             if (!baitId) {
                 throw new Error('无法识别当前地图');
             }
 
-            const baitLabel = getBaitLabel(
-                baitId,
-                autoBaitSettings.baitGrade,
-                biomeId,
-            );
+            if (!force && baitId === retryBaitId && Date.now() < retryAfter) {
+                return;
+            }
+
+            if (baitGrade !== 'default' && typeof api?.buyBait !== 'function') {
+                updateSnapshot({ nextStatus: '等待游戏鱼饵购买接口' });
+                return;
+            }
+
+            const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
+            const contextLabel = AUTO_BAIT_CONTEXT_LABELS[baitContext];
 
             lastCheckedAt = Date.now();
 
-            if (autoBaitSettings.baitGrade === 'default') {
+            if (baitGrade === 'default') {
                 await equipBait(api, player, baitId, baitLabel);
                 retryAfter = 0;
                 retryBaitId = null;
                 updateSnapshot({
                     baitId,
                     quantity: null,
-                    nextStatus: `${baitLabel} · 无限`,
+                    nextStatus: `${contextLabel} · ${baitLabel} · 无限`,
                 });
                 return;
             }
@@ -229,7 +279,7 @@ export function createAutoBaitController({
                 shouldPurchaseBait(
                     quantity,
                     autoBaitSettings.minimumQuantity,
-                    autoBaitSettings.baitGrade,
+                    baitGrade,
                 )
             ) {
                 const bait = getBaitById(baitId);
@@ -249,7 +299,7 @@ export function createAutoBaitController({
                     updateSnapshot({
                         baitId,
                         quantity,
-                        nextStatus: `${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币`,
+                        nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币`,
                     });
                     return;
                 }
@@ -283,12 +333,12 @@ export function createAutoBaitController({
                 baitId,
                 quantity,
                 nextStatus: purchased
-                    ? `已购买 ${baitLabel}，当前 ${quantity.toLocaleString()} 个`
-                    : `${baitLabel} · ${quantity.toLocaleString()} 个`,
+                    ? `已购买${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个`
+                    : `${contextLabel} · ${baitLabel} · ${quantity.toLocaleString()} 个`,
             });
         } catch (error) {
             console.error('[自动买鱼饵] 检查或购买失败：', error);
-            retryBaitId = requestedBaitId ?? currentBaitId;
+            retryBaitId = attemptedBaitId ?? currentBaitId;
             retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
             updateSnapshot({
                 nextStatus: `鱼饵处理失败：${getErrorMessage(error)}`,
@@ -308,14 +358,24 @@ export function createAutoBaitController({
     }
 
     function handleCastResult(result) {
-        const { autoBaitSettings, enabled } = getState();
+        const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } =
+            getState();
 
         if (!autoBaitSettings.enabled || !enabled) {
             return;
         }
 
         const biomeId = normalizeBiomeId(result?.currentBiome);
-        const baitId = getBaitIdForBiome(biomeId, autoBaitSettings.baitGrade);
+        const baitContext = getAutoBaitContext(
+            biomeId,
+            autoBiomeCompetitionBiomes,
+        );
+        const baitGrade = getBaitGradeForBiome(
+            biomeId,
+            autoBaitSettings,
+            autoBiomeCompetitionBiomes,
+        );
+        const baitId = getBaitIdForBiome(biomeId, baitGrade);
 
         if (!baitId) {
             return;
@@ -328,33 +388,31 @@ export function createAutoBaitController({
 
         lastCheckedAt = Date.now();
 
-        if (autoBaitSettings.baitGrade === 'default') {
+        const contextLabel = AUTO_BAIT_CONTEXT_LABELS[baitContext];
+
+        if (baitGrade === 'default') {
             updateSnapshot({
                 baitId,
                 quantity: null,
-                nextStatus: `${BAIT_GRADE_LABELS.default} · 无限`,
+                nextStatus: `${contextLabel} · ${BAIT_GRADE_LABELS.default} · 无限`,
             });
             return;
         }
 
         const quantity = normalizeQuantity(result?.baitQuantity);
-        const baitLabel = getBaitLabel(
-            baitId,
-            autoBaitSettings.baitGrade,
-            biomeId,
-        );
+        const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
 
         updateSnapshot({
             baitId,
             quantity,
-            nextStatus: `${baitLabel} · ${quantity.toLocaleString()} 个`,
+            nextStatus: `${contextLabel} · ${baitLabel} · ${quantity.toLocaleString()} 个`,
         });
 
         if (
             shouldPurchaseBait(
                 quantity,
                 autoBaitSettings.minimumQuantity,
-                autoBaitSettings.baitGrade,
+                baitGrade,
             )
         ) {
             void checkNow({ biomeId });

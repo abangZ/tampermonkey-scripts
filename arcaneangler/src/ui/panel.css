@@ -137,9 +137,15 @@
     border: 1px solid rgba(255, 255, 255, 0.18);
     border-radius: 7px;
     outline: none;
-    background: rgba(255, 255, 255, 0.08);
+    background: #252530;
     color: rgba(255, 255, 255, 0.92);
+    color-scheme: dark;
     font-size: 12px;
+}
+
+.input option {
+    background: #252530;
+    color: rgba(255, 255, 255, 0.92);
 }
 
 .input:focus {
@@ -173,9 +179,32 @@
 }
 
 .settings-title {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    list-style: none;
     color: rgba(255, 255, 255, 0.88);
     font-size: 12px;
     font-weight: 700;
+    cursor: pointer;
+}
+
+.settings-title::-webkit-details-marker {
+    display: none;
+}
+
+.settings-title::after {
+    content: '›';
+    color: rgba(255, 255, 255, 0.45);
+    font-size: 18px;
+    line-height: 1;
+    transform: rotate(0deg);
+    transition: transform 160ms ease;
+}
+
+.settings-section[open] > .settings-title::after {
+    transform: rotate(90deg);
 }
 
 .choice-list {

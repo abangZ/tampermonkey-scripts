@@ -11,7 +11,11 @@ import { createAutoBiomeController } from './auto-biome.js';
 import { createAutoBaitController } from './auto-bait.js';
 import { createCaptchaController } from './captcha.js';
 import { CONFIG } from './config.js';
-import { createCooldownWatchdog, isCooldownButton } from './cooldown.js';
+import {
+    createCooldownWatchdog,
+    createFishingActivityWatchdog,
+    isCooldownButton,
+} from './cooldown.js';
 import {
     createEmptyEarningsStats,
     loadEarningsStats,
@@ -35,6 +39,7 @@ import {
     loadAutoBiomeSettings,
     loadCaptchaBypassEnabled,
     loadEnabled,
+    loadIdleReloadSettings,
     loadNotificationMode,
     loadPushKey,
     loadScheduleSettings,
@@ -42,11 +47,13 @@ import {
     normalizeAutoBaitMinimumQuantity,
     normalizeAutoBaitPurchaseQuantity,
     normalizeAutoBiomeWeight,
+    normalizeIdleReloadMinutes,
     normalizeScheduleMinutes,
     saveAutoBaitSettings,
     saveAutoBiomeSettings,
     saveCaptchaBypassEnabled,
     saveEnabled,
+    saveIdleReloadSettings,
     saveNotificationMode,
     savePushKey,
     saveScheduleSettings,
@@ -62,6 +69,7 @@ let notificationMode = loadNotificationMode();
 let scheduleSettings = loadScheduleSettings();
 let autoBiomeSettings = loadAutoBiomeSettings();
 let autoBaitSettings = loadAutoBaitSettings();
+let idleReloadSettings = loadIdleReloadSettings();
 let earningsStats = loadEarningsStats();
 let loopId = 0;
 let clickCount = 0;
@@ -75,6 +83,12 @@ let pendingCaptchaChallenge = null;
 const pendingCompetitionResponses = new Map();
 const pendingWeatherResponses = new Map();
 const gameState = createGameStateStore();
+const fishingActivityWatchdog = createFishingActivityWatchdog();
+const AUTO_BAIT_GRADE_FIELDS = new Set([
+    'guildCompetitionBaitGrade',
+    'personalCompetitionBaitGrade',
+    'regularBaitGrade',
+]);
 
 function handleWeatherResponse(response) {
     if (autoBiome) {
@@ -88,6 +102,7 @@ function handleWeatherResponse(response) {
 }
 
 function recordCastResult(result) {
+    fishingActivityWatchdog.markFishing();
     earningsStats = updateEarningsStats(
         earningsStats,
         result,
@@ -125,7 +140,9 @@ installFetchInterceptor({
     },
     onCompetitionResponse(response) {
         if (autoBiome) {
-            autoBiome.handleCompetitionResponse(response);
+            if (autoBiome.handleCompetitionResponse(response)) {
+                void autoBait?.handleStateChanged({ force: true });
+            }
         } else {
             pendingCompetitionResponses.set(response.pathname, response);
         }
@@ -168,6 +185,7 @@ function getPanelState() {
         clickCount,
         earningsStats,
         enabled,
+        idleReloadSettings,
         autoBaitSettings,
         autoBiomeSettings,
         notificationMode,
@@ -208,6 +226,28 @@ function handleAutomationStateChanged({ forceBait = false } = {}) {
             return autoBait?.handleStateChanged({ force });
         });
     }
+}
+
+function reloadIfFishingIdle() {
+    if (!enabled || schedule?.getSnapshot().schedulePhase === 'rest') {
+        return false;
+    }
+
+    const timeoutMilliseconds = idleReloadSettings.minutes * 60000;
+
+    if (!fishingActivityWatchdog.observe(timeoutMilliseconds)) {
+        return false;
+    }
+
+    panel.setStatus(
+        `连续 ${idleReloadSettings.minutes} 分钟未钓鱼，正在刷新页面`,
+    );
+    panel.setNextDelay('—');
+    console.warn(
+        `[自动抛竿] 连续 ${idleReloadSettings.minutes} 分钟未收到抛竿结果，正在刷新页面。`,
+    );
+    window.location.reload();
+    return true;
 }
 
 /**
@@ -471,6 +511,10 @@ async function waitForButton(currentLoopId) {
             return null;
         }
 
+        if (reloadIfFishingIdle()) {
+            return null;
+        }
+
         const button = findCastButton();
 
         if (button) {
@@ -513,6 +557,10 @@ async function waitWithCountdown(milliseconds, isLongDelay, currentLoopId) {
         }
 
         if (schedule.isWorkExpired()) {
+            return false;
+        }
+
+        if (reloadIfFishingIdle()) {
             return false;
         }
 
@@ -636,6 +684,7 @@ function setEnabled(nextEnabled) {
     enabled = Boolean(nextEnabled);
     saveEnabled(enabled);
     schedule.reset();
+    fishingActivityWatchdog.markFishing();
 
     if (!enabled) {
         captcha.cancel();
@@ -736,12 +785,13 @@ function setAutoBaitEnabled(nextEnabled) {
     updateAutoBaitSettings({ enabled: Boolean(nextEnabled) });
 }
 
-function setAutoBaitGrade(nextGrade) {
+function setAutoBaitGrade(field, nextGrade) {
+    if (!AUTO_BAIT_GRADE_FIELDS.has(field)) {
+        return;
+    }
+
     updateAutoBaitSettings({
-        baitGrade: normalizeAutoBaitGrade(
-            nextGrade,
-            autoBaitSettings.baitGrade,
-        ),
+        [field]: normalizeAutoBaitGrade(nextGrade, autoBaitSettings[field]),
     });
 }
 
@@ -763,6 +813,18 @@ function setAutoBaitPurchaseQuantity(nextQuantity) {
     });
 }
 
+function setIdleReloadMinutes(nextMinutes) {
+    idleReloadSettings = {
+        minutes: normalizeIdleReloadMinutes(
+            nextMinutes,
+            idleReloadSettings.minutes,
+        ),
+    };
+    saveIdleReloadSettings(idleReloadSettings);
+    fishingActivityWatchdog.markFishing();
+    panel.renderIdleReloadSettings();
+}
+
 function setScheduleEnabled(nextEnabled) {
     scheduleSettings = {
         ...scheduleSettings,
@@ -770,6 +832,7 @@ function setScheduleEnabled(nextEnabled) {
     };
     saveScheduleSettings(scheduleSettings);
     schedule.reset();
+    fishingActivityWatchdog.markFishing();
 
     if (enabled && scheduleSettings.enabled) {
         schedule.startWork();
@@ -785,6 +848,7 @@ function setScheduleMinutes(field, value) {
     };
     saveScheduleSettings(scheduleSettings);
     schedule.reset();
+    fishingActivityWatchdog.markFishing();
 
     if (enabled && scheduleSettings.enabled) {
         schedule.startWork();
@@ -835,6 +899,9 @@ function initialize() {
                 scheduleSettings,
             };
         },
+        onWorkStarted() {
+            fishingActivityWatchdog.markFishing();
+        },
         renderSettings() {
             panel?.renderScheduleSettings();
         },
@@ -862,6 +929,7 @@ function initialize() {
             setAutoBiomeWeight,
             setCaptchaBypassEnabled,
             setEnabled,
+            setIdleReloadMinutes,
             setNotificationMode,
             setPushKey,
             setScheduleEnabled,
@@ -917,7 +985,9 @@ function initialize() {
     pendingWeatherResponses.clear();
 
     for (const response of pendingCompetitionResponses.values()) {
-        autoBiome.handleCompetitionResponse(response);
+        if (autoBiome.handleCompetitionResponse(response)) {
+            void autoBait.handleStateChanged({ force: true });
+        }
     }
     pendingCompetitionResponses.clear();
 

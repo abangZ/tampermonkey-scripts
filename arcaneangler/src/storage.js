@@ -2,6 +2,7 @@ import {
     AUTO_BAIT_SETTINGS_STORAGE_KEY,
     AUTO_BIOME_SETTINGS_STORAGE_KEY,
     CAPTCHA_BYPASS_STORAGE_KEY,
+    IDLE_RELOAD_SETTINGS_STORAGE_KEY,
     NOTIFICATION_MODE_STORAGE_KEY,
     PANEL_COLLAPSED_STORAGE_KEY,
     PUSH_KEY_STORAGE_KEY,
@@ -157,10 +158,12 @@ export function normalizeAutoBaitPurchaseQuantity(value, fallback = 100) {
 
 export function loadAutoBaitSettings() {
     const defaults = {
-        baitGrade: 'low',
         enabled: false,
+        guildCompetitionBaitGrade: 'low',
         minimumQuantity: 100,
+        personalCompetitionBaitGrade: 'low',
         purchaseQuantity: 100,
+        regularBaitGrade: 'low',
     };
 
     try {
@@ -172,24 +175,84 @@ export function loadAutoBaitSettings() {
             return defaults;
         }
 
+        const legacyBaitGrade = normalizeAutoBaitGrade(
+            savedSettings.baitGrade,
+            defaults.regularBaitGrade,
+        );
+
         return {
-            baitGrade: normalizeAutoBaitGrade(
-                savedSettings.baitGrade,
-                defaults.baitGrade,
-            ),
             enabled: savedSettings.enabled === true,
+            guildCompetitionBaitGrade: normalizeAutoBaitGrade(
+                savedSettings.guildCompetitionBaitGrade,
+                legacyBaitGrade,
+            ),
             minimumQuantity: normalizeAutoBaitMinimumQuantity(
                 savedSettings.minimumQuantity,
                 defaults.minimumQuantity,
+            ),
+            personalCompetitionBaitGrade: normalizeAutoBaitGrade(
+                savedSettings.personalCompetitionBaitGrade,
+                legacyBaitGrade,
             ),
             purchaseQuantity: normalizeAutoBaitPurchaseQuantity(
                 savedSettings.purchaseQuantity,
                 defaults.purchaseQuantity,
             ),
+            regularBaitGrade: normalizeAutoBaitGrade(
+                savedSettings.regularBaitGrade,
+                legacyBaitGrade,
+            ),
         };
     } catch (error) {
         console.warn('[自动买鱼饵] 无法读取设置：', error);
         return defaults;
+    }
+}
+
+export function normalizeIdleReloadMinutes(value, fallback = 5) {
+    const minutes = Number(value);
+
+    if (!Number.isFinite(minutes) || minutes < 1) {
+        return fallback;
+    }
+
+    return Math.min(1440, Math.round(minutes));
+}
+
+export function loadIdleReloadSettings() {
+    const defaults = {
+        minutes: 5,
+    };
+
+    try {
+        const savedSettings = JSON.parse(
+            localStorage.getItem(IDLE_RELOAD_SETTINGS_STORAGE_KEY),
+        );
+
+        if (!savedSettings || typeof savedSettings !== 'object') {
+            return defaults;
+        }
+
+        return {
+            minutes: normalizeIdleReloadMinutes(
+                savedSettings.minutes,
+                defaults.minutes,
+            ),
+        };
+    } catch (error) {
+        console.warn('[自动抛竿] 无法读取无钓鱼刷新设置：', error);
+        return defaults;
+    }
+}
+
+export function saveIdleReloadSettings(idleReloadSettings) {
+    try {
+        localStorage.setItem(
+            IDLE_RELOAD_SETTINGS_STORAGE_KEY,
+            JSON.stringify(idleReloadSettings),
+        );
+    } catch (error) {
+        console.warn('[自动抛竿] 无法保存无钓鱼刷新设置：', error);
     }
 }
 

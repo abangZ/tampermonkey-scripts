@@ -16,6 +16,7 @@ export function formatScheduleDuration(milliseconds) {
 export function createScheduleController({
     getCaptcha,
     getState,
+    onWorkStarted,
     renderSettings,
     renderStatus,
     setNextDelay,
@@ -53,6 +54,10 @@ export function createScheduleController({
         duration = getRandomizedDuration(baseMinutes);
         endsAt = Date.now() + duration;
         renderSettings();
+
+        if (nextPhase === 'work') {
+            onWorkStarted?.();
+        }
 
         console.info(
             `[自动抛竿] 本轮${nextPhase === 'rest' ? '休息' : '运行'}时长：` +

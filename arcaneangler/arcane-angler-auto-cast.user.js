@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.4.0
+// @version      2.5.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -423,6 +423,11 @@
 		high: "高级饵（+500 幸运）",
 		super: "超级饵（+1000 幸运）"
 	};
+	var AUTO_BAIT_CONTEXT_LABELS = {
+		guild: "公会赛",
+		personal: "个人赛",
+		regular: "常规"
+	};
 	function normalizeBiomeId$1(value) {
 		const biomeId = Number(value);
 		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
@@ -435,6 +440,19 @@
 		if (baitGrade === "default") return DEFAULT_BAIT_ID;
 		const normalizedBiomeId = normalizeBiomeId$1(biomeId);
 		return normalizedBiomeId ? `bait_${normalizedBiomeId}_${baitGrade}` : null;
+	}
+	function getAutoBaitContext(biomeId, competitionBiomes) {
+		const normalizedBiomeId = normalizeBiomeId$1(biomeId);
+		if (normalizedBiomeId && normalizedBiomeId === normalizeBiomeId$1(competitionBiomes?.guildTournamentBiomeId)) return "guild";
+		if (normalizedBiomeId && normalizedBiomeId === normalizeBiomeId$1(competitionBiomes?.personalDerbyBiomeId)) return "personal";
+		return "regular";
+	}
+	function getBaitGradeForBiome(biomeId, autoBaitSettings, competitionBiomes) {
+		const regularBaitGrade = autoBaitSettings?.regularBaitGrade ?? autoBaitSettings?.baitGrade ?? "low";
+		const context = getAutoBaitContext(biomeId, competitionBiomes);
+		if (context === "guild") return autoBaitSettings?.guildCompetitionBaitGrade ?? regularBaitGrade;
+		if (context === "personal") return autoBaitSettings?.personalCompetitionBaitGrade ?? regularBaitGrade;
+		return regularBaitGrade;
 	}
 	function shouldPurchaseBait(quantity, minimumQuantity, baitGrade) {
 		return baitGrade !== "default" && normalizeQuantity$1(quantity) < normalizeQuantity$1(minimumQuantity);
@@ -489,7 +507,7 @@
 			if (result?.success !== true) throw new Error(result?.message ?? `无法装备${baitLabel}`);
 		}
 		async function evaluate({ biomeId: requestedBiomeId = null, force = false }) {
-			const { autoBaitSettings, enabled } = getState();
+			const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = getState();
 			if (!autoBaitSettings.enabled) {
 				updateSnapshot({
 					baitId: null,
@@ -506,10 +524,8 @@
 				});
 				return;
 			}
-			const requestedBaitId = getBaitIdForBiome(requestedBiomeId, autoBaitSettings.baitGrade);
-			if (!force && requestedBaitId && requestedBaitId === retryBaitId && Date.now() < retryAfter) return;
 			const api = window.ApiService;
-			if (typeof api?.equipBait !== "function" || autoBaitSettings.baitGrade !== "default" && typeof api?.buyBait !== "function") {
+			if (typeof api?.equipBait !== "function") {
 				updateSnapshot({ nextStatus: "等待游戏鱼饵接口" });
 				return;
 			}
@@ -520,26 +536,36 @@
 			}
 			checking = true;
 			updateSnapshot({ nextStatus: "正在检查鱼饵库存" });
+			let attemptedBaitId = null;
 			try {
 				const biomeId = normalizeBiomeId$1(requestedBiomeId) ?? normalizeBiomeId$1(player?.currentBiome);
-				const baitId = getBaitIdForBiome(biomeId, autoBaitSettings.baitGrade);
+				const baitContext = getAutoBaitContext(biomeId, autoBiomeCompetitionBiomes);
+				const baitGrade = getBaitGradeForBiome(biomeId, autoBaitSettings, autoBiomeCompetitionBiomes);
+				const baitId = getBaitIdForBiome(biomeId, baitGrade);
+				attemptedBaitId = baitId;
 				if (!baitId) throw new Error("无法识别当前地图");
-				const baitLabel = getBaitLabel(baitId, autoBaitSettings.baitGrade, biomeId);
+				if (!force && baitId === retryBaitId && Date.now() < retryAfter) return;
+				if (baitGrade !== "default" && typeof api?.buyBait !== "function") {
+					updateSnapshot({ nextStatus: "等待游戏鱼饵购买接口" });
+					return;
+				}
+				const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
+				const contextLabel = AUTO_BAIT_CONTEXT_LABELS[baitContext];
 				lastCheckedAt = Date.now();
-				if (autoBaitSettings.baitGrade === "default") {
+				if (baitGrade === "default") {
 					await equipBait(api, player, baitId, baitLabel);
 					retryAfter = 0;
 					retryBaitId = null;
 					updateSnapshot({
 						baitId,
 						quantity: null,
-						nextStatus: `${baitLabel} · 无限`
+						nextStatus: `${contextLabel} · ${baitLabel} · 无限`
 					});
 					return;
 				}
 				let quantity = normalizeQuantity$1(player?.baitInventory?.[baitId]);
 				let purchased = false;
-				if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, autoBaitSettings.baitGrade)) {
+				if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) {
 					const bait = getBaitById$1(baitId);
 					const totalCost = Number(bait?.price) * autoBaitSettings.purchaseQuantity;
 					if (Number.isFinite(totalCost) && totalCost > Number(player?.gold ?? 0)) {
@@ -549,7 +575,7 @@
 						updateSnapshot({
 							baitId,
 							quantity,
-							nextStatus: `${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币`
+							nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币`
 						});
 						return;
 					}
@@ -570,11 +596,11 @@
 				updateSnapshot({
 					baitId,
 					quantity,
-					nextStatus: purchased ? `已购买 ${baitLabel}，当前 ${quantity.toLocaleString()} 个` : `${baitLabel} · ${quantity.toLocaleString()} 个`
+					nextStatus: purchased ? `已购买${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个` : `${contextLabel} · ${baitLabel} · ${quantity.toLocaleString()} 个`
 				});
 			} catch (error) {
 				console.error("[自动买鱼饵] 检查或购买失败：", error);
-				retryBaitId = requestedBaitId ?? currentBaitId;
+				retryBaitId = attemptedBaitId ?? currentBaitId;
 				retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
 				updateSnapshot({ nextStatus: `鱼饵处理失败：${getErrorMessage(error)}` });
 			} finally {
@@ -586,21 +612,24 @@
 			return checkQueue;
 		}
 		function handleCastResult(result) {
-			const { autoBaitSettings, enabled } = getState();
+			const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = getState();
 			if (!autoBaitSettings.enabled || !enabled) return;
 			const biomeId = normalizeBiomeId$1(result?.currentBiome);
-			const baitId = getBaitIdForBiome(biomeId, autoBaitSettings.baitGrade);
+			const baitContext = getAutoBaitContext(biomeId, autoBiomeCompetitionBiomes);
+			const baitGrade = getBaitGradeForBiome(biomeId, autoBaitSettings, autoBiomeCompetitionBiomes);
+			const baitId = getBaitIdForBiome(biomeId, baitGrade);
 			if (!baitId) return;
 			if (result?.equippedBait !== baitId) {
 				checkNow({ biomeId });
 				return;
 			}
 			lastCheckedAt = Date.now();
-			if (autoBaitSettings.baitGrade === "default") {
+			const contextLabel = AUTO_BAIT_CONTEXT_LABELS[baitContext];
+			if (baitGrade === "default") {
 				updateSnapshot({
 					baitId,
 					quantity: null,
-					nextStatus: `${BAIT_GRADE_LABELS.default} · 无限`
+					nextStatus: `${contextLabel} · ${BAIT_GRADE_LABELS.default} · 无限`
 				});
 				return;
 			}
@@ -608,9 +637,9 @@
 			updateSnapshot({
 				baitId,
 				quantity,
-				nextStatus: `${getBaitLabel(baitId, autoBaitSettings.baitGrade, biomeId)} · ${quantity.toLocaleString()} 个`
+				nextStatus: `${contextLabel} · ${getBaitLabel(baitId, baitGrade, biomeId)} · ${quantity.toLocaleString()} 个`
 			});
-			if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, autoBaitSettings.baitGrade)) checkNow({ biomeId });
+			if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) checkNow({ biomeId });
 		}
 		return {
 			checkNow,
@@ -652,6 +681,7 @@
 	var SCHEDULE_SETTINGS_STORAGE_KEY = "arcane-angler-schedule-settings-v1";
 	var AUTO_BIOME_SETTINGS_STORAGE_KEY = "arcane-angler-auto-biome-settings-v1";
 	var AUTO_BAIT_SETTINGS_STORAGE_KEY = "arcane-angler-auto-bait-settings-v1";
+	var IDLE_RELOAD_SETTINGS_STORAGE_KEY = "arcane-angler-idle-reload-settings-v1";
 	var PANEL_COLLAPSED_STORAGE_KEY = "arcane-angler-panel-collapsed-v1";
 	var EARNINGS_STORAGE_KEY = "arcane-angler-earnings-v1";
 	var PANEL_ID = "arcane-angler-auto-cast-panel-host";
@@ -922,6 +952,21 @@
 			timedOut = true;
 			return true;
 		} };
+	}
+	function createFishingActivityWatchdog(now = Date.now()) {
+		let lastFishingAt = now;
+		let timedOut = false;
+		return {
+			markFishing(nextNow = Date.now()) {
+				lastFishingAt = nextNow;
+				timedOut = false;
+			},
+			observe(timeoutMilliseconds, nextNow = Date.now()) {
+				if (timedOut || nextNow - lastFishingAt < timeoutMilliseconds) return false;
+				timedOut = true;
+				return true;
+			}
+		};
 	}
 	function createEmptyEarningsCounters() {
 		return {
@@ -1564,7 +1609,7 @@
 		if (minutes === 0) return `${seconds} 秒`;
 		return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
 	}
-	function createScheduleController({ getCaptcha, getState, renderSettings, renderStatus, setNextDelay, setStatus }) {
+	function createScheduleController({ getCaptcha, getState, onWorkStarted, renderSettings, renderStatus, setNextDelay, setStatus }) {
 		let phase = "work";
 		let endsAt = 0;
 		let duration = 0;
@@ -1585,6 +1630,7 @@
 			duration = getRandomizedDuration(baseMinutes);
 			endsAt = Date.now() + duration;
 			renderSettings();
+			if (nextPhase === "work") onWorkStarted?.();
 			console.info(`[自动抛竿] 本轮${nextPhase === "rest" ? "休息" : "运行"}时长：` + formatScheduleDuration(duration));
 		}
 		function isWorkExpired() {
@@ -1754,23 +1800,51 @@
 	}
 	function loadAutoBaitSettings() {
 		const defaults = {
-			baitGrade: "low",
 			enabled: false,
+			guildCompetitionBaitGrade: "low",
 			minimumQuantity: 100,
-			purchaseQuantity: 100
+			personalCompetitionBaitGrade: "low",
+			purchaseQuantity: 100,
+			regularBaitGrade: "low"
 		};
 		try {
 			const savedSettings = JSON.parse(localStorage.getItem(AUTO_BAIT_SETTINGS_STORAGE_KEY));
 			if (!savedSettings || typeof savedSettings !== "object") return defaults;
+			const legacyBaitGrade = normalizeAutoBaitGrade(savedSettings.baitGrade, defaults.regularBaitGrade);
 			return {
-				baitGrade: normalizeAutoBaitGrade(savedSettings.baitGrade, defaults.baitGrade),
 				enabled: savedSettings.enabled === true,
+				guildCompetitionBaitGrade: normalizeAutoBaitGrade(savedSettings.guildCompetitionBaitGrade, legacyBaitGrade),
 				minimumQuantity: normalizeAutoBaitMinimumQuantity(savedSettings.minimumQuantity, defaults.minimumQuantity),
-				purchaseQuantity: normalizeAutoBaitPurchaseQuantity(savedSettings.purchaseQuantity, defaults.purchaseQuantity)
+				personalCompetitionBaitGrade: normalizeAutoBaitGrade(savedSettings.personalCompetitionBaitGrade, legacyBaitGrade),
+				purchaseQuantity: normalizeAutoBaitPurchaseQuantity(savedSettings.purchaseQuantity, defaults.purchaseQuantity),
+				regularBaitGrade: normalizeAutoBaitGrade(savedSettings.regularBaitGrade, legacyBaitGrade)
 			};
 		} catch (error) {
 			console.warn("[自动买鱼饵] 无法读取设置：", error);
 			return defaults;
+		}
+	}
+	function normalizeIdleReloadMinutes(value, fallback = 5) {
+		const minutes = Number(value);
+		if (!Number.isFinite(minutes) || minutes < 1) return fallback;
+		return Math.min(1440, Math.round(minutes));
+	}
+	function loadIdleReloadSettings() {
+		const defaults = { minutes: 5 };
+		try {
+			const savedSettings = JSON.parse(localStorage.getItem(IDLE_RELOAD_SETTINGS_STORAGE_KEY));
+			if (!savedSettings || typeof savedSettings !== "object") return defaults;
+			return { minutes: normalizeIdleReloadMinutes(savedSettings.minutes, defaults.minutes) };
+		} catch (error) {
+			console.warn("[自动抛竿] 无法读取无钓鱼刷新设置：", error);
+			return defaults;
+		}
+	}
+	function saveIdleReloadSettings(idleReloadSettings) {
+		try {
+			localStorage.setItem(IDLE_RELOAD_SETTINGS_STORAGE_KEY, JSON.stringify(idleReloadSettings));
+		} catch (error) {
+			console.warn("[自动抛竿] 无法保存无钓鱼刷新设置：", error);
 		}
 	}
 	function saveAutoBaitSettings(autoBaitSettings) {
@@ -1827,14 +1901,14 @@
 			console.warn("[自动抛竿] 无法保存面板折叠状态：", error);
 		}
 	}
-	var panel_default = "* {\n    box-sizing: border-box;\n}\n\n.panel {\n    width: 280px;\n    max-width: calc(100vw - 32px);\n    padding: 14px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 12px;\n    background: rgba(18, 18, 24, 0.94);\n    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);\n    color: #ffffff;\n    backdrop-filter: blur(12px);\n}\n\n.panel[data-collapsed='true'] {\n    width: auto;\n    padding: 7px;\n}\n\n.panel[data-collapsed='true'] .panel-content,\n.panel[data-collapsed='true'] .title-text {\n    display: none;\n}\n\n.header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n}\n\n.title {\n    display: flex;\n    align-items: center;\n    gap: 5px;\n    font-size: 15px;\n    font-weight: 700;\n}\n\n.collapse-toggle {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    width: 26px;\n    height: 26px;\n    flex-shrink: 0;\n    padding: 0;\n    border: 1px solid rgba(255, 255, 255, 0.16);\n    border-radius: 7px;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 16px;\n    line-height: 1;\n    cursor: pointer;\n}\n\n.collapse-toggle:hover {\n    background: rgba(255, 255, 255, 0.14);\n}\n\n.panel-content {\n    max-height: calc(100vh - 96px);\n    overflow-y: auto;\n    overscroll-behavior: contain;\n    margin-top: 10px;\n    padding-right: 2px;\n}\n\n.tabs {\n    display: grid;\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n    gap: 4px;\n    margin-bottom: 10px;\n    padding: 3px;\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.07);\n}\n\n.panel-tab {\n    padding: 6px 8px;\n    border: 0;\n    border-radius: 6px;\n    background: transparent;\n    color: rgba(255, 255, 255, 0.56);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.panel-tab[data-active='true'] {\n    background: #6d5dfc;\n    color: #ffffff;\n}\n\n.panel-view[hidden] {\n    display: none;\n}\n\n.row {\n    display: flex;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 7px;\n    font-size: 12px;\n    line-height: 1.4;\n}\n\n.label {\n    flex-shrink: 0;\n    color: rgba(255, 255, 255, 0.58);\n}\n\n.value {\n    min-width: 0;\n    overflow-wrap: anywhere;\n    text-align: right;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.field {\n    display: block;\n    margin-top: 12px;\n}\n\n.field-label {\n    display: block;\n    margin-bottom: 5px;\n    color: rgba(255, 255, 255, 0.58);\n    font-size: 12px;\n}\n\n.input {\n    width: 100%;\n    padding: 8px 9px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 7px;\n    outline: none;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.92);\n    font-size: 12px;\n}\n\n.input:focus {\n    border-color: #6d5dfc;\n}\n\n.input::placeholder {\n    color: rgba(255, 255, 255, 0.32);\n}\n\n.field-help {\n    margin-top: 6px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 11px;\n    line-height: 1.45;\n}\n\n.field-help[hidden] {\n    display: none;\n}\n\n.field-help a {\n    color: #9ea5ff;\n    text-decoration: underline;\n}\n\n.settings-section + .settings-section {\n    margin-top: 14px;\n    padding-top: 14px;\n    border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.settings-title {\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    font-weight: 700;\n}\n\n.choice-list {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n    margin-top: 8px;\n}\n\n.choice-list-three {\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n}\n\n.choice-option {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    padding: 7px 8px;\n    border: 1px solid rgba(255, 255, 255, 0.12);\n    border-radius: 7px;\n    color: rgba(255, 255, 255, 0.78);\n    font-size: 11px;\n    cursor: pointer;\n}\n\n.choice-option:has(input:checked) {\n    border-color: rgba(109, 93, 252, 0.72);\n    background: rgba(109, 93, 252, 0.14);\n    color: #ffffff;\n}\n\n.choice-option input {\n    margin: 0;\n    accent-color: #6d5dfc;\n}\n\n.settings-group[hidden] {\n    display: none;\n}\n\n.number-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n\n.secondary-button {\n    width: 100%;\n    margin-top: 9px;\n    padding: 7px 10px;\n    border: 1px solid rgba(109, 93, 252, 0.55);\n    border-radius: 7px;\n    background: rgba(109, 93, 252, 0.12);\n    color: #b9b5ff;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.secondary-button:hover {\n    background: rgba(109, 93, 252, 0.22);\n}\n\n.secondary-button:disabled {\n    cursor: default;\n    opacity: 0.48;\n}\n\n.toggle {\n    width: 100%;\n    margin-top: 12px;\n    padding: 9px 12px;\n    border: 0;\n    border-radius: 8px;\n    background: #6d5dfc;\n    color: #ffffff;\n    font-size: 13px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.toggle:hover {\n    filter: brightness(1.08);\n}\n\n.toggle[data-enabled='true'] {\n    background: #d34848;\n}\n\n.option-row {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 10px;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    cursor: pointer;\n}\n\n.switch {\n    position: relative;\n    width: 38px;\n    height: 22px;\n    flex-shrink: 0;\n}\n\n.switch input {\n    position: absolute;\n    width: 1px;\n    height: 1px;\n    opacity: 0;\n}\n\n.switch-track {\n    display: block;\n    width: 100%;\n    height: 100%;\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.2);\n    transition: background 0.15s ease;\n}\n\n.switch-track::after {\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #ffffff;\n    content: '';\n    transition: transform 0.15s ease;\n}\n\n.switch input:checked + .switch-track {\n    background: #6d5dfc;\n}\n\n.switch input:checked + .switch-track::after {\n    transform: translateX(16px);\n}\n\n.switch input:focus-visible + .switch-track {\n    outline: 2px solid #9ea5ff;\n    outline-offset: 2px;\n}\n\n.hint {\n    margin-top: 9px;\n    text-align: center;\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 11px;\n}\n\n.stats-filters {\n    display: grid;\n    gap: 6px;\n    margin-bottom: 8px;\n}\n\n.stats-filter span {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stats-select {\n    width: 100%;\n    padding: 6px 7px;\n    border: 1px solid rgba(255, 255, 255, 0.14);\n    border-radius: 6px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.9);\n    font-size: 10px;\n}\n\n.stats-select:focus {\n    border-color: #6d5dfc;\n}\n\n.stats-scope {\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.72);\n    font-size: 10px;\n    font-weight: 700;\n    text-align: center;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stats-start {\n    margin: 3px 0 9px;\n    color: rgba(255, 255, 255, 0.48);\n    font-size: 10px;\n    text-align: center;\n}\n\n.stats-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n\n.stat-card {\n    min-width: 0;\n    padding: 8px;\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.055);\n}\n\n.stat-card-label {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stat-card-value {\n    display: block;\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.94);\n    font-size: 13px;\n    line-height: 1.25;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-card-value[data-tone='income'],\n.stat-card-value[data-tone='positive'] {\n    color: #4ade80;\n}\n\n.stat-card-value[data-tone='gold'] {\n    color: #fbbf24;\n}\n\n.stat-card-value[data-tone='cost'],\n.stat-card-value[data-tone='negative'] {\n    color: #f87171;\n}\n\n.stats-section-title {\n    margin: 12px 0 6px;\n    color: rgba(255, 255, 255, 0.62);\n    font-size: 11px;\n    font-weight: 700;\n}\n\n.stats-list {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n\n.stat-chip {\n    max-width: 100%;\n    overflow: hidden;\n    padding: 4px 6px;\n    border-radius: 6px;\n    background: rgba(109, 93, 252, 0.16);\n    color: #d8d8df;\n    font-size: 10px;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-chip[data-tone='uncommon'] {\n    background: rgba(132, 204, 22, 0.14);\n    color: #84cc16;\n}\n\n.stat-chip[data-tone='common'] {\n    background: rgba(156, 163, 175, 0.14);\n    color: #9ca3af;\n}\n\n.stat-chip[data-tone='fine'] {\n    background: rgba(59, 130, 246, 0.14);\n    color: #3b82f6;\n}\n\n.stat-chip[data-tone='rare'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='epic'] {\n    background: rgba(236, 72, 153, 0.14);\n    color: #ec4899;\n}\n\n.stat-chip[data-tone='legendary'] {\n    background: rgba(245, 158, 11, 0.14);\n    color: #f59e0b;\n}\n\n.stat-chip[data-tone='mythic'] {\n    background: rgba(239, 68, 68, 0.14);\n    color: #ef4444;\n}\n\n.stat-chip[data-tone='exotic'] {\n    background: rgba(6, 182, 212, 0.14);\n    color: #06b6d4;\n}\n\n.stat-chip[data-tone='arcane'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='relic'],\n.stat-chip[data-tone='treasure'] {\n    background: rgba(242, 204, 96, 0.14);\n    color: #f2cc60;\n}\n\n.stat-chip[data-tone='gear'] {\n    background: rgba(86, 212, 221, 0.14);\n    color: #7ce7ee;\n}\n\n.empty-stat {\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 10px;\n    line-height: 1.45;\n}\n\n.stats-cost-note {\n    margin-top: 7px;\n    color: #fbbf24;\n    font-size: 10px;\n    line-height: 1.4;\n}\n\n.stats-cost-note[hidden] {\n    display: none;\n}\n\n.reset-stats {\n    width: 100%;\n    margin-top: 12px;\n    padding: 7px 10px;\n    border: 1px solid rgba(211, 72, 72, 0.52);\n    border-radius: 7px;\n    background: rgba(211, 72, 72, 0.12);\n    color: #ff9d9d;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.reset-stats:hover {\n    background: rgba(211, 72, 72, 0.22);\n}\n";
+	var panel_default = "* {\n    box-sizing: border-box;\n}\n\n.panel {\n    width: 280px;\n    max-width: calc(100vw - 32px);\n    padding: 14px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 12px;\n    background: rgba(18, 18, 24, 0.94);\n    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);\n    color: #ffffff;\n    backdrop-filter: blur(12px);\n}\n\n.panel[data-collapsed='true'] {\n    width: auto;\n    padding: 7px;\n}\n\n.panel[data-collapsed='true'] .panel-content,\n.panel[data-collapsed='true'] .title-text {\n    display: none;\n}\n\n.header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n}\n\n.title {\n    display: flex;\n    align-items: center;\n    gap: 5px;\n    font-size: 15px;\n    font-weight: 700;\n}\n\n.collapse-toggle {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    width: 26px;\n    height: 26px;\n    flex-shrink: 0;\n    padding: 0;\n    border: 1px solid rgba(255, 255, 255, 0.16);\n    border-radius: 7px;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 16px;\n    line-height: 1;\n    cursor: pointer;\n}\n\n.collapse-toggle:hover {\n    background: rgba(255, 255, 255, 0.14);\n}\n\n.panel-content {\n    max-height: calc(100vh - 96px);\n    overflow-y: auto;\n    overscroll-behavior: contain;\n    margin-top: 10px;\n    padding-right: 2px;\n}\n\n.tabs {\n    display: grid;\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n    gap: 4px;\n    margin-bottom: 10px;\n    padding: 3px;\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.07);\n}\n\n.panel-tab {\n    padding: 6px 8px;\n    border: 0;\n    border-radius: 6px;\n    background: transparent;\n    color: rgba(255, 255, 255, 0.56);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.panel-tab[data-active='true'] {\n    background: #6d5dfc;\n    color: #ffffff;\n}\n\n.panel-view[hidden] {\n    display: none;\n}\n\n.row {\n    display: flex;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 7px;\n    font-size: 12px;\n    line-height: 1.4;\n}\n\n.label {\n    flex-shrink: 0;\n    color: rgba(255, 255, 255, 0.58);\n}\n\n.value {\n    min-width: 0;\n    overflow-wrap: anywhere;\n    text-align: right;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.field {\n    display: block;\n    margin-top: 12px;\n}\n\n.field-label {\n    display: block;\n    margin-bottom: 5px;\n    color: rgba(255, 255, 255, 0.58);\n    font-size: 12px;\n}\n\n.input {\n    width: 100%;\n    padding: 8px 9px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 7px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.92);\n    color-scheme: dark;\n    font-size: 12px;\n}\n\n.input option {\n    background: #252530;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.input:focus {\n    border-color: #6d5dfc;\n}\n\n.input::placeholder {\n    color: rgba(255, 255, 255, 0.32);\n}\n\n.field-help {\n    margin-top: 6px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 11px;\n    line-height: 1.45;\n}\n\n.field-help[hidden] {\n    display: none;\n}\n\n.field-help a {\n    color: #9ea5ff;\n    text-decoration: underline;\n}\n\n.settings-section + .settings-section {\n    margin-top: 14px;\n    padding-top: 14px;\n    border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.settings-title {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 8px;\n    list-style: none;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.settings-title::-webkit-details-marker {\n    display: none;\n}\n\n.settings-title::after {\n    content: '›';\n    color: rgba(255, 255, 255, 0.45);\n    font-size: 18px;\n    line-height: 1;\n    transform: rotate(0deg);\n    transition: transform 160ms ease;\n}\n\n.settings-section[open] > .settings-title::after {\n    transform: rotate(90deg);\n}\n\n.choice-list {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n    margin-top: 8px;\n}\n\n.choice-list-three {\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n}\n\n.choice-option {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    padding: 7px 8px;\n    border: 1px solid rgba(255, 255, 255, 0.12);\n    border-radius: 7px;\n    color: rgba(255, 255, 255, 0.78);\n    font-size: 11px;\n    cursor: pointer;\n}\n\n.choice-option:has(input:checked) {\n    border-color: rgba(109, 93, 252, 0.72);\n    background: rgba(109, 93, 252, 0.14);\n    color: #ffffff;\n}\n\n.choice-option input {\n    margin: 0;\n    accent-color: #6d5dfc;\n}\n\n.settings-group[hidden] {\n    display: none;\n}\n\n.number-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n\n.secondary-button {\n    width: 100%;\n    margin-top: 9px;\n    padding: 7px 10px;\n    border: 1px solid rgba(109, 93, 252, 0.55);\n    border-radius: 7px;\n    background: rgba(109, 93, 252, 0.12);\n    color: #b9b5ff;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.secondary-button:hover {\n    background: rgba(109, 93, 252, 0.22);\n}\n\n.secondary-button:disabled {\n    cursor: default;\n    opacity: 0.48;\n}\n\n.toggle {\n    width: 100%;\n    margin-top: 12px;\n    padding: 9px 12px;\n    border: 0;\n    border-radius: 8px;\n    background: #6d5dfc;\n    color: #ffffff;\n    font-size: 13px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.toggle:hover {\n    filter: brightness(1.08);\n}\n\n.toggle[data-enabled='true'] {\n    background: #d34848;\n}\n\n.option-row {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 10px;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    cursor: pointer;\n}\n\n.switch {\n    position: relative;\n    width: 38px;\n    height: 22px;\n    flex-shrink: 0;\n}\n\n.switch input {\n    position: absolute;\n    width: 1px;\n    height: 1px;\n    opacity: 0;\n}\n\n.switch-track {\n    display: block;\n    width: 100%;\n    height: 100%;\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.2);\n    transition: background 0.15s ease;\n}\n\n.switch-track::after {\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #ffffff;\n    content: '';\n    transition: transform 0.15s ease;\n}\n\n.switch input:checked + .switch-track {\n    background: #6d5dfc;\n}\n\n.switch input:checked + .switch-track::after {\n    transform: translateX(16px);\n}\n\n.switch input:focus-visible + .switch-track {\n    outline: 2px solid #9ea5ff;\n    outline-offset: 2px;\n}\n\n.hint {\n    margin-top: 9px;\n    text-align: center;\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 11px;\n}\n\n.stats-filters {\n    display: grid;\n    gap: 6px;\n    margin-bottom: 8px;\n}\n\n.stats-filter span {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stats-select {\n    width: 100%;\n    padding: 6px 7px;\n    border: 1px solid rgba(255, 255, 255, 0.14);\n    border-radius: 6px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.9);\n    font-size: 10px;\n}\n\n.stats-select:focus {\n    border-color: #6d5dfc;\n}\n\n.stats-scope {\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.72);\n    font-size: 10px;\n    font-weight: 700;\n    text-align: center;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stats-start {\n    margin: 3px 0 9px;\n    color: rgba(255, 255, 255, 0.48);\n    font-size: 10px;\n    text-align: center;\n}\n\n.stats-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n\n.stat-card {\n    min-width: 0;\n    padding: 8px;\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.055);\n}\n\n.stat-card-label {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stat-card-value {\n    display: block;\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.94);\n    font-size: 13px;\n    line-height: 1.25;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-card-value[data-tone='income'],\n.stat-card-value[data-tone='positive'] {\n    color: #4ade80;\n}\n\n.stat-card-value[data-tone='gold'] {\n    color: #fbbf24;\n}\n\n.stat-card-value[data-tone='cost'],\n.stat-card-value[data-tone='negative'] {\n    color: #f87171;\n}\n\n.stats-section-title {\n    margin: 12px 0 6px;\n    color: rgba(255, 255, 255, 0.62);\n    font-size: 11px;\n    font-weight: 700;\n}\n\n.stats-list {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n\n.stat-chip {\n    max-width: 100%;\n    overflow: hidden;\n    padding: 4px 6px;\n    border-radius: 6px;\n    background: rgba(109, 93, 252, 0.16);\n    color: #d8d8df;\n    font-size: 10px;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-chip[data-tone='uncommon'] {\n    background: rgba(132, 204, 22, 0.14);\n    color: #84cc16;\n}\n\n.stat-chip[data-tone='common'] {\n    background: rgba(156, 163, 175, 0.14);\n    color: #9ca3af;\n}\n\n.stat-chip[data-tone='fine'] {\n    background: rgba(59, 130, 246, 0.14);\n    color: #3b82f6;\n}\n\n.stat-chip[data-tone='rare'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='epic'] {\n    background: rgba(236, 72, 153, 0.14);\n    color: #ec4899;\n}\n\n.stat-chip[data-tone='legendary'] {\n    background: rgba(245, 158, 11, 0.14);\n    color: #f59e0b;\n}\n\n.stat-chip[data-tone='mythic'] {\n    background: rgba(239, 68, 68, 0.14);\n    color: #ef4444;\n}\n\n.stat-chip[data-tone='exotic'] {\n    background: rgba(6, 182, 212, 0.14);\n    color: #06b6d4;\n}\n\n.stat-chip[data-tone='arcane'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='relic'],\n.stat-chip[data-tone='treasure'] {\n    background: rgba(242, 204, 96, 0.14);\n    color: #f2cc60;\n}\n\n.stat-chip[data-tone='gear'] {\n    background: rgba(86, 212, 221, 0.14);\n    color: #7ce7ee;\n}\n\n.empty-stat {\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 10px;\n    line-height: 1.45;\n}\n\n.stats-cost-note {\n    margin-top: 7px;\n    color: #fbbf24;\n    font-size: 10px;\n    line-height: 1.4;\n}\n\n.stats-cost-note[hidden] {\n    display: none;\n}\n\n.reset-stats {\n    width: 100%;\n    margin-top: 12px;\n    padding: 7px 10px;\n    border: 1px solid rgba(211, 72, 72, 0.52);\n    border-radius: 7px;\n    background: rgba(211, 72, 72, 0.12);\n    color: #ff9d9d;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.reset-stats:hover {\n    background: rgba(211, 72, 72, 0.22);\n}\n";
 	function createPanelController({ actions, formatScheduleDuration, getState }) {
 		let panelCollapsed = loadPanelCollapsed();
 		let panelView = "control";
 		let earningsBiomeFilter = "current";
 		let earningsBaitFilter = "current";
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitMinimumQuantity, setAutoBaitPurchaseQuantity, setAutoBiomeEnabled, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitMinimumQuantity, setAutoBaitPurchaseQuantity, setAutoBiomeEnabled, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
@@ -1854,6 +1928,13 @@
 				"font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", sans-serif"
 			].join(";");
 			const shadowRoot = host.attachShadow({ mode: "open" });
+			const baitGradeOptions = `
+              <option value="default">默认饵（无限，不购买）</option>
+              <option value="low">低级饵</option>
+              <option value="medium">中级饵（+250 幸运）</option>
+              <option value="high">高级饵（+500 幸运）</option>
+              <option value="super">超级饵（+1000 幸运）</option>
+        `;
 			shadowRoot.innerHTML = `
   <style>${panel_default}</style>
 
@@ -2086,8 +2167,8 @@
         aria-labelledby="settings-tab"
         hidden
       >
-        <section class="settings-section">
-          <div class="settings-title">自动换地图</div>
+        <details class="settings-section">
+          <summary class="settings-title">自动换地图</summary>
 
           <label class="option-row">
             <span>优先比赛地图</span>
@@ -2150,19 +2231,29 @@
             <span class="label">天气更新</span>
             <span id="auto-biome-updated-at" class="value">等待接口数据</span>
           </div>
-        </section>
+        </details>
 
-        <section class="settings-section">
-          <div class="settings-title">自动买鱼饵</div>
+        <details class="settings-section">
+          <summary class="settings-title">自动买鱼饵</summary>
 
           <label class="field">
-            <span class="field-label">使用鱼饵等级</span>
-            <select id="auto-bait-grade" class="input">
-              <option value="default">默认饵（无限，不购买）</option>
-              <option value="low">低级饵</option>
-              <option value="medium">中级饵（+250 幸运）</option>
-              <option value="high">高级饵（+500 幸运）</option>
-              <option value="super">超级饵（+1000 幸运）</option>
+            <span class="field-label">常规鱼饵</span>
+            <select id="auto-bait-regular-grade" class="input">
+              ${baitGradeOptions}
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">个人赛鱼饵</span>
+            <select id="auto-bait-personal-grade" class="input">
+              ${baitGradeOptions}
+            </select>
+          </label>
+
+          <label class="field">
+            <span class="field-label">公会赛鱼饵</span>
+            <select id="auto-bait-guild-grade" class="input">
+              ${baitGradeOptions}
             </select>
           </label>
 
@@ -2191,7 +2282,7 @@
             </div>
 
             <div class="field-help">
-              每次抛竿后检查当前地图对应等级的鱼饵；库存低于设置值时购买。阈值按 100 的倍数保存。
+              根据当前地图是否为个人赛或公会赛地图选择鱼饵；同一地图同时匹配时优先公会赛设置。库存低于设置值时购买，阈值按 100 的倍数保存。
             </div>
           </div>
 
@@ -2199,10 +2290,31 @@
             <span class="label">上次购买</span>
             <span id="auto-bait-last-purchased-at" class="value">暂无</span>
           </div>
-        </section>
+        </details>
 
-        <section class="settings-section">
-          <div class="settings-title">消息通知</div>
+        <details class="settings-section">
+          <summary class="settings-title">卡住自动恢复</summary>
+
+          <label class="field">
+            <span class="field-label">连续未钓鱼（分钟）</span>
+            <input
+              id="idle-reload-minutes"
+              class="input"
+              type="number"
+              min="1"
+              max="1440"
+              step="1"
+              inputmode="numeric"
+            />
+          </label>
+
+          <div class="field-help">
+            自动抛竿运行期间，连续超过该时间未收到钓鱼结果时刷新一次页面；定时休息期间不计时。
+          </div>
+        </details>
+
+        <details class="settings-section">
+          <summary class="settings-title">消息通知</summary>
 
           <div
             class="choice-list"
@@ -2274,10 +2386,10 @@
               浏览器通知仅在当前浏览器和站点授权后可用。
             </div>
           </div>
-        </section>
+        </details>
 
-        <section class="settings-section">
-          <div class="settings-title">定时休息</div>
+        <details class="settings-section">
+          <summary class="settings-title">定时休息</summary>
 
           <label class="option-row">
             <span>启用运行/休息周期</span>
@@ -2329,7 +2441,7 @@
               每轮实际运行和休息时长，都会在设置值上加入 -5%～+10% 的随机时间。
             </div>
           </div>
-        </section>
+        </details>
       </div>
     </div>
   </div>
@@ -2348,11 +2460,14 @@
 				autoBiomeUpdatedAt: shadowRoot.querySelector("#auto-biome-updated-at"),
 				autoBaitStatus: shadowRoot.querySelector("#auto-bait-status"),
 				autoBaitToggle: shadowRoot.querySelector("#auto-bait-toggle"),
-				autoBaitGrade: shadowRoot.querySelector("#auto-bait-grade"),
+				autoBaitRegularGrade: shadowRoot.querySelector("#auto-bait-regular-grade"),
+				autoBaitPersonalGrade: shadowRoot.querySelector("#auto-bait-personal-grade"),
+				autoBaitGuildGrade: shadowRoot.querySelector("#auto-bait-guild-grade"),
 				autoBaitPurchaseSettings: shadowRoot.querySelector("#auto-bait-purchase-settings"),
 				autoBaitMinimumQuantity: shadowRoot.querySelector("#auto-bait-minimum-quantity"),
 				autoBaitPurchaseQuantity: shadowRoot.querySelector("#auto-bait-purchase-quantity"),
 				autoBaitLastPurchasedAt: shadowRoot.querySelector("#auto-bait-last-purchased-at"),
+				idleReloadMinutes: shadowRoot.querySelector("#idle-reload-minutes"),
 				pushKeyInput: shadowRoot.querySelector("#push-key"),
 				pushKeyHelp: shadowRoot.querySelector("#push-key-help"),
 				captchaBypassToggle: shadowRoot.querySelector("#captcha-bypass-toggle"),
@@ -2416,14 +2531,23 @@
 			ui.autoBaitToggle.addEventListener("change", (event) => {
 				setAutoBaitEnabled(event.currentTarget.checked);
 			});
-			ui.autoBaitGrade.addEventListener("change", (event) => {
-				setAutoBaitGrade(event.currentTarget.value);
+			ui.autoBaitRegularGrade.addEventListener("change", (event) => {
+				setAutoBaitGrade("regularBaitGrade", event.currentTarget.value);
+			});
+			ui.autoBaitPersonalGrade.addEventListener("change", (event) => {
+				setAutoBaitGrade("personalCompetitionBaitGrade", event.currentTarget.value);
+			});
+			ui.autoBaitGuildGrade.addEventListener("change", (event) => {
+				setAutoBaitGrade("guildCompetitionBaitGrade", event.currentTarget.value);
 			});
 			ui.autoBaitMinimumQuantity.addEventListener("change", (event) => {
 				setAutoBaitMinimumQuantity(event.currentTarget.value);
 			});
 			ui.autoBaitPurchaseQuantity.addEventListener("change", (event) => {
 				setAutoBaitPurchaseQuantity(event.currentTarget.value);
+			});
+			ui.idleReloadMinutes.addEventListener("change", (event) => {
+				setIdleReloadMinutes(event.currentTarget.value);
 			});
 			for (const input of ui.autoBiomeWeightInputs) input.addEventListener("change", (event) => {
 				if (event.currentTarget.checked) setAutoBiomeWeight(event.currentTarget.value);
@@ -2468,6 +2592,7 @@
 			renderAutoBaitSettings();
 			renderAutoBiomeSettings();
 			renderCaptchaBypassToggle();
+			renderIdleReloadSettings();
 			renderPanelCollapsed();
 			renderNotificationSettings();
 			renderScheduleSettings();
@@ -2512,7 +2637,9 @@
 			}
 			if (panelView === "earnings") renderEarningsStats();
 			else if (panelView === "settings") {
+				renderAutoBaitSettings();
 				renderAutoBiomeSettings();
+				renderIdleReloadSettings();
 				renderNotificationSettings();
 				renderScheduleSettings();
 			}
@@ -2761,11 +2888,17 @@
 			ui.autoBaitToggle.checked = autoBaitSettings.enabled;
 			ui.autoBaitToggle.setAttribute("aria-checked", autoBaitSettings.enabled ? "true" : "false");
 			ui.autoBaitStatus.textContent = autoBaitStatus;
-			ui.autoBaitGrade.value = autoBaitSettings.baitGrade;
-			ui.autoBaitPurchaseSettings.hidden = autoBaitSettings.baitGrade === "default";
+			ui.autoBaitRegularGrade.value = autoBaitSettings.regularBaitGrade;
+			ui.autoBaitPersonalGrade.value = autoBaitSettings.personalCompetitionBaitGrade;
+			ui.autoBaitGuildGrade.value = autoBaitSettings.guildCompetitionBaitGrade;
+			ui.autoBaitPurchaseSettings.hidden = autoBaitSettings.regularBaitGrade === "default" && autoBaitSettings.personalCompetitionBaitGrade === "default" && autoBaitSettings.guildCompetitionBaitGrade === "default";
 			ui.autoBaitMinimumQuantity.value = String(autoBaitSettings.minimumQuantity);
 			ui.autoBaitPurchaseQuantity.value = String(autoBaitSettings.purchaseQuantity);
 			ui.autoBaitLastPurchasedAt.textContent = autoBaitLastPurchasedAt ? new Date(autoBaitLastPurchasedAt).toLocaleTimeString() : "暂无";
+		}
+		function renderIdleReloadSettings() {
+			if (!ui?.idleReloadMinutes) return;
+			ui.idleReloadMinutes.value = String(getState().idleReloadSettings.minutes);
 		}
 		function renderToggle() {
 			if (!ui?.toggle) return;
@@ -2785,6 +2918,7 @@
 			renderAutoBiomeSettings,
 			renderCaptchaBypassToggle,
 			renderEarningsStats,
+			renderIdleReloadSettings,
 			renderNotificationSettings,
 			renderScheduleSettings,
 			renderScheduleStatus,
@@ -2801,6 +2935,7 @@
 	var scheduleSettings = loadScheduleSettings();
 	var autoBiomeSettings = loadAutoBiomeSettings();
 	var autoBaitSettings = loadAutoBaitSettings();
+	var idleReloadSettings = loadIdleReloadSettings();
 	var earningsStats = loadEarningsStats();
 	var loopId = 0;
 	var clickCount = 0;
@@ -2814,11 +2949,18 @@
 	var pendingCompetitionResponses = new Map();
 	var pendingWeatherResponses = new Map();
 	var gameState = createGameStateStore();
+	var fishingActivityWatchdog = createFishingActivityWatchdog();
+	var AUTO_BAIT_GRADE_FIELDS = new Set([
+		"guildCompetitionBaitGrade",
+		"personalCompetitionBaitGrade",
+		"regularBaitGrade"
+	]);
 	function handleWeatherResponse(response) {
 		if (autoBiome) autoBiome.handleWeatherResponse(response);
 		else pendingWeatherResponses.set(`${response.source ?? "fetch"}:${response.pathname}`, response);
 	}
 	function recordCastResult(result) {
+		fishingActivityWatchdog.markFishing();
 		earningsStats = updateEarningsStats(earningsStats, result, getCastEarningsContext(result));
 		saveEarningsStats(earningsStats);
 		panel?.renderEarningsStats();
@@ -2843,8 +2985,9 @@
 			captcha?.clearChallenge();
 		},
 		onCompetitionResponse(response) {
-			if (autoBiome) autoBiome.handleCompetitionResponse(response);
-			else pendingCompetitionResponses.set(response.pathname, response);
+			if (autoBiome) {
+				if (autoBiome.handleCompetitionResponse(response)) autoBait?.handleStateChanged({ force: true });
+			} else pendingCompetitionResponses.set(response.pathname, response);
 		},
 		onGameStateResponse(response) {
 			if (gameState.handleResponse(response).shouldEvaluate && autoBiome) handleAutomationStateChanged();
@@ -2873,6 +3016,7 @@
 			clickCount,
 			earningsStats,
 			enabled,
+			idleReloadSettings,
 			autoBaitSettings,
 			autoBiomeSettings,
 			notificationMode,
@@ -2908,6 +3052,16 @@
 			forceNextAutoBaitCheck = false;
 			return autoBait?.handleStateChanged({ force });
 		});
+	}
+	function reloadIfFishingIdle() {
+		if (!enabled || schedule?.getSnapshot().schedulePhase === "rest") return false;
+		const timeoutMilliseconds = idleReloadSettings.minutes * 6e4;
+		if (!fishingActivityWatchdog.observe(timeoutMilliseconds)) return false;
+		panel.setStatus(`连续 ${idleReloadSettings.minutes} 分钟未钓鱼，正在刷新页面`);
+		panel.setNextDelay("—");
+		console.warn(`[自动抛竿] 连续 ${idleReloadSettings.minutes} 分钟未收到抛竿结果，正在刷新页面。`);
+		window.location.reload();
+		return true;
 	}
 	function findCastButton() {
 		const buttons = document.querySelectorAll("button");
@@ -3046,6 +3200,7 @@
 		while (enabled && currentLoopId === loopId) {
 			if (captcha.stopIfChallengeFound()) return null;
 			if (schedule.isWorkExpired()) return null;
+			if (reloadIfFishingIdle()) return null;
 			const button = findCastButton();
 			if (button) return button;
 			const cooldownButton = findCooldownButton();
@@ -3067,6 +3222,7 @@
 		while (enabled && currentLoopId === loopId) {
 			if (captcha.stopIfChallengeFound()) return false;
 			if (schedule.isWorkExpired()) return false;
+			if (reloadIfFishingIdle()) return false;
 			const remaining = endTime - Date.now();
 			if (remaining <= 0) {
 				panel.setNextDelay("准备点击");
@@ -3121,6 +3277,7 @@
 		enabled = Boolean(nextEnabled);
 		saveEnabled(enabled);
 		schedule.reset();
+		fishingActivityWatchdog.markFishing();
 		if (!enabled) captcha.cancel();
 		loopId += 1;
 		panel.renderToggle();
@@ -3189,14 +3346,21 @@
 	function setAutoBaitEnabled(nextEnabled) {
 		updateAutoBaitSettings({ enabled: Boolean(nextEnabled) });
 	}
-	function setAutoBaitGrade(nextGrade) {
-		updateAutoBaitSettings({ baitGrade: normalizeAutoBaitGrade(nextGrade, autoBaitSettings.baitGrade) });
+	function setAutoBaitGrade(field, nextGrade) {
+		if (!AUTO_BAIT_GRADE_FIELDS.has(field)) return;
+		updateAutoBaitSettings({ [field]: normalizeAutoBaitGrade(nextGrade, autoBaitSettings[field]) });
 	}
 	function setAutoBaitMinimumQuantity(nextQuantity) {
 		updateAutoBaitSettings({ minimumQuantity: normalizeAutoBaitMinimumQuantity(nextQuantity, autoBaitSettings.minimumQuantity) });
 	}
 	function setAutoBaitPurchaseQuantity(nextQuantity) {
 		updateAutoBaitSettings({ purchaseQuantity: normalizeAutoBaitPurchaseQuantity(nextQuantity, autoBaitSettings.purchaseQuantity) });
+	}
+	function setIdleReloadMinutes(nextMinutes) {
+		idleReloadSettings = { minutes: normalizeIdleReloadMinutes(nextMinutes, idleReloadSettings.minutes) };
+		saveIdleReloadSettings(idleReloadSettings);
+		fishingActivityWatchdog.markFishing();
+		panel.renderIdleReloadSettings();
 	}
 	function setScheduleEnabled(nextEnabled) {
 		scheduleSettings = {
@@ -3205,6 +3369,7 @@
 		};
 		saveScheduleSettings(scheduleSettings);
 		schedule.reset();
+		fishingActivityWatchdog.markFishing();
 		if (enabled && scheduleSettings.enabled) schedule.startWork();
 	}
 	function setScheduleMinutes(field, value) {
@@ -3215,6 +3380,7 @@
 		};
 		saveScheduleSettings(scheduleSettings);
 		schedule.reset();
+		fishingActivityWatchdog.markFishing();
 		if (enabled && scheduleSettings.enabled) schedule.startWork();
 	}
 	document.addEventListener("keydown", (event) => {
@@ -3237,6 +3403,9 @@
 					loopId,
 					scheduleSettings
 				};
+			},
+			onWorkStarted() {
+				fishingActivityWatchdog.markFishing();
 			},
 			renderSettings() {
 				panel?.renderScheduleSettings();
@@ -3264,6 +3433,7 @@
 				setAutoBiomeWeight,
 				setCaptchaBypassEnabled,
 				setEnabled,
+				setIdleReloadMinutes,
 				setNotificationMode,
 				setPushKey,
 				setScheduleEnabled,
@@ -3313,7 +3483,7 @@
 		});
 		for (const response of pendingWeatherResponses.values()) autoBiome.handleWeatherResponse(response);
 		pendingWeatherResponses.clear();
-		for (const response of pendingCompetitionResponses.values()) autoBiome.handleCompetitionResponse(response);
+		for (const response of pendingCompetitionResponses.values()) if (autoBiome.handleCompetitionResponse(response)) autoBait.handleStateChanged({ force: true });
 		pendingCompetitionResponses.clear();
 		if (pendingCaptchaChallenge) {
 			captcha.handleChallenge(pendingCaptchaChallenge);

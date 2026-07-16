@@ -38,3 +38,23 @@ export function createCooldownWatchdog(timeoutMilliseconds) {
         },
     };
 }
+
+export function createFishingActivityWatchdog(now = Date.now()) {
+    let lastFishingAt = now;
+    let timedOut = false;
+
+    return {
+        markFishing(nextNow = Date.now()) {
+            lastFishingAt = nextNow;
+            timedOut = false;
+        },
+        observe(timeoutMilliseconds, nextNow = Date.now()) {
+            if (timedOut || nextNow - lastFishingAt < timeoutMilliseconds) {
+                return false;
+            }
+
+            timedOut = true;
+            return true;
+        },
+    };
+}

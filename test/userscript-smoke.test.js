@@ -97,12 +97,32 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
             '未启用',
         );
         assert.equal(
-            host.shadowRoot.querySelector('#auto-bait-grade').value,
+            host.shadowRoot.querySelector('#auto-bait-regular-grade').value,
+            'low',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-bait-personal-grade').value,
+            'low',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-bait-guild-grade').value,
             'low',
         );
         assert.equal(
             host.shadowRoot.querySelector('#auto-bait-minimum-quantity').value,
             '100',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#idle-reload-minutes').value,
+            '5',
+        );
+        assert.equal(
+            host.shadowRoot.querySelectorAll('details.settings-section').length,
+            5,
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('details.settings-section').open,
+            false,
         );
         assert.equal(
             host.shadowRoot.querySelector('#auto-bait-purchase-quantity').value,
