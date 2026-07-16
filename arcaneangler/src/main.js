@@ -19,6 +19,8 @@ import {
     updateEarningsStats,
 } from './earnings.js';
 import { getCastEarningsContext } from './game-data.js';
+import { createGameStateStore } from './game-state.js';
+import { installEventSourceInterceptor } from './network/event-source-interceptor.js';
 import { installFetchInterceptor } from './network/fetch-interceptor.js';
 import {
     requestBrowserNotificationPermission as requestNotificationPermission,
@@ -71,6 +73,19 @@ let autoBait = null;
 let forceNextAutoBaitCheck = false;
 let pendingCaptchaChallenge = null;
 const pendingCompetitionResponses = new Map();
+const pendingWeatherResponses = new Map();
+const gameState = createGameStateStore();
+
+function handleWeatherResponse(response) {
+    if (autoBiome) {
+        autoBiome.handleWeatherResponse(response);
+    } else {
+        pendingWeatherResponses.set(
+            `${response.source ?? 'fetch'}:${response.pathname}`,
+            response,
+        );
+    }
+}
 
 function recordCastResult(result) {
     earningsStats = updateEarningsStats(
@@ -85,6 +100,16 @@ function recordCastResult(result) {
 }
 
 // 尽早安装 fetch hook，避免漏掉游戏初始化阶段的比赛与公会响应。
+installEventSourceInterceptor({
+    onWeatherUpdate(payload) {
+        handleWeatherResponse({
+            pathname: '/api/game/weather/stream',
+            payload,
+            source: 'stream',
+        });
+    },
+});
+
 installFetchInterceptor({
     onCastResult: recordCastResult,
     onCaptchaChallenge(challenge) {
@@ -104,6 +129,16 @@ installFetchInterceptor({
         } else {
             pendingCompetitionResponses.set(response.pathname, response);
         }
+    },
+    onGameStateResponse(response) {
+        const update = gameState.handleResponse(response);
+
+        if (update.shouldEvaluate && autoBiome) {
+            handleAutomationStateChanged();
+        }
+    },
+    onWeatherResponse(response) {
+        handleWeatherResponse(response);
     },
 });
 
@@ -855,6 +890,7 @@ function initialize() {
     });
 
     autoBait = createAutoBaitController({
+        getPlayer: gameState.getPlayerSnapshot,
         getState: getPanelState,
         onStateChange() {
             panel?.renderAutoBaitSettings();
@@ -862,6 +898,7 @@ function initialize() {
     });
 
     autoBiome = createAutoBiomeController({
+        getPlayer: gameState.getPlayerSnapshot,
         getState: getPanelState,
         onBiomeReady(biomeId) {
             const force = forceNextAutoBaitCheck;
@@ -873,6 +910,11 @@ function initialize() {
             panel?.renderAutoBiomeSettings();
         },
     });
+
+    for (const response of pendingWeatherResponses.values()) {
+        autoBiome.handleWeatherResponse(response);
+    }
+    pendingWeatherResponses.clear();
 
     for (const response of pendingCompetitionResponses.values()) {
         autoBiome.handleCompetitionResponse(response);

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.3.0
+// @version      2.4.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -35,7 +35,8 @@
 		arcane_surge: "奥术涌动"
 	};
 	var COMPETITION_HOOK_DEBOUNCE = 1e3;
-	function normalizeBiomeId$1(value) {
+	var WEATHER_FALLBACK_FRESHNESS = 6e4;
+	function normalizeBiomeId$2(value) {
 		const biomeId = Number(value);
 		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
 	}
@@ -48,7 +49,7 @@
 		if (!source || typeof source !== "object" || Array.isArray(source)) return {};
 		const weatherByBiome = {};
 		for (const [rawBiomeId, rawWeather] of Object.entries(source)) {
-			const biomeId = normalizeBiomeId$1(rawBiomeId);
+			const biomeId = normalizeBiomeId$2(rawBiomeId);
 			if (!biomeId || !rawWeather || typeof rawWeather !== "object") continue;
 			weatherByBiome[biomeId] = {
 				weather: String(rawWeather.weather ?? "clear"),
@@ -57,8 +58,18 @@
 		}
 		return weatherByBiome;
 	}
+	function normalizeWeatherResponse(pathname, payload) {
+		if (pathname === "/api/game/weather" || pathname === "stream") return normalizeWeatherByBiome(payload);
+		const biomeId = normalizeBiomeId$2(String(pathname).match(/^\/api\/game\/weather\/(\d+)$/)?.[1]);
+		const weather = payload?.weather && typeof payload.weather === "object" ? payload.weather : payload;
+		if (!biomeId || !weather || typeof weather !== "object") return {};
+		return { [biomeId]: {
+			weather: String(weather.weather ?? "clear"),
+			xpBonus: normalizeXpBonus(weather.xpBonus)
+		} };
+	}
 	function getBiomeScore(biomeId, xpBonus, biomeWeight) {
-		const normalizedBiomeId = normalizeBiomeId$1(biomeId) ?? 1;
+		const normalizedBiomeId = normalizeBiomeId$2(biomeId) ?? 1;
 		return normalizeXpBonus(xpBonus) + (normalizedBiomeId - 1) * normalizeXpBonus(biomeWeight);
 	}
 	function findAvailableBaitForBiome(player, biomeId) {
@@ -81,25 +92,25 @@
 		return null;
 	}
 	function getCompetitionType(biomeId, competitionBiomes) {
-		if (biomeId === normalizeBiomeId$1(competitionBiomes?.guildTournamentBiomeId)) return "guild";
-		if (biomeId === normalizeBiomeId$1(competitionBiomes?.personalDerbyBiomeId)) return "personal";
+		if (biomeId === normalizeBiomeId$2(competitionBiomes?.guildTournamentBiomeId)) return "guild";
+		if (biomeId === normalizeBiomeId$2(competitionBiomes?.personalDerbyBiomeId)) return "personal";
 		return null;
 	}
 	function resolveCompetitionBiomes({ derbyResponse, guildResponse, tournamentResponse, tournamentStandingsResponse }) {
 		const activeTournament = tournamentResponse?.active;
 		const activeDerby = derbyResponse?.active;
-		const guildId = normalizeBiomeId$1(guildResponse?.guild?.guild_id);
+		const guildId = normalizeBiomeId$2(guildResponse?.guild?.guild_id);
 		const standings = Array.isArray(tournamentStandingsResponse?.standings) ? tournamentStandingsResponse.standings : [];
 		return {
-			guildTournamentBiomeId: activeTournament?.is_registered === true || guildId !== null && standings.some((entry) => normalizeBiomeId$1(entry?.guild_id) === guildId) ? normalizeBiomeId$1(activeTournament?.biome_id) : null,
-			personalDerbyBiomeId: activeDerby?.is_registered === true ? normalizeBiomeId$1(activeDerby.biome_id) : null
+			guildTournamentBiomeId: activeTournament?.is_registered === true || guildId !== null && standings.some((entry) => normalizeBiomeId$2(entry?.guild_id) === guildId) ? normalizeBiomeId$2(activeTournament?.biome_id) : null,
+			personalDerbyBiomeId: activeDerby?.is_registered === true ? normalizeBiomeId$2(activeDerby.biome_id) : null
 		};
 	}
 	function selectBestBiome({ biomeWeight, competitionBiomes, player, preferCompetitionBiomes = false, weatherByBiome }) {
 		const unlockedBiomes = Array.isArray(player?.unlockedBiomes) ? player.unlockedBiomes : [player?.currentBiome ?? 1];
 		const candidates = [];
 		for (const rawBiomeId of unlockedBiomes) {
-			const biomeId = normalizeBiomeId$1(rawBiomeId);
+			const biomeId = normalizeBiomeId$2(rawBiomeId);
 			const weather = weatherByBiome?.[biomeId];
 			if (!biomeId || !weather) continue;
 			const competitionType = preferCompetitionBiomes ? getCompetitionType(biomeId, competitionBiomes) : null;
@@ -164,9 +175,8 @@
 		nextRefresh.setHours(now.getHours() + 1, 0, 5, 0);
 		return Math.max(1e3, nextRefresh.getTime() - now.getTime());
 	}
-	function createAutoBiomeController({ getState, onBiomeReady, onStateChange }) {
+	function createAutoBiomeController({ getPlayer, getState, onBiomeReady, onStateChange }) {
 		let evaluationId = 0;
-		let eventSource = null;
 		let fallbackTimer = null;
 		let competitionHookTimer = null;
 		let competitionHookPending = false;
@@ -180,6 +190,7 @@
 		};
 		let competitionStatus = "自动换图开启后检测";
 		let competitionUpdatedAt = 0;
+		let lastFullWeatherUpdatedAt = 0;
 		let lastUpdatedAt = 0;
 		let status = "等待天气数据";
 		let switching = false;
@@ -264,15 +275,23 @@
 			if (!response.ok) throw new Error(`天气接口返回 ${response.status}`);
 			return response.json();
 		}
-		function applyWeather(payload, source) {
-			const nextWeather = normalizeWeatherByBiome(payload);
+		function applyWeather(payload, source, { merge = false } = {}) {
+			const nextWeather = normalizeWeatherResponse(source === "request" ? "/api/game/weather" : source, payload);
 			if (Object.keys(nextWeather).length === 0) return false;
-			weatherByBiome = nextWeather;
+			weatherByBiome = merge ? {
+				...weatherByBiome,
+				...nextWeather
+			} : nextWeather;
 			lastUpdatedAt = Date.now();
-			if (source === "stream") weatherRevision += 1;
+			if (!merge) lastFullWeatherUpdatedAt = lastUpdatedAt;
+			if (source !== "request") weatherRevision += 1;
 			notifyStateChanged();
 			evaluateBestBiome();
 			return true;
+		}
+		function handleWeatherResponse({ pathname, payload, source = "fetch" }) {
+			const responsePath = source === "stream" ? "stream" : pathname;
+			return applyWeather(payload, responsePath, { merge: responsePath !== "/api/game/weather" && source !== "stream" });
 		}
 		async function refreshWeather() {
 			const revisionBeforeRequest = weatherRevision;
@@ -287,29 +306,9 @@
 		function scheduleHourlyFallback() {
 			window.clearTimeout(fallbackTimer);
 			fallbackTimer = window.setTimeout(async () => {
-				await refreshWeather();
+				if (Date.now() - lastFullWeatherUpdatedAt > WEATHER_FALLBACK_FRESHNESS) await refreshWeather();
 				scheduleHourlyFallback();
 			}, getNextHourlyRefreshDelay());
-		}
-		function connectWeatherStream() {
-			if (typeof window.EventSource !== "function") {
-				console.warn("[自动换图] 当前浏览器不支持天气推送，改为整点刷新天气。");
-				scheduleHourlyFallback();
-				return;
-			}
-			const baseUrl = String(window.ApiService?.baseURL ?? `${window.location.origin}/api`).replace(/\/$/, "");
-			eventSource = new window.EventSource(`${baseUrl}/game/weather/stream`);
-			eventSource.onmessage = (event) => {
-				try {
-					const payload = JSON.parse(event.data);
-					if (payload?.type === "weather_update") applyWeather(payload, "stream");
-				} catch (error) {
-					console.warn("[自动换图] 无法解析天气推送：", error);
-				}
-			};
-			eventSource.onerror = () => {
-				console.warn("[自动换图] 天气推送暂时断开，等待自动重连。");
-			};
 		}
 		async function evaluateBestBiome() {
 			const currentEvaluationId = ++evaluationId;
@@ -337,23 +336,20 @@
 				return;
 			}
 			const api = window.ApiService;
-			if (typeof api?.getPlayerData !== "function" || typeof api?.changeBiome !== "function") {
-				setStatus("等待游戏角色数据");
+			if (typeof api?.changeBiome !== "function") {
+				setStatus("等待游戏切图接口");
 				return;
 			}
-			let player;
-			try {
-				player = await api.getPlayerData();
-			} catch (error) {
-				console.warn("[自动换图] 无法读取角色数据：", error);
-				setStatus("角色数据读取失败");
+			const player = getPlayer?.();
+			if (!player) {
+				setStatus("等待游戏角色数据");
 				return;
 			}
 			if (currentEvaluationId !== evaluationId) return;
 			if (player?.boat) {
 				target = null;
 				setStatus("组队中暂不自动换图");
-				await notifyBiomeReady(normalizeBiomeId$1(player.currentBiome));
+				await notifyBiomeReady(normalizeBiomeId$2(player.currentBiome));
 				return;
 			}
 			target = selectBestBiome({
@@ -365,11 +361,11 @@
 			});
 			if (!target) {
 				setStatus("没有可用的已解锁地图数据");
-				await notifyBiomeReady(normalizeBiomeId$1(player.currentBiome));
+				await notifyBiomeReady(normalizeBiomeId$2(player.currentBiome));
 				return;
 			}
 			const summary = formatTargetSummary(target);
-			if (normalizeBiomeId$1(player.currentBiome) === target.biomeId) {
+			if (normalizeBiomeId$2(player.currentBiome) === target.biomeId) {
 				setStatus(`已在 ${summary}`);
 				await notifyBiomeReady(target.biomeId);
 				return;
@@ -393,15 +389,14 @@
 			return evaluateBestBiome();
 		}
 		function handleCastResult(result) {
-			if (target && normalizeBiomeId$1(result?.currentBiome) === target.biomeId) setStatus(`已在 ${formatTargetSummary(target)}`);
+			if (target && normalizeBiomeId$2(result?.currentBiome) === target.biomeId) setStatus(`已在 ${formatTargetSummary(target)}`);
 		}
 		function start() {
-			connectWeatherStream();
+			scheduleHourlyFallback();
 			refreshWeather();
 			evaluateBestBiome();
 		}
 		function destroy() {
-			eventSource?.close();
 			window.clearTimeout(fallbackTimer);
 			window.clearTimeout(competitionHookTimer);
 		}
@@ -411,6 +406,7 @@
 			handleCastResult,
 			handleCompetitionResponse,
 			handleStateChanged,
+			handleWeatherResponse,
 			isSwitching() {
 				return switching;
 			},
@@ -427,21 +423,21 @@
 		high: "高级饵（+500 幸运）",
 		super: "超级饵（+1000 幸运）"
 	};
-	function normalizeBiomeId(value) {
+	function normalizeBiomeId$1(value) {
 		const biomeId = Number(value);
 		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
 	}
-	function normalizeQuantity(value) {
+	function normalizeQuantity$1(value) {
 		const quantity = Number(value);
 		return Number.isFinite(quantity) && quantity >= 0 ? Math.floor(quantity) : 0;
 	}
 	function getBaitIdForBiome(biomeId, baitGrade) {
 		if (baitGrade === "default") return DEFAULT_BAIT_ID;
-		const normalizedBiomeId = normalizeBiomeId(biomeId);
+		const normalizedBiomeId = normalizeBiomeId$1(biomeId);
 		return normalizedBiomeId ? `bait_${normalizedBiomeId}_${baitGrade}` : null;
 	}
 	function shouldPurchaseBait(quantity, minimumQuantity, baitGrade) {
-		return baitGrade !== "default" && normalizeQuantity(quantity) < normalizeQuantity(minimumQuantity);
+		return baitGrade !== "default" && normalizeQuantity$1(quantity) < normalizeQuantity$1(minimumQuantity);
 	}
 	function getBaitById$1(baitId) {
 		if (typeof window.getBaitById === "function") try {
@@ -459,7 +455,7 @@
 	function getErrorMessage(error) {
 		return String(error?.message ?? error ?? "未知错误");
 	}
-	function createAutoBaitController({ getState, onStateChange }) {
+	function createAutoBaitController({ getPlayer, getState, onStateChange }) {
 		let checking = false;
 		let currentBaitId = null;
 		let currentQuantity = null;
@@ -513,15 +509,19 @@
 			const requestedBaitId = getBaitIdForBiome(requestedBiomeId, autoBaitSettings.baitGrade);
 			if (!force && requestedBaitId && requestedBaitId === retryBaitId && Date.now() < retryAfter) return;
 			const api = window.ApiService;
-			if (typeof api?.getPlayerData !== "function" || typeof api?.equipBait !== "function" || autoBaitSettings.baitGrade !== "default" && typeof api?.buyBait !== "function") {
+			if (typeof api?.equipBait !== "function" || autoBaitSettings.baitGrade !== "default" && typeof api?.buyBait !== "function") {
 				updateSnapshot({ nextStatus: "等待游戏鱼饵接口" });
+				return;
+			}
+			const player = getPlayer?.();
+			if (!player) {
+				updateSnapshot({ nextStatus: "等待游戏角色数据" });
 				return;
 			}
 			checking = true;
 			updateSnapshot({ nextStatus: "正在检查鱼饵库存" });
 			try {
-				const player = await api.getPlayerData();
-				const biomeId = normalizeBiomeId(requestedBiomeId) ?? normalizeBiomeId(player?.currentBiome);
+				const biomeId = normalizeBiomeId$1(requestedBiomeId) ?? normalizeBiomeId$1(player?.currentBiome);
 				const baitId = getBaitIdForBiome(biomeId, autoBaitSettings.baitGrade);
 				if (!baitId) throw new Error("无法识别当前地图");
 				const baitLabel = getBaitLabel(baitId, autoBaitSettings.baitGrade, biomeId);
@@ -537,7 +537,7 @@
 					});
 					return;
 				}
-				let quantity = normalizeQuantity(player?.baitInventory?.[baitId]);
+				let quantity = normalizeQuantity$1(player?.baitInventory?.[baitId]);
 				let purchased = false;
 				if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, autoBaitSettings.baitGrade)) {
 					const bait = getBaitById$1(baitId);
@@ -560,7 +560,7 @@
 					});
 					const result = await api.buyBait(baitId, autoBaitSettings.purchaseQuantity);
 					if (result?.success !== true) throw new Error(result?.message ?? "游戏未确认购买成功");
-					quantity = Number.isFinite(Number(result.newBaitQuantity)) ? normalizeQuantity(result.newBaitQuantity) : quantity + autoBaitSettings.purchaseQuantity;
+					quantity = Number.isFinite(Number(result.newBaitQuantity)) ? normalizeQuantity$1(result.newBaitQuantity) : quantity + autoBaitSettings.purchaseQuantity;
 					lastPurchasedAt = Date.now();
 					purchased = true;
 				}
@@ -588,7 +588,7 @@
 		function handleCastResult(result) {
 			const { autoBaitSettings, enabled } = getState();
 			if (!autoBaitSettings.enabled || !enabled) return;
-			const biomeId = normalizeBiomeId(result?.currentBiome);
+			const biomeId = normalizeBiomeId$1(result?.currentBiome);
 			const baitId = getBaitIdForBiome(biomeId, autoBaitSettings.baitGrade);
 			if (!baitId) return;
 			if (result?.equippedBait !== baitId) {
@@ -604,7 +604,7 @@
 				});
 				return;
 			}
-			const quantity = normalizeQuantity(result?.baitQuantity);
+			const quantity = normalizeQuantity$1(result?.baitQuantity);
 			updateSnapshot({
 				baitId,
 				quantity,
@@ -1180,7 +1180,153 @@
 			baitPrice: normalizeBaitPrice(bait?.price)
 		};
 	}
-	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult, onCompetitionResponse }) {
+	function isObject(value) {
+		return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+	}
+	function normalizeBiomeId(value) {
+		const biomeId = Number(value);
+		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
+	}
+	function normalizeQuantity(value) {
+		const quantity = Number(value);
+		return Number.isFinite(quantity) && quantity >= 0 ? Math.floor(quantity) : null;
+	}
+	function isSuccessful(payload) {
+		return payload?.success !== false;
+	}
+	function createGameStateStore() {
+		let player = null;
+		let updatedAt = 0;
+		function replacePlayer(nextPlayer) {
+			if (!isObject(nextPlayer)) return false;
+			player = nextPlayer;
+			updatedAt = Date.now();
+			return true;
+		}
+		function mergePlayer(patch) {
+			if (!player || !isObject(patch)) return false;
+			player = {
+				...player,
+				...patch
+			};
+			updatedAt = Date.now();
+			return true;
+		}
+		function updateBaitInventory(baitId, quantity) {
+			const normalizedQuantity = normalizeQuantity(quantity);
+			if (!player || !baitId || normalizedQuantity === null) return false;
+			return mergePlayer({ baitInventory: {
+				...player.baitInventory,
+				[baitId]: normalizedQuantity
+			} });
+		}
+		function handleCastResult(result) {
+			if (!player || !isObject(result)) return false;
+			const patch = {};
+			const biomeId = normalizeBiomeId(result.currentBiome);
+			if (biomeId) patch.currentBiome = biomeId;
+			if (result.equippedBait) {
+				patch.equippedBait = result.equippedBait;
+				const quantity = normalizeQuantity(result.baitQuantity);
+				if (quantity !== null) patch.baitInventory = {
+					...player.baitInventory,
+					[result.equippedBait]: quantity
+				};
+			}
+			for (const [sourceField, targetField] of Object.entries({
+				newGold: "gold",
+				newLevel: "level",
+				newStamina: "stamina",
+				newStatPoints: "statPoints",
+				newXP: "xp",
+				newXpToNext: "xpToNext"
+			})) if (result[sourceField] !== void 0) patch[targetField] = result[sourceField];
+			return mergePlayer(patch);
+		}
+		function handleResponse({ method, pathname, payload, requestPayload }) {
+			if (method === "GET" && pathname === "/api/player/data") return {
+				changed: replacePlayer(payload),
+				shouldEvaluate: true
+			};
+			if (method === "GET" && pathname === "/api/boats/my-boat") return {
+				changed: mergePlayer({ boat: payload?.boat ?? null }),
+				shouldEvaluate: true
+			};
+			if (method !== "POST" || !isSuccessful(payload)) return {
+				changed: false,
+				shouldEvaluate: false
+			};
+			if (pathname === "/api/game/cast") return {
+				changed: handleCastResult(payload?.result),
+				shouldEvaluate: false
+			};
+			if (pathname === "/api/game/change-biome") {
+				const biomeId = normalizeBiomeId(requestPayload?.biomeId);
+				return {
+					changed: biomeId ? mergePlayer({ currentBiome: biomeId }) : false,
+					shouldEvaluate: false
+				};
+			}
+			if (pathname === "/api/game/equip-bait") return {
+				changed: requestPayload?.baitName ? mergePlayer({ equippedBait: requestPayload.baitName }) : false,
+				shouldEvaluate: false
+			};
+			if (pathname === "/api/game/equip-rod") return {
+				changed: requestPayload?.rodName ? mergePlayer({ equippedRod: requestPayload.rodName }) : false,
+				shouldEvaluate: false
+			};
+			if (pathname === "/api/game/buy-bait") {
+				const baitId = requestPayload?.baitName;
+				const responseQuantity = normalizeQuantity(payload?.newBaitQuantity);
+				const currentQuantity = normalizeQuantity(player?.baitInventory?.[baitId]);
+				const purchasedQuantity = normalizeQuantity(requestPayload?.quantity);
+				let changed = updateBaitInventory(baitId, responseQuantity ?? (currentQuantity !== null && purchasedQuantity !== null ? currentQuantity + purchasedQuantity : null));
+				if (payload?.newGold !== void 0) changed = mergePlayer({ gold: payload.newGold }) || changed;
+				return {
+					changed,
+					shouldEvaluate: false
+				};
+			}
+			return {
+				changed: false,
+				shouldEvaluate: false
+			};
+		}
+		return {
+			getPlayerSnapshot() {
+				return player;
+			},
+			getUpdatedAt() {
+				return updatedAt;
+			},
+			handleResponse
+		};
+	}
+	function isWeatherStreamUrl(url) {
+		try {
+			return new URL(String(url), window.location.href).pathname === "/api/game/weather/stream";
+		} catch {
+			return false;
+		}
+	}
+	function installEventSourceInterceptor({ onWeatherUpdate } = {}) {
+		const OriginalEventSource = window.EventSource;
+		if (typeof OriginalEventSource !== "function") return false;
+		window.EventSource = new Proxy(OriginalEventSource, { construct(Target, args) {
+			const source = Reflect.construct(Target, args);
+			if (isWeatherStreamUrl(args[0]) && typeof source.addEventListener === "function") source.addEventListener("message", (event) => {
+				try {
+					const payload = JSON.parse(event.data);
+					if (payload?.type === "weather_update") onWeatherUpdate?.(payload);
+				} catch (error) {
+					console.warn("[自动换图] 无法解析游戏天气推送：", error);
+				}
+			});
+			return source;
+		} });
+		return true;
+	}
+	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult, onCompetitionResponse, onGameStateResponse, onWeatherResponse }) {
 		const originalFetch = window.fetch;
 		window.fetch = async function(input, init) {
 			const request = input instanceof Request ? input : null;
@@ -1189,11 +1335,14 @@
 			try {
 				url = new URL(request?.url ?? String(input), window.location.href);
 			} catch {}
+			const requestPayloadPromise = method === "POST" && isGameStateResponsePath(method, url?.pathname) && url?.pathname !== "/api/game/cast" ? readRequestPayload(request, init).catch((error) => {
+				console.warn("[游戏状态] 无法读取请求参数：", error);
+			}) : Promise.resolve(void 0);
 			if (method === "POST" && url?.pathname === "/api/game/cast") {
 				const modifiedRequest = await modifyCastRequest(input, request, init);
 				const response = modifiedRequest ? await originalFetch.call(this, modifiedRequest.input, modifiedRequest.init) : await originalFetch.apply(this, arguments);
 				try {
-					collectCastResponse(response.clone(), onCastResult);
+					collectCastResponse(response.clone(), onCastResult, onGameStateResponse);
 				} catch (error) {
 					console.warn("[收益统计] 无法复制抛竿响应：", error);
 				}
@@ -1211,8 +1360,38 @@
 			} catch (error) {
 				console.warn("[自动换图] 无法复制游戏比赛轮询响应：", error);
 			}
+			if (method === "GET" && isWeatherResponsePath(url?.pathname)) try {
+				collectJsonResponse(response.clone(), {
+					method,
+					pathname: url.pathname
+				}, onWeatherResponse, "[自动换图] 无法读取游戏天气响应：");
+			} catch (error) {
+				console.warn("[自动换图] 无法复制游戏天气响应：", error);
+			}
+			if (isGameStateResponsePath(method, url?.pathname)) try {
+				collectGameStateResponse(response.clone(), {
+					method,
+					pathname: url.pathname,
+					requestPayloadPromise
+				}, onGameStateResponse);
+			} catch (error) {
+				console.warn("[游戏状态] 无法复制游戏状态响应：", error);
+			}
 			return response;
 		};
+	}
+	function isGameStateResponsePath(method, pathname) {
+		if (method === "GET") return pathname === "/api/player/data" || pathname === "/api/boats/my-boat";
+		return method === "POST" && [
+			"/api/game/cast",
+			"/api/game/buy-bait",
+			"/api/game/change-biome",
+			"/api/game/equip-bait",
+			"/api/game/equip-rod"
+		].includes(pathname);
+	}
+	function isWeatherResponsePath(pathname) {
+		return pathname === "/api/game/weather" || /^\/api\/game\/weather\/\d+$/.test(pathname ?? "");
 	}
 	function isCompetitionResponsePath(pathname) {
 		return pathname === "/api/guild/tournaments/current" || pathname === "/api/derby/current" || pathname === "/api/guild/my-guild" || /^\/api\/guild\/tournaments\/[^/]+\/standings$/.test(pathname ?? "");
@@ -1257,12 +1436,22 @@
 		if (body instanceof Blob) return normalizeRequestBody(await body.text());
 		return body;
 	}
-	async function collectCastResponse(response, onCastResult) {
+	async function readRequestPayload(request, init) {
+		let body = init?.body;
+		if (body === void 0 && request) body = await request.clone().text();
+		return normalizeRequestBody(body);
+	}
+	async function collectCastResponse(response, onCastResult, onGameStateResponse) {
 		if (!response.ok) return;
 		try {
 			const payload = await response.json();
 			if (payload?.success !== true || !payload.result || typeof payload.result !== "object") return;
-			onCastResult(payload.result);
+			onGameStateResponse?.({
+				method: "POST",
+				pathname: "/api/game/cast",
+				payload
+			});
+			onCastResult?.(payload.result);
 		} catch (error) {
 			console.warn("[收益统计] 无法读取抛竿响应：", error);
 		}
@@ -1287,6 +1476,32 @@
 			});
 		} catch (error) {
 			console.warn("[自动换图] 无法读取游戏比赛轮询响应：", error);
+		}
+	}
+	async function collectJsonResponse(response, context, callback, warning) {
+		if (!response.ok || typeof callback !== "function") return;
+		try {
+			const payload = await response.json();
+			callback({
+				...context,
+				payload
+			});
+		} catch (error) {
+			console.warn(warning, error);
+		}
+	}
+	async function collectGameStateResponse(response, context, callback) {
+		if (!response.ok || typeof callback !== "function") return;
+		try {
+			const [payload, requestPayload] = await Promise.all([response.json(), context.requestPayloadPromise]);
+			callback({
+				method: context.method,
+				pathname: context.pathname,
+				payload,
+				requestPayload
+			});
+		} catch (error) {
+			console.warn("[游戏状态] 无法读取游戏状态响应：", error);
 		}
 	}
 	async function sendHumanVerificationNotification({ notificationMode, pushKey }) {
@@ -2597,6 +2812,12 @@
 	var forceNextAutoBaitCheck = false;
 	var pendingCaptchaChallenge = null;
 	var pendingCompetitionResponses = new Map();
+	var pendingWeatherResponses = new Map();
+	var gameState = createGameStateStore();
+	function handleWeatherResponse(response) {
+		if (autoBiome) autoBiome.handleWeatherResponse(response);
+		else pendingWeatherResponses.set(`${response.source ?? "fetch"}:${response.pathname}`, response);
+	}
 	function recordCastResult(result) {
 		earningsStats = updateEarningsStats(earningsStats, result, getCastEarningsContext(result));
 		saveEarningsStats(earningsStats);
@@ -2604,6 +2825,13 @@
 		autoBiome?.handleCastResult(result);
 		autoBait?.handleCastResult(result);
 	}
+	installEventSourceInterceptor({ onWeatherUpdate(payload) {
+		handleWeatherResponse({
+			pathname: "/api/game/weather/stream",
+			payload,
+			source: "stream"
+		});
+	} });
 	installFetchInterceptor({
 		onCastResult: recordCastResult,
 		onCaptchaChallenge(challenge) {
@@ -2617,6 +2845,12 @@
 		onCompetitionResponse(response) {
 			if (autoBiome) autoBiome.handleCompetitionResponse(response);
 			else pendingCompetitionResponses.set(response.pathname, response);
+		},
+		onGameStateResponse(response) {
+			if (gameState.handleResponse(response).shouldEvaluate && autoBiome) handleAutomationStateChanged();
+		},
+		onWeatherResponse(response) {
+			handleWeatherResponse(response);
 		}
 	});
 	function setPushKey(nextPushKey) {
@@ -3056,12 +3290,14 @@
 			setStatus: panel.setStatus
 		});
 		autoBait = createAutoBaitController({
+			getPlayer: gameState.getPlayerSnapshot,
 			getState: getPanelState,
 			onStateChange() {
 				panel?.renderAutoBaitSettings();
 			}
 		});
 		autoBiome = createAutoBiomeController({
+			getPlayer: gameState.getPlayerSnapshot,
 			getState: getPanelState,
 			onBiomeReady(biomeId) {
 				const force = forceNextAutoBaitCheck;
@@ -3075,6 +3311,8 @@
 				panel?.renderAutoBiomeSettings();
 			}
 		});
+		for (const response of pendingWeatherResponses.values()) autoBiome.handleWeatherResponse(response);
+		pendingWeatherResponses.clear();
 		for (const response of pendingCompetitionResponses.values()) autoBiome.handleCompetitionResponse(response);
 		pendingCompetitionResponses.clear();
 		if (pendingCaptchaChallenge) {

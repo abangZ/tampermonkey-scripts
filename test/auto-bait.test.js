@@ -38,6 +38,14 @@ test('自动买鱼饵设置会限制等级、阈值和商店购买数量', () =>
 test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async () => {
     const previousWindow = globalThis.window;
     const calls = [];
+    const player = {
+        baitInventory: {
+            bait_3_medium: 50,
+        },
+        currentBiome: 3,
+        equippedBait: 'bait_3_low',
+        gold: 100000,
+    };
 
     globalThis.window = {
         ApiService: {
@@ -52,17 +60,6 @@ test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async
                 calls.push(['equipBait', baitId]);
                 return { success: true };
             },
-            async getPlayerData() {
-                calls.push(['getPlayerData']);
-                return {
-                    baitInventory: {
-                        bait_3_medium: 50,
-                    },
-                    currentBiome: 3,
-                    equippedBait: 'bait_3_low',
-                    gold: 100000,
-                };
-            },
         },
         BAITS: [
             {
@@ -75,6 +72,9 @@ test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async
 
     try {
         const controller = createAutoBaitController({
+            getPlayer() {
+                return player;
+            },
             getState() {
                 return {
                     autoBaitSettings: {
@@ -91,7 +91,6 @@ test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async
         await controller.checkNow();
 
         assert.deepEqual(calls, [
-            ['getPlayerData'],
             ['buyBait', 'bait_3_medium', 100],
             ['equipBait', 'bait_3_medium'],
         ]);
@@ -105,6 +104,10 @@ test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async
 test('默认饵只自动装备，不发起购买', async () => {
     const previousWindow = globalThis.window;
     const calls = [];
+    const player = {
+        currentBiome: 4,
+        equippedBait: 'bait_4_high',
+    };
 
     globalThis.window = {
         ApiService: {
@@ -112,18 +115,15 @@ test('默认饵只自动装备，不发起购买', async () => {
                 calls.push(['equipBait', baitId]);
                 return { success: true };
             },
-            async getPlayerData() {
-                return {
-                    currentBiome: 4,
-                    equippedBait: 'bait_4_high',
-                };
-            },
         },
         BAITS: [],
     };
 
     try {
         const controller = createAutoBaitController({
+            getPlayer() {
+                return player;
+            },
             getState() {
                 return {
                     autoBaitSettings: {
@@ -149,6 +149,14 @@ test('默认饵只自动装备，不发起购买', async () => {
 test('金币不足时保留并装备剩余鱼饵，不发起购买', async () => {
     const previousWindow = globalThis.window;
     const calls = [];
+    const player = {
+        baitInventory: {
+            bait_5_super: 20,
+        },
+        currentBiome: 5,
+        equippedBait: 'bait_5_low',
+        gold: 100,
+    };
 
     globalThis.window = {
         ApiService: {
@@ -158,16 +166,6 @@ test('金币不足时保留并装备剩余鱼饵，不发起购买', async () =>
             async equipBait(baitId) {
                 calls.push(['equipBait', baitId]);
                 return { success: true };
-            },
-            async getPlayerData() {
-                return {
-                    baitInventory: {
-                        bait_5_super: 20,
-                    },
-                    currentBiome: 5,
-                    equippedBait: 'bait_5_low',
-                    gold: 100,
-                };
             },
         },
         BAITS: [
@@ -181,6 +179,9 @@ test('金币不足时保留并装备剩余鱼饵，不发起购买', async () =>
 
     try {
         const controller = createAutoBaitController({
+            getPlayer() {
+                return player;
+            },
             getState() {
                 return {
                     autoBaitSettings: {
@@ -203,7 +204,7 @@ test('金币不足时保留并装备剩余鱼饵，不发起购买', async () =>
     }
 });
 
-test('抛竿结果显示库存充足时不再请求角色数据', async () => {
+test('抛竿结果显示库存充足时不再触发额外操作', async () => {
     const previousWindow = globalThis.window;
     let requestCount = 0;
 
@@ -213,9 +214,6 @@ test('抛竿结果显示库存充足时不再请求角色数据', async () => {
                 requestCount += 1;
             },
             async equipBait() {
-                requestCount += 1;
-            },
-            async getPlayerData() {
                 requestCount += 1;
             },
         },

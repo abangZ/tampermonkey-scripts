@@ -6,32 +6,31 @@ import {
     findAvailableBaitForBiome,
     getBiomeScore,
     normalizeWeatherByBiome,
+    normalizeWeatherResponse,
     resolveCompetitionBiomes,
     selectBestBiome,
 } from '../arcaneangler/src/auto-biome.js';
 import { loadAutoBiomeSettings } from '../arcaneangler/src/storage.js';
 
-class FakeEventSource {
-    static instance = null;
-
-    constructor(url) {
-        this.url = url;
-        FakeEventSource.instance = this;
-    }
-
-    emit(payload) {
-        this.onmessage?.({
-            data: JSON.stringify(payload),
-        });
-    }
-
-    close() {}
-}
-
 test('地图评分会叠加天气经验和地图等级权重', () => {
     assert.equal(getBiomeScore(1, 30, 5), 30);
     assert.equal(getBiomeScore(4, 30, 5), 45);
     assert.equal(getBiomeScore(4, 30, 10), 60);
+});
+
+test('单地图天气接口响应会归一化到对应地图', () => {
+    assert.deepEqual(
+        normalizeWeatherResponse('/api/game/weather/3', {
+            weather: 'rain',
+            xpBonus: 25,
+        }),
+        {
+            3: {
+                weather: 'rain',
+                xpBonus: 25,
+            },
+        },
+    );
 });
 
 test('只从已解锁地图选择，鱼饵库存不影响候选地图', () => {
@@ -300,7 +299,7 @@ test('优先沿用当前鱼饵档位，没有时回退到其他可用档位', ()
     );
 });
 
-test('天气 SSE 更新后会切到评分最高的地图并同步装备', async () => {
+test('游戏天气 hook 更新后会切到评分最高的地图并同步装备', async () => {
     const previousWindow = globalThis.window;
     const calls = [];
     const player = {
@@ -339,23 +338,25 @@ test('天气 SSE 更新后会切到评分最高的地图并同步装备', async 
                     },
                 };
             },
-            async getPlayerData() {
-                return player;
-            },
         },
         BIOMES: {
             1: { name: 'Tinker River' },
             2: { name: 'Misty Pine Lake' },
         },
-        EventSource: FakeEventSource,
         clearTimeout() {},
         location: {
             origin: 'https://arcaneangler.com',
+        },
+        setTimeout() {
+            return 1;
         },
     };
 
     try {
         const controller = createAutoBiomeController({
+            getPlayer() {
+                return player;
+            },
             getState() {
                 return {
                     autoBiomeSettings: {
@@ -372,12 +373,16 @@ test('天气 SSE 更新后会切到评分最高的地图并同步装备', async 
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.deepEqual(calls, []);
 
-        FakeEventSource.instance.emit({
-            type: 'weather_update',
-            weather: {
-                1: { weather: 'clear', xpBonus: 0 },
-                2: { weather: 'arcane_surge', xpBonus: 75 },
+        controller.handleWeatherResponse({
+            pathname: '/api/game/weather/stream',
+            payload: {
+                type: 'weather_update',
+                weather: {
+                    1: { weather: 'clear', xpBonus: 0 },
+                    2: { weather: 'arcane_surge', xpBonus: 75 },
+                },
             },
+            source: 'stream',
         });
         await new Promise((resolve) => setTimeout(resolve, 0));
 
@@ -395,6 +400,5 @@ test('天气 SSE 更新后会切到评分最高的地图并同步装备', async 
         controller.destroy();
     } finally {
         globalThis.window = previousWindow;
-        FakeEventSource.instance = null;
     }
 });

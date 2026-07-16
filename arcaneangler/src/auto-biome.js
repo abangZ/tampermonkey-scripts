@@ -10,6 +10,7 @@ const WEATHER_LABELS = {
     arcane_surge: '奥术涌动',
 };
 const COMPETITION_HOOK_DEBOUNCE = 1000;
+const WEATHER_FALLBACK_FRESHNESS = 60000;
 
 function normalizeBiomeId(value) {
     const biomeId = Number(value);
@@ -46,6 +47,30 @@ export function normalizeWeatherByBiome(payload) {
     }
 
     return weatherByBiome;
+}
+
+export function normalizeWeatherResponse(pathname, payload) {
+    if (pathname === '/api/game/weather' || pathname === 'stream') {
+        return normalizeWeatherByBiome(payload);
+    }
+
+    const match = String(pathname).match(/^\/api\/game\/weather\/(\d+)$/);
+    const biomeId = normalizeBiomeId(match?.[1]);
+    const weather =
+        payload?.weather && typeof payload.weather === 'object'
+            ? payload.weather
+            : payload;
+
+    if (!biomeId || !weather || typeof weather !== 'object') {
+        return {};
+    }
+
+    return {
+        [biomeId]: {
+            weather: String(weather.weather ?? 'clear'),
+            xpBonus: normalizeXpBonus(weather.xpBonus),
+        },
+    };
 }
 
 export function getBiomeScore(biomeId, xpBonus, biomeWeight) {
@@ -273,12 +298,12 @@ function getNextHourlyRefreshDelay(now = new Date()) {
 }
 
 export function createAutoBiomeController({
+    getPlayer,
     getState,
     onBiomeReady,
     onStateChange,
 }) {
     let evaluationId = 0;
-    let eventSource = null;
     let fallbackTimer = null;
     let competitionHookTimer = null;
     let competitionHookPending = false;
@@ -292,6 +317,7 @@ export function createAutoBiomeController({
     };
     let competitionStatus = '自动换图开启后检测';
     let competitionUpdatedAt = 0;
+    let lastFullWeatherUpdatedAt = 0;
     let lastUpdatedAt = 0;
     let status = '等待天气数据';
     let switching = false;
@@ -430,23 +456,43 @@ export function createAutoBiomeController({
         return response.json();
     }
 
-    function applyWeather(payload, source) {
-        const nextWeather = normalizeWeatherByBiome(payload);
+    function applyWeather(payload, source, { merge = false } = {}) {
+        const nextWeather = normalizeWeatherResponse(
+            source === 'request' ? '/api/game/weather' : source,
+            payload,
+        );
 
         if (Object.keys(nextWeather).length === 0) {
             return false;
         }
 
-        weatherByBiome = nextWeather;
+        weatherByBiome = merge
+            ? {
+                  ...weatherByBiome,
+                  ...nextWeather,
+              }
+            : nextWeather;
         lastUpdatedAt = Date.now();
 
-        if (source === 'stream') {
+        if (!merge) {
+            lastFullWeatherUpdatedAt = lastUpdatedAt;
+        }
+
+        if (source !== 'request') {
             weatherRevision += 1;
         }
 
         notifyStateChanged();
         void evaluateBestBiome();
         return true;
+    }
+
+    function handleWeatherResponse({ pathname, payload, source = 'fetch' }) {
+        const responsePath = source === 'stream' ? 'stream' : pathname;
+
+        return applyWeather(payload, responsePath, {
+            merge: responsePath !== '/api/game/weather' && source !== 'stream',
+        });
     }
 
     async function refreshWeather() {
@@ -470,39 +516,15 @@ export function createAutoBiomeController({
     function scheduleHourlyFallback() {
         window.clearTimeout(fallbackTimer);
         fallbackTimer = window.setTimeout(async () => {
-            await refreshWeather();
+            if (
+                Date.now() - lastFullWeatherUpdatedAt >
+                WEATHER_FALLBACK_FRESHNESS
+            ) {
+                await refreshWeather();
+            }
+
             scheduleHourlyFallback();
         }, getNextHourlyRefreshDelay());
-    }
-
-    function connectWeatherStream() {
-        if (typeof window.EventSource !== 'function') {
-            console.warn(
-                '[自动换图] 当前浏览器不支持天气推送，改为整点刷新天气。',
-            );
-            scheduleHourlyFallback();
-            return;
-        }
-
-        const baseUrl = String(
-            window.ApiService?.baseURL ?? `${window.location.origin}/api`,
-        ).replace(/\/$/, '');
-
-        eventSource = new window.EventSource(`${baseUrl}/game/weather/stream`);
-        eventSource.onmessage = (event) => {
-            try {
-                const payload = JSON.parse(event.data);
-
-                if (payload?.type === 'weather_update') {
-                    applyWeather(payload, 'stream');
-                }
-            } catch (error) {
-                console.warn('[自动换图] 无法解析天气推送：', error);
-            }
-        };
-        eventSource.onerror = () => {
-            console.warn('[自动换图] 天气推送暂时断开，等待自动重连。');
-        };
     }
 
     async function evaluateBestBiome() {
@@ -549,21 +571,15 @@ export function createAutoBiomeController({
 
         const api = window.ApiService;
 
-        if (
-            typeof api?.getPlayerData !== 'function' ||
-            typeof api?.changeBiome !== 'function'
-        ) {
-            setStatus('等待游戏角色数据');
+        if (typeof api?.changeBiome !== 'function') {
+            setStatus('等待游戏切图接口');
             return;
         }
 
-        let player;
+        const player = getPlayer?.();
 
-        try {
-            player = await api.getPlayerData();
-        } catch (error) {
-            console.warn('[自动换图] 无法读取角色数据：', error);
-            setStatus('角色数据读取失败');
+        if (!player) {
+            setStatus('等待游戏角色数据');
             return;
         }
 
@@ -638,13 +654,12 @@ export function createAutoBiomeController({
     }
 
     function start() {
-        connectWeatherStream();
+        scheduleHourlyFallback();
         void refreshWeather();
         void evaluateBestBiome();
     }
 
     function destroy() {
-        eventSource?.close();
         window.clearTimeout(fallbackTimer);
         window.clearTimeout(competitionHookTimer);
     }
@@ -655,6 +670,7 @@ export function createAutoBiomeController({
         handleCastResult,
         handleCompetitionResponse,
         handleStateChanged,
+        handleWeatherResponse,
         isSwitching() {
             return switching;
         },

@@ -73,7 +73,11 @@ function getErrorMessage(error) {
     return String(error?.message ?? error ?? '未知错误');
 }
 
-export function createAutoBaitController({ getState, onStateChange }) {
+export function createAutoBaitController({
+    getPlayer,
+    getState,
+    onStateChange,
+}) {
     let checking = false;
     let currentBaitId = null;
     let currentQuantity = null;
@@ -167,7 +171,6 @@ export function createAutoBaitController({ getState, onStateChange }) {
         const api = window.ApiService;
 
         if (
-            typeof api?.getPlayerData !== 'function' ||
             typeof api?.equipBait !== 'function' ||
             (autoBaitSettings.baitGrade !== 'default' &&
                 typeof api?.buyBait !== 'function')
@@ -176,11 +179,17 @@ export function createAutoBaitController({ getState, onStateChange }) {
             return;
         }
 
+        const player = getPlayer?.();
+
+        if (!player) {
+            updateSnapshot({ nextStatus: '等待游戏角色数据' });
+            return;
+        }
+
         checking = true;
         updateSnapshot({ nextStatus: '正在检查鱼饵库存' });
 
         try {
-            const player = await api.getPlayerData();
             const biomeId =
                 normalizeBiomeId(requestedBiomeId) ??
                 normalizeBiomeId(player?.currentBiome);

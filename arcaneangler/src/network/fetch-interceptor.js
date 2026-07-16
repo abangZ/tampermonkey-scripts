@@ -6,6 +6,8 @@ export function installFetchInterceptor({
     onCaptchaVerified,
     onCastResult,
     onCompetitionResponse,
+    onGameStateResponse,
+    onWeatherResponse,
 }) {
     const originalFetch = window.fetch;
 
@@ -23,6 +25,16 @@ export function installFetchInterceptor({
             // URL 无法解析时保持原 fetch 行为。
         }
 
+        const requestPayloadPromise =
+            method === 'POST' &&
+            isGameStateResponsePath(method, url?.pathname) &&
+            url?.pathname !== '/api/game/cast'
+                ? readRequestPayload(request, init).catch((error) => {
+                      console.warn('[游戏状态] 无法读取请求参数：', error);
+                      return undefined;
+                  })
+                : Promise.resolve(undefined);
+
         if (method === 'POST' && url?.pathname === '/api/game/cast') {
             const modifiedRequest = await modifyCastRequest(
                 input,
@@ -39,7 +51,11 @@ export function installFetchInterceptor({
                 : await originalFetch.apply(this, arguments);
 
             try {
-                void collectCastResponse(response.clone(), onCastResult);
+                void collectCastResponse(
+                    response.clone(),
+                    onCastResult,
+                    onGameStateResponse,
+                );
             } catch (error) {
                 console.warn('[收益统计] 无法复制抛竿响应：', error);
             }
@@ -85,8 +101,66 @@ export function installFetchInterceptor({
             }
         }
 
+        if (method === 'GET' && isWeatherResponsePath(url?.pathname)) {
+            try {
+                void collectJsonResponse(
+                    response.clone(),
+                    {
+                        method,
+                        pathname: url.pathname,
+                    },
+                    onWeatherResponse,
+                    '[自动换图] 无法读取游戏天气响应：',
+                );
+            } catch (error) {
+                console.warn('[自动换图] 无法复制游戏天气响应：', error);
+            }
+        }
+
+        if (isGameStateResponsePath(method, url?.pathname)) {
+            try {
+                void collectGameStateResponse(
+                    response.clone(),
+                    {
+                        method,
+                        pathname: url.pathname,
+                        requestPayloadPromise,
+                    },
+                    onGameStateResponse,
+                );
+            } catch (error) {
+                console.warn('[游戏状态] 无法复制游戏状态响应：', error);
+            }
+        }
+
         return response;
     };
+}
+
+export function isGameStateResponsePath(method, pathname) {
+    if (method === 'GET') {
+        return (
+            pathname === '/api/player/data' || pathname === '/api/boats/my-boat'
+        );
+    }
+
+    return (
+        method === 'POST' &&
+        [
+            '/api/game/cast',
+            '/api/game/buy-bait',
+            '/api/game/change-biome',
+            '/api/game/equip-bait',
+            '/api/game/equip-rod',
+        ].includes(pathname)
+    );
+}
+
+export function isWeatherResponsePath(pathname) {
+    return (
+        pathname === '/api/game/weather' ||
+        /^\/api\/game\/weather\/\d+$/.test(pathname ?? '')
+    );
 }
 
 export function isCompetitionResponsePath(pathname) {
@@ -179,7 +253,21 @@ export async function normalizeRequestBody(body) {
     return body;
 }
 
-async function collectCastResponse(response, onCastResult) {
+async function readRequestPayload(request, init) {
+    let body = init?.body;
+
+    if (body === undefined && request) {
+        body = await request.clone().text();
+    }
+
+    return normalizeRequestBody(body);
+}
+
+async function collectCastResponse(
+    response,
+    onCastResult,
+    onGameStateResponse,
+) {
     if (!response.ok) {
         return;
     }
@@ -195,7 +283,12 @@ async function collectCastResponse(response, onCastResult) {
             return;
         }
 
-        onCastResult(payload.result);
+        onGameStateResponse?.({
+            method: 'POST',
+            pathname: '/api/game/cast',
+            payload,
+        });
+        onCastResult?.(payload.result);
     } catch (error) {
         console.warn('[收益统计] 无法读取抛竿响应：', error);
     }
@@ -231,5 +324,41 @@ async function collectCompetitionResponse(response, pathname, callback) {
         callback({ pathname, payload });
     } catch (error) {
         console.warn('[自动换图] 无法读取游戏比赛轮询响应：', error);
+    }
+}
+
+async function collectJsonResponse(response, context, callback, warning) {
+    if (!response.ok || typeof callback !== 'function') {
+        return;
+    }
+
+    try {
+        const payload = await response.json();
+
+        callback({ ...context, payload });
+    } catch (error) {
+        console.warn(warning, error);
+    }
+}
+
+async function collectGameStateResponse(response, context, callback) {
+    if (!response.ok || typeof callback !== 'function') {
+        return;
+    }
+
+    try {
+        const [payload, requestPayload] = await Promise.all([
+            response.json(),
+            context.requestPayloadPromise,
+        ]);
+
+        callback({
+            method: context.method,
+            pathname: context.pathname,
+            payload,
+            requestPayload,
+        });
+    } catch (error) {
+        console.warn('[游戏状态] 无法读取游戏状态响应：', error);
     }
 }
