@@ -1,4 +1,5 @@
 const DEFAULT_BAIT_ID = 'bait_default';
+const GOLD_BREEZE_WEATHER = 'gold_breeze';
 const PURCHASE_RETRY_DELAY = 60000;
 
 export const BAIT_GRADE_LABELS = {
@@ -65,11 +66,20 @@ export function getBaitGradeForBiome(
     biomeId,
     autoBaitSettings,
     competitionBiomes,
+    automationState = {},
 ) {
     const regularBaitGrade =
         autoBaitSettings?.regularBaitGrade ??
         autoBaitSettings?.baitGrade ??
         'low';
+
+    if (
+        automationState.autoBiomeWeatherByBiome?.[biomeId]?.weather ===
+        GOLD_BREEZE_WEATHER
+    ) {
+        return autoBaitSettings?.goldBreezeBaitGrade ?? 'default';
+    }
+
     const context = getAutoBaitContext(biomeId, competitionBiomes);
 
     if (context === 'guild') {
@@ -186,8 +196,8 @@ export function createAutoBaitController({
         biomeId: requestedBiomeId = null,
         force = false,
     }) {
-        const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } =
-            getState();
+        const state = getState();
+        const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = state;
 
         if (!autoBaitSettings.enabled) {
             updateSnapshot({
@@ -237,6 +247,7 @@ export function createAutoBaitController({
                 biomeId,
                 autoBaitSettings,
                 autoBiomeCompetitionBiomes,
+                state,
             );
             const baitId = getBaitIdForBiome(biomeId, baitGrade);
 
@@ -256,7 +267,11 @@ export function createAutoBaitController({
             }
 
             const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
-            const contextLabel = AUTO_BAIT_CONTEXT_LABELS[baitContext];
+            const contextLabel =
+                state.autoBiomeWeatherByBiome?.[biomeId]?.weather ===
+                GOLD_BREEZE_WEATHER
+                    ? '金风'
+                    : AUTO_BAIT_CONTEXT_LABELS[baitContext];
 
             lastCheckedAt = Date.now();
 
@@ -358,8 +373,8 @@ export function createAutoBaitController({
     }
 
     function handleCastResult(result) {
-        const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } =
-            getState();
+        const state = getState();
+        const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = state;
 
         if (!autoBaitSettings.enabled || !enabled) {
             return;
@@ -374,6 +389,7 @@ export function createAutoBaitController({
             biomeId,
             autoBaitSettings,
             autoBiomeCompetitionBiomes,
+            state,
         );
         const baitId = getBaitIdForBiome(biomeId, baitGrade);
 
@@ -388,7 +404,11 @@ export function createAutoBaitController({
 
         lastCheckedAt = Date.now();
 
-        const contextLabel = AUTO_BAIT_CONTEXT_LABELS[baitContext];
+        const contextLabel =
+            state.autoBiomeWeatherByBiome?.[biomeId]?.weather ===
+            GOLD_BREEZE_WEATHER
+                ? '金风'
+                : AUTO_BAIT_CONTEXT_LABELS[baitContext];
 
         if (baitGrade === 'default') {
             updateSnapshot({

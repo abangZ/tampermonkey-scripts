@@ -22,6 +22,7 @@ export function createPanelController({
         setAutoBaitMinimumQuantity,
         setAutoBaitPurchaseQuantity,
         setAutoBiomeEnabled,
+        setAutoBiomeChaseGoldBreeze,
         setAutoBiomePreferCompetition,
         setAutoBiomeWeight,
         setCaptchaBypassEnabled,
@@ -327,6 +328,23 @@ export function createPanelController({
             仅优先已参与且已解锁的比赛地图；公会锦标赛优先于个人比赛。
           </div>
 
+          <label class="option-row">
+            <span>追逐金风</span>
+            <span class="switch">
+              <input
+                id="auto-biome-gold-breeze-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="无比赛时优先选择金风地图"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
+          <div class="field-help">
+            无可用比赛地图时优先选择金风天气；没有金风时再按经验评分选择。
+          </div>
+
           <div
             class="choice-list choice-list-three"
             role="radiogroup"
@@ -359,7 +377,7 @@ export function createPanelController({
           </div>
 
           <div class="field-help">
-            无可用比赛地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+            无可用比赛地图和需追逐的金风地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
           </div>
 
           <div class="row">
@@ -397,6 +415,13 @@ export function createPanelController({
             </select>
           </label>
 
+          <label class="field">
+            <span class="field-label">金风鱼饵</span>
+            <select id="auto-bait-gold-breeze-grade" class="input">
+              ${baitGradeOptions}
+            </select>
+          </label>
+
           <div id="auto-bait-purchase-settings" class="settings-group">
             <div class="number-grid">
               <label class="field">
@@ -422,7 +447,7 @@ export function createPanelController({
             </div>
 
             <div class="field-help">
-              根据当前地图是否为个人赛或公会赛地图选择鱼饵；同一地图同时匹配时优先公会赛设置。库存低于设置值时购买，阈值按 100 的倍数保存。
+              金风天气优先使用独立鱼饵设置，默认为免费默认饵；其他天气根据当前地图是否为个人赛或公会赛地图选择鱼饵。库存低于设置值时购买，阈值按 100 的倍数保存。
             </div>
           </div>
 
@@ -599,6 +624,9 @@ export function createPanelController({
             autoBiomeCompetitionToggle: shadowRoot.querySelector(
                 '#auto-biome-competition-toggle',
             ),
+            autoBiomeGoldBreezeToggle: shadowRoot.querySelector(
+                '#auto-biome-gold-breeze-toggle',
+            ),
             autoBiomeCompetitionStatus: shadowRoot.querySelector(
                 '#auto-biome-competition-status',
             ),
@@ -618,6 +646,9 @@ export function createPanelController({
             ),
             autoBaitGuildGrade: shadowRoot.querySelector(
                 '#auto-bait-guild-grade',
+            ),
+            autoBaitGoldBreezeGrade: shadowRoot.querySelector(
+                '#auto-bait-gold-breeze-grade',
             ),
             autoBaitPurchaseSettings: shadowRoot.querySelector(
                 '#auto-bait-purchase-settings',
@@ -718,6 +749,10 @@ export function createPanelController({
             setAutoBiomePreferCompetition(event.currentTarget.checked);
         });
 
+        ui.autoBiomeGoldBreezeToggle.addEventListener('change', (event) => {
+            setAutoBiomeChaseGoldBreeze(event.currentTarget.checked);
+        });
+
         ui.autoBaitToggle.addEventListener('change', (event) => {
             setAutoBaitEnabled(event.currentTarget.checked);
         });
@@ -738,6 +773,10 @@ export function createPanelController({
                 'guildCompetitionBaitGrade',
                 event.currentTarget.value,
             );
+        });
+
+        ui.autoBaitGoldBreezeGrade.addEventListener('change', (event) => {
+            setAutoBaitGrade('goldBreezeBaitGrade', event.currentTarget.value);
         });
 
         ui.autoBaitMinimumQuantity.addEventListener('change', (event) => {
@@ -1362,6 +1401,12 @@ export function createPanelController({
             'aria-checked',
             autoBiomeSettings.preferCompetitionBiomes ? 'true' : 'false',
         );
+        ui.autoBiomeGoldBreezeToggle.checked =
+            autoBiomeSettings.chaseGoldBreeze;
+        ui.autoBiomeGoldBreezeToggle.setAttribute(
+            'aria-checked',
+            autoBiomeSettings.chaseGoldBreeze ? 'true' : 'false',
+        );
         ui.autoBiomeCompetitionStatus.textContent = autoBiomeCompetitionStatus;
 
         for (const input of ui.autoBiomeWeightInputs) {
@@ -1393,10 +1438,12 @@ export function createPanelController({
             autoBaitSettings.personalCompetitionBaitGrade;
         ui.autoBaitGuildGrade.value =
             autoBaitSettings.guildCompetitionBaitGrade;
+        ui.autoBaitGoldBreezeGrade.value = autoBaitSettings.goldBreezeBaitGrade;
         ui.autoBaitPurchaseSettings.hidden =
             autoBaitSettings.regularBaitGrade === 'default' &&
             autoBaitSettings.personalCompetitionBaitGrade === 'default' &&
-            autoBaitSettings.guildCompetitionBaitGrade === 'default';
+            autoBaitSettings.guildCompetitionBaitGrade === 'default' &&
+            autoBaitSettings.goldBreezeBaitGrade === 'default';
         ui.autoBaitMinimumQuantity.value = String(
             autoBaitSettings.minimumQuantity,
         );

@@ -85,6 +85,7 @@ const pendingWeatherResponses = new Map();
 const gameState = createGameStateStore();
 const fishingActivityWatchdog = createFishingActivityWatchdog();
 const AUTO_BAIT_GRADE_FIELDS = new Set([
+    'goldBreezeBaitGrade',
     'guildCompetitionBaitGrade',
     'personalCompetitionBaitGrade',
     'regularBaitGrade',
@@ -761,6 +762,16 @@ function setAutoBiomeWeight(nextWeight) {
     handleAutomationStateChanged();
 }
 
+function setAutoBiomeChaseGoldBreeze(nextEnabled) {
+    autoBiomeSettings = {
+        ...autoBiomeSettings,
+        chaseGoldBreeze: Boolean(nextEnabled),
+    };
+    saveAutoBiomeSettings(autoBiomeSettings);
+    panel.renderAutoBiomeSettings();
+    handleAutomationStateChanged({ forceBait: true });
+}
+
 function setAutoBiomePreferCompetition(nextEnabled) {
     autoBiomeSettings = {
         ...autoBiomeSettings,
@@ -925,6 +936,7 @@ function initialize() {
             setAutoBaitMinimumQuantity,
             setAutoBaitPurchaseQuantity,
             setAutoBiomeEnabled,
+            setAutoBiomeChaseGoldBreeze,
             setAutoBiomePreferCompetition,
             setAutoBiomeWeight,
             setCaptchaBypassEnabled,

@@ -133,6 +133,50 @@ test('公会锦标赛优先于个人比赛，比赛优先于天气评分', () =>
     );
 });
 
+test('追逐金风时比赛优先，无比赛才优先金风', () => {
+    const weatherByBiome = normalizeWeatherByBiome({
+        weather: {
+            1: { weather: 'gold_breeze', xpBonus: -25 },
+            2: { weather: 'arcane_surge', xpBonus: 100 },
+            3: { weather: 'clear', xpBonus: 0 },
+        },
+    });
+    const player = {
+        currentBiome: 2,
+        unlockedBiomes: [1, 2, 3],
+    };
+
+    assert.equal(
+        selectBestBiome({
+            biomeWeight: 0,
+            chaseGoldBreeze: true,
+            competitionBiomes: { guildTournamentBiomeId: 3 },
+            player,
+            preferCompetitionBiomes: true,
+            weatherByBiome,
+        }).biomeId,
+        3,
+    );
+    assert.equal(
+        selectBestBiome({
+            biomeWeight: 0,
+            chaseGoldBreeze: true,
+            player,
+            weatherByBiome,
+        }).biomeId,
+        1,
+    );
+    assert.equal(
+        selectBestBiome({
+            biomeWeight: 0,
+            chaseGoldBreeze: false,
+            player,
+            weatherByBiome,
+        }).biomeId,
+        2,
+    );
+});
+
 test('只识别已经报名的个人比赛和当前公会参加的锦标赛', () => {
     assert.deepEqual(
         resolveCompetitionBiomes({
@@ -206,6 +250,7 @@ test('旧版自动换图设置默认开启比赛地图优先', () => {
     try {
         assert.deepEqual(loadAutoBiomeSettings(), {
             biomeWeight: 10,
+            chaseGoldBreeze: false,
             enabled: true,
             preferCompetitionBiomes: true,
         });

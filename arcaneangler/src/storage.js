@@ -94,6 +94,7 @@ export function normalizeAutoBiomeWeight(value, fallback = 5) {
 
 export function loadAutoBiomeSettings() {
     const defaults = {
+        chaseGoldBreeze: false,
         enabled: false,
         biomeWeight: 5,
         preferCompetitionBiomes: true,
@@ -109,6 +110,7 @@ export function loadAutoBiomeSettings() {
         }
 
         return {
+            chaseGoldBreeze: savedSettings.chaseGoldBreeze === true,
             enabled: savedSettings.enabled === true,
             biomeWeight: normalizeAutoBiomeWeight(
                 savedSettings.biomeWeight,
@@ -159,6 +161,7 @@ export function normalizeAutoBaitPurchaseQuantity(value, fallback = 100) {
 export function loadAutoBaitSettings() {
     const defaults = {
         enabled: false,
+        goldBreezeBaitGrade: 'default',
         guildCompetitionBaitGrade: 'low',
         minimumQuantity: 100,
         personalCompetitionBaitGrade: 'low',
@@ -182,6 +185,10 @@ export function loadAutoBaitSettings() {
 
         return {
             enabled: savedSettings.enabled === true,
+            goldBreezeBaitGrade: normalizeAutoBaitGrade(
+                savedSettings.goldBreezeBaitGrade,
+                defaults.goldBreezeBaitGrade,
+            ),
             guildCompetitionBaitGrade: normalizeAutoBaitGrade(
                 savedSettings.guildCompetitionBaitGrade,
                 legacyBaitGrade,

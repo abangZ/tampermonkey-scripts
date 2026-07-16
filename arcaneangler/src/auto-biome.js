@@ -1,3 +1,5 @@
+import { getBaitIdForBiome } from './auto-bait.js';
+
 const WEATHER_LABELS = {
     clear: '晴朗',
     rain: '雨天',
@@ -6,10 +8,11 @@ const WEATHER_LABELS = {
     heatwave: '热浪',
     storm: '暴风',
     blight: '枯萎',
-    gold_breeze: '黄金微风',
+    gold_breeze: '金风',
     arcane_surge: '奥术涌动',
 };
 const COMPETITION_HOOK_DEBOUNCE = 1000;
+const GOLD_BREEZE_WEATHER = 'gold_breeze';
 const WEATHER_FALLBACK_FRESHNESS = 60000;
 
 function normalizeBiomeId(value) {
@@ -162,6 +165,7 @@ export function resolveCompetitionBiomes({
 
 export function selectBestBiome({
     biomeWeight,
+    chaseGoldBreeze = false,
     competitionBiomes,
     player,
     preferCompetitionBiomes = false,
@@ -183,6 +187,8 @@ export function selectBestBiome({
         const competitionType = preferCompetitionBiomes
             ? getCompetitionType(biomeId, competitionBiomes)
             : null;
+        const goldBreezePriority =
+            chaseGoldBreeze && weather.weather === GOLD_BREEZE_WEATHER ? 1 : 0;
 
         candidates.push({
             baitId: findAvailableBaitForBiome(player, biomeId),
@@ -194,6 +200,7 @@ export function selectBestBiome({
                       ? 1
                       : 0,
             ...(competitionType ? { competitionType } : {}),
+            goldBreezePriority,
             score: getBiomeScore(biomeId, weather.xpBonus, biomeWeight),
             weather: weather.weather,
             xpBonus: weather.xpBonus,
@@ -203,6 +210,7 @@ export function selectBestBiome({
     candidates.sort(
         (left, right) =>
             right.competitionPriority - left.competitionPriority ||
+            right.goldBreezePriority - left.goldBreezePriority ||
             right.score - left.score ||
             right.biomeId - left.biomeId,
     );
@@ -211,7 +219,8 @@ export function selectBestBiome({
         return null;
     }
 
-    const { competitionPriority, ...bestBiome } = candidates[0];
+    const { competitionPriority, goldBreezePriority, ...bestBiome } =
+        candidates[0];
 
     return bestBiome;
 }
@@ -249,7 +258,11 @@ function getErrorMessage(error) {
     return String(error?.message ?? error ?? '未知错误');
 }
 
-async function autoEquipForBiome(player, target, { skipBait = false } = {}) {
+async function autoEquipForBiome(
+    player,
+    target,
+    { skipBait = false, skipRod = false } = {},
+) {
     const api = window.ApiService;
 
     if (!skipBait && target.baitId && target.baitId !== player.equippedBait) {
@@ -258,6 +271,10 @@ async function autoEquipForBiome(player, target, { skipBait = false } = {}) {
         } catch (error) {
             console.warn('[自动换图] 无法自动装备目标地图鱼饵：', error);
         }
+    }
+
+    if (skipRod) {
+        return;
     }
 
     const currentRod = String(player.equippedRod ?? 'rod_default');
@@ -596,12 +613,24 @@ export function createAutoBiomeController({
 
         target = selectBestBiome({
             biomeWeight: autoBiomeSettings.biomeWeight,
+            chaseGoldBreeze: autoBiomeSettings.chaseGoldBreeze === true,
             competitionBiomes,
             player,
             preferCompetitionBiomes:
                 autoBiomeSettings.preferCompetitionBiomes !== false,
             weatherByBiome,
         });
+
+        const chasingGoldBreeze =
+            autoBiomeSettings.chaseGoldBreeze === true &&
+            target?.weather === GOLD_BREEZE_WEATHER;
+
+        if (chasingGoldBreeze) {
+            target.baitId = getBaitIdForBiome(
+                target.biomeId,
+                autoBaitSettings?.goldBreezeBaitGrade ?? 'default',
+            );
+        }
 
         if (!target) {
             setStatus('没有可用的已解锁地图数据');
@@ -612,6 +641,10 @@ export function createAutoBiomeController({
         const summary = formatTargetSummary(target);
 
         if (normalizeBiomeId(player.currentBiome) === target.biomeId) {
+            if (chasingGoldBreeze && autoBaitSettings?.enabled !== true) {
+                await autoEquipForBiome(player, target, { skipRod: true });
+            }
+
             setStatus(`已在 ${summary}`);
             await notifyBiomeReady(target.biomeId);
             return;

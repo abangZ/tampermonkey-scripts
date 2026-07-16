@@ -70,6 +70,36 @@ test('同一地图同时属于个人赛和公会赛时优先公会赛鱼饵', ()
     );
 });
 
+test('金风天气使用独立鱼饵设置且默认为免费饵', () => {
+    const weatherState = {
+        autoBiomeWeatherByBiome: {
+            8: { weather: 'gold_breeze', xpBonus: -25 },
+        },
+    };
+
+    assert.equal(
+        getBaitGradeForBiome(
+            8,
+            {},
+            { guildTournamentBiomeId: 8 },
+            weatherState,
+        ),
+        'default',
+    );
+    assert.equal(
+        getBaitGradeForBiome(
+            8,
+            {
+                goldBreezeBaitGrade: 'high',
+                guildCompetitionBaitGrade: 'super',
+            },
+            { guildTournamentBiomeId: 8 },
+            weatherState,
+        ),
+        'high',
+    );
+});
+
 test('自动买鱼饵设置会限制等级、阈值和商店购买数量', () => {
     assert.equal(normalizeAutoBaitGrade('super'), 'super');
     assert.equal(normalizeAutoBaitGrade('unknown'), 'low');
@@ -82,7 +112,7 @@ test('自动买鱼饵设置会限制等级、阈值和商店购买数量', () =>
     assert.equal(normalizeIdleReloadMinutes(2000), 1440);
 });
 
-test('旧版单一鱼饵等级会迁移到三个使用场景', () => {
+test('旧版单一鱼饵等级会迁移到旧场景，金风默认免费饵', () => {
     const previousLocalStorage = globalThis.localStorage;
     const values = new Map([
         [
@@ -105,6 +135,7 @@ test('旧版单一鱼饵等级会迁移到三个使用场景', () => {
     try {
         assert.deepEqual(loadAutoBaitSettings(), {
             enabled: true,
+            goldBreezeBaitGrade: 'default',
             guildCompetitionBaitGrade: 'high',
             minimumQuantity: 200,
             personalCompetitionBaitGrade: 'high',

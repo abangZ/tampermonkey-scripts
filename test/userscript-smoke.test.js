@@ -91,6 +91,11 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
                 .checked,
             true,
         );
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-biome-gold-breeze-toggle')
+                .checked,
+            false,
+        );
         assert.ok(host.shadowRoot.querySelector('#auto-bait-toggle'));
         assert.equal(
             host.shadowRoot.querySelector('#auto-bait-status').textContent,
@@ -107,6 +112,10 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         assert.equal(
             host.shadowRoot.querySelector('#auto-bait-guild-grade').value,
             'low',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-bait-gold-breeze-grade').value,
+            'default',
         );
         assert.equal(
             host.shadowRoot.querySelector('#auto-bait-minimum-quantity').value,

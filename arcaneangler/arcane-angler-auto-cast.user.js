@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.5.0
+// @version      2.6.0
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -23,6 +23,249 @@
 
 (function() {
 	"use strict";
+	var DEFAULT_BAIT_ID = "bait_default";
+	var GOLD_BREEZE_WEATHER$1 = "gold_breeze";
+	var PURCHASE_RETRY_DELAY = 6e4;
+	var BAIT_GRADE_LABELS = {
+		default: "默认饵",
+		low: "低级饵",
+		medium: "中级饵（+250 幸运）",
+		high: "高级饵（+500 幸运）",
+		super: "超级饵（+1000 幸运）"
+	};
+	var AUTO_BAIT_CONTEXT_LABELS = {
+		guild: "公会赛",
+		personal: "个人赛",
+		regular: "常规"
+	};
+	function normalizeBiomeId$2(value) {
+		const biomeId = Number(value);
+		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
+	}
+	function normalizeQuantity$1(value) {
+		const quantity = Number(value);
+		return Number.isFinite(quantity) && quantity >= 0 ? Math.floor(quantity) : 0;
+	}
+	function getBaitIdForBiome(biomeId, baitGrade) {
+		if (baitGrade === "default") return DEFAULT_BAIT_ID;
+		const normalizedBiomeId = normalizeBiomeId$2(biomeId);
+		return normalizedBiomeId ? `bait_${normalizedBiomeId}_${baitGrade}` : null;
+	}
+	function getAutoBaitContext(biomeId, competitionBiomes) {
+		const normalizedBiomeId = normalizeBiomeId$2(biomeId);
+		if (normalizedBiomeId && normalizedBiomeId === normalizeBiomeId$2(competitionBiomes?.guildTournamentBiomeId)) return "guild";
+		if (normalizedBiomeId && normalizedBiomeId === normalizeBiomeId$2(competitionBiomes?.personalDerbyBiomeId)) return "personal";
+		return "regular";
+	}
+	function getBaitGradeForBiome(biomeId, autoBaitSettings, competitionBiomes, automationState = {}) {
+		const regularBaitGrade = autoBaitSettings?.regularBaitGrade ?? autoBaitSettings?.baitGrade ?? "low";
+		if (automationState.autoBiomeWeatherByBiome?.[biomeId]?.weather === GOLD_BREEZE_WEATHER$1) return autoBaitSettings?.goldBreezeBaitGrade ?? "default";
+		const context = getAutoBaitContext(biomeId, competitionBiomes);
+		if (context === "guild") return autoBaitSettings?.guildCompetitionBaitGrade ?? regularBaitGrade;
+		if (context === "personal") return autoBaitSettings?.personalCompetitionBaitGrade ?? regularBaitGrade;
+		return regularBaitGrade;
+	}
+	function shouldPurchaseBait(quantity, minimumQuantity, baitGrade) {
+		return baitGrade !== "default" && normalizeQuantity$1(quantity) < normalizeQuantity$1(minimumQuantity);
+	}
+	function getBaitById$1(baitId) {
+		if (typeof window.getBaitById === "function") try {
+			const bait = window.getBaitById(baitId);
+			if (bait) return bait;
+		} catch {}
+		return Array.isArray(window.BAITS) ? window.BAITS.find((bait) => bait?.id === baitId) : null;
+	}
+	function getBaitLabel(baitId, baitGrade, biomeId) {
+		const catalogName = String(getBaitById$1(baitId)?.name ?? "").trim();
+		const gradeLabel = BAIT_GRADE_LABELS[baitGrade] ?? baitGrade;
+		if (baitGrade === "default") return catalogName ? `${gradeLabel}（${catalogName}）` : gradeLabel;
+		return `[B${biomeId}] ${gradeLabel}${catalogName ? `（${catalogName}）` : ""}`;
+	}
+	function getErrorMessage$1(error) {
+		return String(error?.message ?? error ?? "未知错误");
+	}
+	function createAutoBaitController({ getPlayer, getState, onStateChange }) {
+		let checking = false;
+		let currentBaitId = null;
+		let currentQuantity = null;
+		let lastCheckedAt = 0;
+		let lastPurchasedAt = 0;
+		let retryAfter = 0;
+		let retryBaitId = null;
+		let status = "未启用";
+		let checkQueue = Promise.resolve();
+		function notifyStateChanged() {
+			onStateChange?.();
+		}
+		function updateSnapshot({ baitId, quantity, nextStatus }) {
+			if (baitId !== void 0) currentBaitId = baitId;
+			if (quantity !== void 0) currentQuantity = quantity;
+			if (nextStatus !== void 0) status = nextStatus;
+			notifyStateChanged();
+		}
+		function getSnapshot() {
+			return {
+				autoBaitCurrentBaitId: currentBaitId,
+				autoBaitCurrentQuantity: currentQuantity,
+				autoBaitLastCheckedAt: lastCheckedAt,
+				autoBaitLastPurchasedAt: lastPurchasedAt,
+				autoBaitStatus: status
+			};
+		}
+		async function equipBait(api, player, baitId, baitLabel) {
+			if (player.equippedBait === baitId) return;
+			const result = await api.equipBait(baitId);
+			if (result?.success !== true) throw new Error(result?.message ?? `无法装备${baitLabel}`);
+		}
+		async function evaluate({ biomeId: requestedBiomeId = null, force = false }) {
+			const state = getState();
+			const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = state;
+			if (!autoBaitSettings.enabled) {
+				updateSnapshot({
+					baitId: null,
+					quantity: null,
+					nextStatus: "未启用"
+				});
+				return;
+			}
+			if (!enabled) {
+				updateSnapshot({
+					baitId: null,
+					quantity: null,
+					nextStatus: "脚本启动后自动检查"
+				});
+				return;
+			}
+			const api = window.ApiService;
+			if (typeof api?.equipBait !== "function") {
+				updateSnapshot({ nextStatus: "等待游戏鱼饵接口" });
+				return;
+			}
+			const player = getPlayer?.();
+			if (!player) {
+				updateSnapshot({ nextStatus: "等待游戏角色数据" });
+				return;
+			}
+			checking = true;
+			updateSnapshot({ nextStatus: "正在检查鱼饵库存" });
+			let attemptedBaitId = null;
+			try {
+				const biomeId = normalizeBiomeId$2(requestedBiomeId) ?? normalizeBiomeId$2(player?.currentBiome);
+				const baitContext = getAutoBaitContext(biomeId, autoBiomeCompetitionBiomes);
+				const baitGrade = getBaitGradeForBiome(biomeId, autoBaitSettings, autoBiomeCompetitionBiomes, state);
+				const baitId = getBaitIdForBiome(biomeId, baitGrade);
+				attemptedBaitId = baitId;
+				if (!baitId) throw new Error("无法识别当前地图");
+				if (!force && baitId === retryBaitId && Date.now() < retryAfter) return;
+				if (baitGrade !== "default" && typeof api?.buyBait !== "function") {
+					updateSnapshot({ nextStatus: "等待游戏鱼饵购买接口" });
+					return;
+				}
+				const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
+				const contextLabel = state.autoBiomeWeatherByBiome?.[biomeId]?.weather === GOLD_BREEZE_WEATHER$1 ? "金风" : AUTO_BAIT_CONTEXT_LABELS[baitContext];
+				lastCheckedAt = Date.now();
+				if (baitGrade === "default") {
+					await equipBait(api, player, baitId, baitLabel);
+					retryAfter = 0;
+					retryBaitId = null;
+					updateSnapshot({
+						baitId,
+						quantity: null,
+						nextStatus: `${contextLabel} · ${baitLabel} · 无限`
+					});
+					return;
+				}
+				let quantity = normalizeQuantity$1(player?.baitInventory?.[baitId]);
+				let purchased = false;
+				if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) {
+					const bait = getBaitById$1(baitId);
+					const totalCost = Number(bait?.price) * autoBaitSettings.purchaseQuantity;
+					if (Number.isFinite(totalCost) && totalCost > Number(player?.gold ?? 0)) {
+						if (quantity > 0) await equipBait(api, player, baitId, baitLabel);
+						retryBaitId = baitId;
+						retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
+						updateSnapshot({
+							baitId,
+							quantity,
+							nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币`
+						});
+						return;
+					}
+					updateSnapshot({
+						baitId,
+						quantity,
+						nextStatus: `正在购买 ${baitLabel} ×${autoBaitSettings.purchaseQuantity}`
+					});
+					const result = await api.buyBait(baitId, autoBaitSettings.purchaseQuantity);
+					if (result?.success !== true) throw new Error(result?.message ?? "游戏未确认购买成功");
+					quantity = Number.isFinite(Number(result.newBaitQuantity)) ? normalizeQuantity$1(result.newBaitQuantity) : quantity + autoBaitSettings.purchaseQuantity;
+					lastPurchasedAt = Date.now();
+					purchased = true;
+				}
+				await equipBait(api, player, baitId, baitLabel);
+				retryAfter = 0;
+				retryBaitId = null;
+				updateSnapshot({
+					baitId,
+					quantity,
+					nextStatus: purchased ? `已购买${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个` : `${contextLabel} · ${baitLabel} · ${quantity.toLocaleString()} 个`
+				});
+			} catch (error) {
+				console.error("[自动买鱼饵] 检查或购买失败：", error);
+				retryBaitId = attemptedBaitId ?? currentBaitId;
+				retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
+				updateSnapshot({ nextStatus: `鱼饵处理失败：${getErrorMessage$1(error)}` });
+			} finally {
+				checking = false;
+			}
+		}
+		function checkNow(options = {}) {
+			checkQueue = checkQueue.then(() => evaluate(options), () => evaluate(options));
+			return checkQueue;
+		}
+		function handleCastResult(result) {
+			const state = getState();
+			const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = state;
+			if (!autoBaitSettings.enabled || !enabled) return;
+			const biomeId = normalizeBiomeId$2(result?.currentBiome);
+			const baitContext = getAutoBaitContext(biomeId, autoBiomeCompetitionBiomes);
+			const baitGrade = getBaitGradeForBiome(biomeId, autoBaitSettings, autoBiomeCompetitionBiomes, state);
+			const baitId = getBaitIdForBiome(biomeId, baitGrade);
+			if (!baitId) return;
+			if (result?.equippedBait !== baitId) {
+				checkNow({ biomeId });
+				return;
+			}
+			lastCheckedAt = Date.now();
+			const contextLabel = state.autoBiomeWeatherByBiome?.[biomeId]?.weather === GOLD_BREEZE_WEATHER$1 ? "金风" : AUTO_BAIT_CONTEXT_LABELS[baitContext];
+			if (baitGrade === "default") {
+				updateSnapshot({
+					baitId,
+					quantity: null,
+					nextStatus: `${contextLabel} · ${BAIT_GRADE_LABELS.default} · 无限`
+				});
+				return;
+			}
+			const quantity = normalizeQuantity$1(result?.baitQuantity);
+			updateSnapshot({
+				baitId,
+				quantity,
+				nextStatus: `${contextLabel} · ${getBaitLabel(baitId, baitGrade, biomeId)} · ${quantity.toLocaleString()} 个`
+			});
+			if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) checkNow({ biomeId });
+		}
+		return {
+			checkNow,
+			getSnapshot,
+			handleCastResult,
+			handleStateChanged(options = {}) {
+				return checkNow(options);
+			},
+			isChecking() {
+				return checking;
+			}
+		};
+	}
 	var WEATHER_LABELS = {
 		clear: "晴朗",
 		rain: "雨天",
@@ -31,12 +274,13 @@
 		heatwave: "热浪",
 		storm: "暴风",
 		blight: "枯萎",
-		gold_breeze: "黄金微风",
+		gold_breeze: "金风",
 		arcane_surge: "奥术涌动"
 	};
 	var COMPETITION_HOOK_DEBOUNCE = 1e3;
+	var GOLD_BREEZE_WEATHER = "gold_breeze";
 	var WEATHER_FALLBACK_FRESHNESS = 6e4;
-	function normalizeBiomeId$2(value) {
+	function normalizeBiomeId$1(value) {
 		const biomeId = Number(value);
 		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
 	}
@@ -49,7 +293,7 @@
 		if (!source || typeof source !== "object" || Array.isArray(source)) return {};
 		const weatherByBiome = {};
 		for (const [rawBiomeId, rawWeather] of Object.entries(source)) {
-			const biomeId = normalizeBiomeId$2(rawBiomeId);
+			const biomeId = normalizeBiomeId$1(rawBiomeId);
 			if (!biomeId || !rawWeather || typeof rawWeather !== "object") continue;
 			weatherByBiome[biomeId] = {
 				weather: String(rawWeather.weather ?? "clear"),
@@ -60,7 +304,7 @@
 	}
 	function normalizeWeatherResponse(pathname, payload) {
 		if (pathname === "/api/game/weather" || pathname === "stream") return normalizeWeatherByBiome(payload);
-		const biomeId = normalizeBiomeId$2(String(pathname).match(/^\/api\/game\/weather\/(\d+)$/)?.[1]);
+		const biomeId = normalizeBiomeId$1(String(pathname).match(/^\/api\/game\/weather\/(\d+)$/)?.[1]);
 		const weather = payload?.weather && typeof payload.weather === "object" ? payload.weather : payload;
 		if (!biomeId || !weather || typeof weather !== "object") return {};
 		return { [biomeId]: {
@@ -69,7 +313,7 @@
 		} };
 	}
 	function getBiomeScore(biomeId, xpBonus, biomeWeight) {
-		const normalizedBiomeId = normalizeBiomeId$2(biomeId) ?? 1;
+		const normalizedBiomeId = normalizeBiomeId$1(biomeId) ?? 1;
 		return normalizeXpBonus(xpBonus) + (normalizedBiomeId - 1) * normalizeXpBonus(biomeWeight);
 	}
 	function findAvailableBaitForBiome(player, biomeId) {
@@ -92,41 +336,43 @@
 		return null;
 	}
 	function getCompetitionType(biomeId, competitionBiomes) {
-		if (biomeId === normalizeBiomeId$2(competitionBiomes?.guildTournamentBiomeId)) return "guild";
-		if (biomeId === normalizeBiomeId$2(competitionBiomes?.personalDerbyBiomeId)) return "personal";
+		if (biomeId === normalizeBiomeId$1(competitionBiomes?.guildTournamentBiomeId)) return "guild";
+		if (biomeId === normalizeBiomeId$1(competitionBiomes?.personalDerbyBiomeId)) return "personal";
 		return null;
 	}
 	function resolveCompetitionBiomes({ derbyResponse, guildResponse, tournamentResponse, tournamentStandingsResponse }) {
 		const activeTournament = tournamentResponse?.active;
 		const activeDerby = derbyResponse?.active;
-		const guildId = normalizeBiomeId$2(guildResponse?.guild?.guild_id);
+		const guildId = normalizeBiomeId$1(guildResponse?.guild?.guild_id);
 		const standings = Array.isArray(tournamentStandingsResponse?.standings) ? tournamentStandingsResponse.standings : [];
 		return {
-			guildTournamentBiomeId: activeTournament?.is_registered === true || guildId !== null && standings.some((entry) => normalizeBiomeId$2(entry?.guild_id) === guildId) ? normalizeBiomeId$2(activeTournament?.biome_id) : null,
-			personalDerbyBiomeId: activeDerby?.is_registered === true ? normalizeBiomeId$2(activeDerby.biome_id) : null
+			guildTournamentBiomeId: activeTournament?.is_registered === true || guildId !== null && standings.some((entry) => normalizeBiomeId$1(entry?.guild_id) === guildId) ? normalizeBiomeId$1(activeTournament?.biome_id) : null,
+			personalDerbyBiomeId: activeDerby?.is_registered === true ? normalizeBiomeId$1(activeDerby.biome_id) : null
 		};
 	}
-	function selectBestBiome({ biomeWeight, competitionBiomes, player, preferCompetitionBiomes = false, weatherByBiome }) {
+	function selectBestBiome({ biomeWeight, chaseGoldBreeze = false, competitionBiomes, player, preferCompetitionBiomes = false, weatherByBiome }) {
 		const unlockedBiomes = Array.isArray(player?.unlockedBiomes) ? player.unlockedBiomes : [player?.currentBiome ?? 1];
 		const candidates = [];
 		for (const rawBiomeId of unlockedBiomes) {
-			const biomeId = normalizeBiomeId$2(rawBiomeId);
+			const biomeId = normalizeBiomeId$1(rawBiomeId);
 			const weather = weatherByBiome?.[biomeId];
 			if (!biomeId || !weather) continue;
 			const competitionType = preferCompetitionBiomes ? getCompetitionType(biomeId, competitionBiomes) : null;
+			const goldBreezePriority = chaseGoldBreeze && weather.weather === GOLD_BREEZE_WEATHER ? 1 : 0;
 			candidates.push({
 				baitId: findAvailableBaitForBiome(player, biomeId),
 				biomeId,
 				competitionPriority: competitionType === "guild" ? 2 : competitionType === "personal" ? 1 : 0,
 				...competitionType ? { competitionType } : {},
+				goldBreezePriority,
 				score: getBiomeScore(biomeId, weather.xpBonus, biomeWeight),
 				weather: weather.weather,
 				xpBonus: weather.xpBonus
 			});
 		}
-		candidates.sort((left, right) => right.competitionPriority - left.competitionPriority || right.score - left.score || right.biomeId - left.biomeId);
+		candidates.sort((left, right) => right.competitionPriority - left.competitionPriority || right.goldBreezePriority - left.goldBreezePriority || right.score - left.score || right.biomeId - left.biomeId);
 		if (candidates.length === 0) return null;
-		const { competitionPriority, ...bestBiome } = candidates[0];
+		const { competitionPriority, goldBreezePriority, ...bestBiome } = candidates[0];
 		return bestBiome;
 	}
 	function getBiomeName(biomeId) {
@@ -143,16 +389,17 @@
 		const signedXpBonus = target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
 		return `${target.competitionType === "guild" ? "公会锦标赛优先 · " : target.competitionType === "personal" ? "个人比赛优先 · " : ""}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
 	}
-	function getErrorMessage$1(error) {
+	function getErrorMessage(error) {
 		return String(error?.message ?? error ?? "未知错误");
 	}
-	async function autoEquipForBiome(player, target, { skipBait = false } = {}) {
+	async function autoEquipForBiome(player, target, { skipBait = false, skipRod = false } = {}) {
 		const api = window.ApiService;
 		if (!skipBait && target.baitId && target.baitId !== player.equippedBait) try {
 			await api.equipBait(target.baitId);
 		} catch (error) {
 			console.warn("[自动换图] 无法自动装备目标地图鱼饵：", error);
 		}
+		if (skipRod) return;
 		const currentRod = String(player.equippedRod ?? "rod_default");
 		if (!currentRod.startsWith("rod_biome_") || currentRod === `rod_biome_${target.biomeId}`) return;
 		const ownedRods = Array.isArray(player.ownedRods) ? player.ownedRods : [];
@@ -349,23 +596,27 @@
 			if (player?.boat) {
 				target = null;
 				setStatus("组队中暂不自动换图");
-				await notifyBiomeReady(normalizeBiomeId$2(player.currentBiome));
+				await notifyBiomeReady(normalizeBiomeId$1(player.currentBiome));
 				return;
 			}
 			target = selectBestBiome({
 				biomeWeight: autoBiomeSettings.biomeWeight,
+				chaseGoldBreeze: autoBiomeSettings.chaseGoldBreeze === true,
 				competitionBiomes,
 				player,
 				preferCompetitionBiomes: autoBiomeSettings.preferCompetitionBiomes !== false,
 				weatherByBiome
 			});
+			const chasingGoldBreeze = autoBiomeSettings.chaseGoldBreeze === true && target?.weather === GOLD_BREEZE_WEATHER;
+			if (chasingGoldBreeze) target.baitId = getBaitIdForBiome(target.biomeId, autoBaitSettings?.goldBreezeBaitGrade ?? "default");
 			if (!target) {
 				setStatus("没有可用的已解锁地图数据");
-				await notifyBiomeReady(normalizeBiomeId$2(player.currentBiome));
+				await notifyBiomeReady(normalizeBiomeId$1(player.currentBiome));
 				return;
 			}
 			const summary = formatTargetSummary(target);
-			if (normalizeBiomeId$2(player.currentBiome) === target.biomeId) {
+			if (normalizeBiomeId$1(player.currentBiome) === target.biomeId) {
+				if (chasingGoldBreeze && autoBaitSettings?.enabled !== true) await autoEquipForBiome(player, target, { skipRod: true });
 				setStatus(`已在 ${summary}`);
 				await notifyBiomeReady(target.biomeId);
 				return;
@@ -380,7 +631,7 @@
 				await notifyBiomeReady(target.biomeId);
 			} catch (error) {
 				console.error("[自动换图] 切换地图失败：", error);
-				setStatus(`切图失败：${getErrorMessage$1(error)}`);
+				setStatus(`切图失败：${getErrorMessage(error)}`);
 			} finally {
 				switching = false;
 			}
@@ -389,7 +640,7 @@
 			return evaluateBestBiome();
 		}
 		function handleCastResult(result) {
-			if (target && normalizeBiomeId$2(result?.currentBiome) === target.biomeId) setStatus(`已在 ${formatTargetSummary(target)}`);
+			if (target && normalizeBiomeId$1(result?.currentBiome) === target.biomeId) setStatus(`已在 ${formatTargetSummary(target)}`);
 		}
 		function start() {
 			scheduleHourlyFallback();
@@ -412,245 +663,6 @@
 			},
 			refreshWeather,
 			start
-		};
-	}
-	var DEFAULT_BAIT_ID = "bait_default";
-	var PURCHASE_RETRY_DELAY = 6e4;
-	var BAIT_GRADE_LABELS = {
-		default: "默认饵",
-		low: "低级饵",
-		medium: "中级饵（+250 幸运）",
-		high: "高级饵（+500 幸运）",
-		super: "超级饵（+1000 幸运）"
-	};
-	var AUTO_BAIT_CONTEXT_LABELS = {
-		guild: "公会赛",
-		personal: "个人赛",
-		regular: "常规"
-	};
-	function normalizeBiomeId$1(value) {
-		const biomeId = Number(value);
-		return Number.isInteger(biomeId) && biomeId > 0 ? biomeId : null;
-	}
-	function normalizeQuantity$1(value) {
-		const quantity = Number(value);
-		return Number.isFinite(quantity) && quantity >= 0 ? Math.floor(quantity) : 0;
-	}
-	function getBaitIdForBiome(biomeId, baitGrade) {
-		if (baitGrade === "default") return DEFAULT_BAIT_ID;
-		const normalizedBiomeId = normalizeBiomeId$1(biomeId);
-		return normalizedBiomeId ? `bait_${normalizedBiomeId}_${baitGrade}` : null;
-	}
-	function getAutoBaitContext(biomeId, competitionBiomes) {
-		const normalizedBiomeId = normalizeBiomeId$1(biomeId);
-		if (normalizedBiomeId && normalizedBiomeId === normalizeBiomeId$1(competitionBiomes?.guildTournamentBiomeId)) return "guild";
-		if (normalizedBiomeId && normalizedBiomeId === normalizeBiomeId$1(competitionBiomes?.personalDerbyBiomeId)) return "personal";
-		return "regular";
-	}
-	function getBaitGradeForBiome(biomeId, autoBaitSettings, competitionBiomes) {
-		const regularBaitGrade = autoBaitSettings?.regularBaitGrade ?? autoBaitSettings?.baitGrade ?? "low";
-		const context = getAutoBaitContext(biomeId, competitionBiomes);
-		if (context === "guild") return autoBaitSettings?.guildCompetitionBaitGrade ?? regularBaitGrade;
-		if (context === "personal") return autoBaitSettings?.personalCompetitionBaitGrade ?? regularBaitGrade;
-		return regularBaitGrade;
-	}
-	function shouldPurchaseBait(quantity, minimumQuantity, baitGrade) {
-		return baitGrade !== "default" && normalizeQuantity$1(quantity) < normalizeQuantity$1(minimumQuantity);
-	}
-	function getBaitById$1(baitId) {
-		if (typeof window.getBaitById === "function") try {
-			const bait = window.getBaitById(baitId);
-			if (bait) return bait;
-		} catch {}
-		return Array.isArray(window.BAITS) ? window.BAITS.find((bait) => bait?.id === baitId) : null;
-	}
-	function getBaitLabel(baitId, baitGrade, biomeId) {
-		const catalogName = String(getBaitById$1(baitId)?.name ?? "").trim();
-		const gradeLabel = BAIT_GRADE_LABELS[baitGrade] ?? baitGrade;
-		if (baitGrade === "default") return catalogName ? `${gradeLabel}（${catalogName}）` : gradeLabel;
-		return `[B${biomeId}] ${gradeLabel}${catalogName ? `（${catalogName}）` : ""}`;
-	}
-	function getErrorMessage(error) {
-		return String(error?.message ?? error ?? "未知错误");
-	}
-	function createAutoBaitController({ getPlayer, getState, onStateChange }) {
-		let checking = false;
-		let currentBaitId = null;
-		let currentQuantity = null;
-		let lastCheckedAt = 0;
-		let lastPurchasedAt = 0;
-		let retryAfter = 0;
-		let retryBaitId = null;
-		let status = "未启用";
-		let checkQueue = Promise.resolve();
-		function notifyStateChanged() {
-			onStateChange?.();
-		}
-		function updateSnapshot({ baitId, quantity, nextStatus }) {
-			if (baitId !== void 0) currentBaitId = baitId;
-			if (quantity !== void 0) currentQuantity = quantity;
-			if (nextStatus !== void 0) status = nextStatus;
-			notifyStateChanged();
-		}
-		function getSnapshot() {
-			return {
-				autoBaitCurrentBaitId: currentBaitId,
-				autoBaitCurrentQuantity: currentQuantity,
-				autoBaitLastCheckedAt: lastCheckedAt,
-				autoBaitLastPurchasedAt: lastPurchasedAt,
-				autoBaitStatus: status
-			};
-		}
-		async function equipBait(api, player, baitId, baitLabel) {
-			if (player.equippedBait === baitId) return;
-			const result = await api.equipBait(baitId);
-			if (result?.success !== true) throw new Error(result?.message ?? `无法装备${baitLabel}`);
-		}
-		async function evaluate({ biomeId: requestedBiomeId = null, force = false }) {
-			const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = getState();
-			if (!autoBaitSettings.enabled) {
-				updateSnapshot({
-					baitId: null,
-					quantity: null,
-					nextStatus: "未启用"
-				});
-				return;
-			}
-			if (!enabled) {
-				updateSnapshot({
-					baitId: null,
-					quantity: null,
-					nextStatus: "脚本启动后自动检查"
-				});
-				return;
-			}
-			const api = window.ApiService;
-			if (typeof api?.equipBait !== "function") {
-				updateSnapshot({ nextStatus: "等待游戏鱼饵接口" });
-				return;
-			}
-			const player = getPlayer?.();
-			if (!player) {
-				updateSnapshot({ nextStatus: "等待游戏角色数据" });
-				return;
-			}
-			checking = true;
-			updateSnapshot({ nextStatus: "正在检查鱼饵库存" });
-			let attemptedBaitId = null;
-			try {
-				const biomeId = normalizeBiomeId$1(requestedBiomeId) ?? normalizeBiomeId$1(player?.currentBiome);
-				const baitContext = getAutoBaitContext(biomeId, autoBiomeCompetitionBiomes);
-				const baitGrade = getBaitGradeForBiome(biomeId, autoBaitSettings, autoBiomeCompetitionBiomes);
-				const baitId = getBaitIdForBiome(biomeId, baitGrade);
-				attemptedBaitId = baitId;
-				if (!baitId) throw new Error("无法识别当前地图");
-				if (!force && baitId === retryBaitId && Date.now() < retryAfter) return;
-				if (baitGrade !== "default" && typeof api?.buyBait !== "function") {
-					updateSnapshot({ nextStatus: "等待游戏鱼饵购买接口" });
-					return;
-				}
-				const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
-				const contextLabel = AUTO_BAIT_CONTEXT_LABELS[baitContext];
-				lastCheckedAt = Date.now();
-				if (baitGrade === "default") {
-					await equipBait(api, player, baitId, baitLabel);
-					retryAfter = 0;
-					retryBaitId = null;
-					updateSnapshot({
-						baitId,
-						quantity: null,
-						nextStatus: `${contextLabel} · ${baitLabel} · 无限`
-					});
-					return;
-				}
-				let quantity = normalizeQuantity$1(player?.baitInventory?.[baitId]);
-				let purchased = false;
-				if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) {
-					const bait = getBaitById$1(baitId);
-					const totalCost = Number(bait?.price) * autoBaitSettings.purchaseQuantity;
-					if (Number.isFinite(totalCost) && totalCost > Number(player?.gold ?? 0)) {
-						if (quantity > 0) await equipBait(api, player, baitId, baitLabel);
-						retryBaitId = baitId;
-						retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
-						updateSnapshot({
-							baitId,
-							quantity,
-							nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币`
-						});
-						return;
-					}
-					updateSnapshot({
-						baitId,
-						quantity,
-						nextStatus: `正在购买 ${baitLabel} ×${autoBaitSettings.purchaseQuantity}`
-					});
-					const result = await api.buyBait(baitId, autoBaitSettings.purchaseQuantity);
-					if (result?.success !== true) throw new Error(result?.message ?? "游戏未确认购买成功");
-					quantity = Number.isFinite(Number(result.newBaitQuantity)) ? normalizeQuantity$1(result.newBaitQuantity) : quantity + autoBaitSettings.purchaseQuantity;
-					lastPurchasedAt = Date.now();
-					purchased = true;
-				}
-				await equipBait(api, player, baitId, baitLabel);
-				retryAfter = 0;
-				retryBaitId = null;
-				updateSnapshot({
-					baitId,
-					quantity,
-					nextStatus: purchased ? `已购买${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个` : `${contextLabel} · ${baitLabel} · ${quantity.toLocaleString()} 个`
-				});
-			} catch (error) {
-				console.error("[自动买鱼饵] 检查或购买失败：", error);
-				retryBaitId = attemptedBaitId ?? currentBaitId;
-				retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
-				updateSnapshot({ nextStatus: `鱼饵处理失败：${getErrorMessage(error)}` });
-			} finally {
-				checking = false;
-			}
-		}
-		function checkNow(options = {}) {
-			checkQueue = checkQueue.then(() => evaluate(options), () => evaluate(options));
-			return checkQueue;
-		}
-		function handleCastResult(result) {
-			const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = getState();
-			if (!autoBaitSettings.enabled || !enabled) return;
-			const biomeId = normalizeBiomeId$1(result?.currentBiome);
-			const baitContext = getAutoBaitContext(biomeId, autoBiomeCompetitionBiomes);
-			const baitGrade = getBaitGradeForBiome(biomeId, autoBaitSettings, autoBiomeCompetitionBiomes);
-			const baitId = getBaitIdForBiome(biomeId, baitGrade);
-			if (!baitId) return;
-			if (result?.equippedBait !== baitId) {
-				checkNow({ biomeId });
-				return;
-			}
-			lastCheckedAt = Date.now();
-			const contextLabel = AUTO_BAIT_CONTEXT_LABELS[baitContext];
-			if (baitGrade === "default") {
-				updateSnapshot({
-					baitId,
-					quantity: null,
-					nextStatus: `${contextLabel} · ${BAIT_GRADE_LABELS.default} · 无限`
-				});
-				return;
-			}
-			const quantity = normalizeQuantity$1(result?.baitQuantity);
-			updateSnapshot({
-				baitId,
-				quantity,
-				nextStatus: `${contextLabel} · ${getBaitLabel(baitId, baitGrade, biomeId)} · ${quantity.toLocaleString()} 个`
-			});
-			if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) checkNow({ biomeId });
-		}
-		return {
-			checkNow,
-			getSnapshot,
-			handleCastResult,
-			handleStateChanged(options = {}) {
-				return checkNow(options);
-			},
-			isChecking() {
-				return checking;
-			}
 		};
 	}
 	var CONFIG = {
@@ -1762,6 +1774,7 @@
 	}
 	function loadAutoBiomeSettings() {
 		const defaults = {
+			chaseGoldBreeze: false,
 			enabled: false,
 			biomeWeight: 5,
 			preferCompetitionBiomes: true
@@ -1770,6 +1783,7 @@
 			const savedSettings = JSON.parse(localStorage.getItem(AUTO_BIOME_SETTINGS_STORAGE_KEY));
 			if (!savedSettings || typeof savedSettings !== "object") return defaults;
 			return {
+				chaseGoldBreeze: savedSettings.chaseGoldBreeze === true,
 				enabled: savedSettings.enabled === true,
 				biomeWeight: normalizeAutoBiomeWeight(savedSettings.biomeWeight, defaults.biomeWeight),
 				preferCompetitionBiomes: savedSettings.preferCompetitionBiomes !== false
@@ -1801,6 +1815,7 @@
 	function loadAutoBaitSettings() {
 		const defaults = {
 			enabled: false,
+			goldBreezeBaitGrade: "default",
 			guildCompetitionBaitGrade: "low",
 			minimumQuantity: 100,
 			personalCompetitionBaitGrade: "low",
@@ -1813,6 +1828,7 @@
 			const legacyBaitGrade = normalizeAutoBaitGrade(savedSettings.baitGrade, defaults.regularBaitGrade);
 			return {
 				enabled: savedSettings.enabled === true,
+				goldBreezeBaitGrade: normalizeAutoBaitGrade(savedSettings.goldBreezeBaitGrade, defaults.goldBreezeBaitGrade),
 				guildCompetitionBaitGrade: normalizeAutoBaitGrade(savedSettings.guildCompetitionBaitGrade, legacyBaitGrade),
 				minimumQuantity: normalizeAutoBaitMinimumQuantity(savedSettings.minimumQuantity, defaults.minimumQuantity),
 				personalCompetitionBaitGrade: normalizeAutoBaitGrade(savedSettings.personalCompetitionBaitGrade, legacyBaitGrade),
@@ -1908,7 +1924,7 @@
 		let earningsBiomeFilter = "current";
 		let earningsBaitFilter = "current";
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitMinimumQuantity, setAutoBaitPurchaseQuantity, setAutoBiomeEnabled, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitMinimumQuantity, setAutoBaitPurchaseQuantity, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
@@ -2187,6 +2203,23 @@
             仅优先已参与且已解锁的比赛地图；公会锦标赛优先于个人比赛。
           </div>
 
+          <label class="option-row">
+            <span>追逐金风</span>
+            <span class="switch">
+              <input
+                id="auto-biome-gold-breeze-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="无比赛时优先选择金风地图"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
+          <div class="field-help">
+            无可用比赛地图时优先选择金风天气；没有金风时再按经验评分选择。
+          </div>
+
           <div
             class="choice-list choice-list-three"
             role="radiogroup"
@@ -2219,7 +2252,7 @@
           </div>
 
           <div class="field-help">
-            无可用比赛地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+            无可用比赛地图和需追逐的金风地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
           </div>
 
           <div class="row">
@@ -2257,6 +2290,13 @@
             </select>
           </label>
 
+          <label class="field">
+            <span class="field-label">金风鱼饵</span>
+            <select id="auto-bait-gold-breeze-grade" class="input">
+              ${baitGradeOptions}
+            </select>
+          </label>
+
           <div id="auto-bait-purchase-settings" class="settings-group">
             <div class="number-grid">
               <label class="field">
@@ -2282,7 +2322,7 @@
             </div>
 
             <div class="field-help">
-              根据当前地图是否为个人赛或公会赛地图选择鱼饵；同一地图同时匹配时优先公会赛设置。库存低于设置值时购买，阈值按 100 的倍数保存。
+              金风天气优先使用独立鱼饵设置，默认为免费默认饵；其他天气根据当前地图是否为个人赛或公会赛地图选择鱼饵。库存低于设置值时购买，阈值按 100 的倍数保存。
             </div>
           </div>
 
@@ -2455,6 +2495,7 @@
 				autoBiomeStatus: shadowRoot.querySelector("#auto-biome-status"),
 				autoBiomeToggle: shadowRoot.querySelector("#auto-biome-toggle"),
 				autoBiomeCompetitionToggle: shadowRoot.querySelector("#auto-biome-competition-toggle"),
+				autoBiomeGoldBreezeToggle: shadowRoot.querySelector("#auto-biome-gold-breeze-toggle"),
 				autoBiomeCompetitionStatus: shadowRoot.querySelector("#auto-biome-competition-status"),
 				autoBiomeWeightInputs: shadowRoot.querySelectorAll("input[name=\"auto-biome-weight\"]"),
 				autoBiomeUpdatedAt: shadowRoot.querySelector("#auto-biome-updated-at"),
@@ -2463,6 +2504,7 @@
 				autoBaitRegularGrade: shadowRoot.querySelector("#auto-bait-regular-grade"),
 				autoBaitPersonalGrade: shadowRoot.querySelector("#auto-bait-personal-grade"),
 				autoBaitGuildGrade: shadowRoot.querySelector("#auto-bait-guild-grade"),
+				autoBaitGoldBreezeGrade: shadowRoot.querySelector("#auto-bait-gold-breeze-grade"),
 				autoBaitPurchaseSettings: shadowRoot.querySelector("#auto-bait-purchase-settings"),
 				autoBaitMinimumQuantity: shadowRoot.querySelector("#auto-bait-minimum-quantity"),
 				autoBaitPurchaseQuantity: shadowRoot.querySelector("#auto-bait-purchase-quantity"),
@@ -2528,6 +2570,9 @@
 			ui.autoBiomeCompetitionToggle.addEventListener("change", (event) => {
 				setAutoBiomePreferCompetition(event.currentTarget.checked);
 			});
+			ui.autoBiomeGoldBreezeToggle.addEventListener("change", (event) => {
+				setAutoBiomeChaseGoldBreeze(event.currentTarget.checked);
+			});
 			ui.autoBaitToggle.addEventListener("change", (event) => {
 				setAutoBaitEnabled(event.currentTarget.checked);
 			});
@@ -2539,6 +2584,9 @@
 			});
 			ui.autoBaitGuildGrade.addEventListener("change", (event) => {
 				setAutoBaitGrade("guildCompetitionBaitGrade", event.currentTarget.value);
+			});
+			ui.autoBaitGoldBreezeGrade.addEventListener("change", (event) => {
+				setAutoBaitGrade("goldBreezeBaitGrade", event.currentTarget.value);
 			});
 			ui.autoBaitMinimumQuantity.addEventListener("change", (event) => {
 				setAutoBaitMinimumQuantity(event.currentTarget.value);
@@ -2878,6 +2926,8 @@
 			ui.autoBiomeStatus.textContent = autoBiomeStatus;
 			ui.autoBiomeCompetitionToggle.checked = autoBiomeSettings.preferCompetitionBiomes;
 			ui.autoBiomeCompetitionToggle.setAttribute("aria-checked", autoBiomeSettings.preferCompetitionBiomes ? "true" : "false");
+			ui.autoBiomeGoldBreezeToggle.checked = autoBiomeSettings.chaseGoldBreeze;
+			ui.autoBiomeGoldBreezeToggle.setAttribute("aria-checked", autoBiomeSettings.chaseGoldBreeze ? "true" : "false");
 			ui.autoBiomeCompetitionStatus.textContent = autoBiomeCompetitionStatus;
 			for (const input of ui.autoBiomeWeightInputs) input.checked = Number(input.value) === autoBiomeSettings.biomeWeight;
 			ui.autoBiomeUpdatedAt.textContent = autoBiomeLastUpdatedAt ? new Date(autoBiomeLastUpdatedAt).toLocaleTimeString() : "等待接口数据";
@@ -2891,7 +2941,8 @@
 			ui.autoBaitRegularGrade.value = autoBaitSettings.regularBaitGrade;
 			ui.autoBaitPersonalGrade.value = autoBaitSettings.personalCompetitionBaitGrade;
 			ui.autoBaitGuildGrade.value = autoBaitSettings.guildCompetitionBaitGrade;
-			ui.autoBaitPurchaseSettings.hidden = autoBaitSettings.regularBaitGrade === "default" && autoBaitSettings.personalCompetitionBaitGrade === "default" && autoBaitSettings.guildCompetitionBaitGrade === "default";
+			ui.autoBaitGoldBreezeGrade.value = autoBaitSettings.goldBreezeBaitGrade;
+			ui.autoBaitPurchaseSettings.hidden = autoBaitSettings.regularBaitGrade === "default" && autoBaitSettings.personalCompetitionBaitGrade === "default" && autoBaitSettings.guildCompetitionBaitGrade === "default" && autoBaitSettings.goldBreezeBaitGrade === "default";
 			ui.autoBaitMinimumQuantity.value = String(autoBaitSettings.minimumQuantity);
 			ui.autoBaitPurchaseQuantity.value = String(autoBaitSettings.purchaseQuantity);
 			ui.autoBaitLastPurchasedAt.textContent = autoBaitLastPurchasedAt ? new Date(autoBaitLastPurchasedAt).toLocaleTimeString() : "暂无";
@@ -2951,6 +3002,7 @@
 	var gameState = createGameStateStore();
 	var fishingActivityWatchdog = createFishingActivityWatchdog();
 	var AUTO_BAIT_GRADE_FIELDS = new Set([
+		"goldBreezeBaitGrade",
 		"guildCompetitionBaitGrade",
 		"personalCompetitionBaitGrade",
 		"regularBaitGrade"
@@ -3325,6 +3377,15 @@
 		panel.renderAutoBiomeSettings();
 		handleAutomationStateChanged();
 	}
+	function setAutoBiomeChaseGoldBreeze(nextEnabled) {
+		autoBiomeSettings = {
+			...autoBiomeSettings,
+			chaseGoldBreeze: Boolean(nextEnabled)
+		};
+		saveAutoBiomeSettings(autoBiomeSettings);
+		panel.renderAutoBiomeSettings();
+		handleAutomationStateChanged({ forceBait: true });
+	}
 	function setAutoBiomePreferCompetition(nextEnabled) {
 		autoBiomeSettings = {
 			...autoBiomeSettings,
@@ -3429,6 +3490,7 @@
 				setAutoBaitMinimumQuantity,
 				setAutoBaitPurchaseQuantity,
 				setAutoBiomeEnabled,
+				setAutoBiomeChaseGoldBreeze,
 				setAutoBiomePreferCompetition,
 				setAutoBiomeWeight,
 				setCaptchaBypassEnabled,
