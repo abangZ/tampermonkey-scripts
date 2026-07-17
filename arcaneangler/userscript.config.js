@@ -1,5 +1,5 @@
 export const userscriptFileName = 'arcane-angler-auto-cast.user.js';
-export const userscriptVersion = '2.8.0';
+export const userscriptVersion = '2.9.0';
 
 const installUrl =
     'https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/' +
@@ -10,7 +10,7 @@ export const userscriptMetadata = {
     namespace: 'arcane-angler-auto-cast',
     version: userscriptVersion,
     author: 'Codex',
-    description: '自动抛竿和自动打 Boss，带随机等待和启停控制',
+    description: '支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息',
     homepageURL: 'https://github.com/abangZ/tampermonkey-scripts',
     updateURL: installUrl,
     downloadURL: installUrl,

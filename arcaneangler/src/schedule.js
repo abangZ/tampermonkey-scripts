@@ -16,11 +16,15 @@ export function formatScheduleDuration(milliseconds) {
 export function createScheduleController({
     getCaptcha,
     getState,
+    now = Date.now,
+    onRestTick,
     onWorkStarted,
+    prepareForWork,
     renderSettings,
     renderStatus,
     setNextDelay,
     setStatus,
+    sleepFor = sleep,
 }) {
     let phase = 'work';
     let endsAt = 0;
@@ -52,7 +56,7 @@ export function createScheduleController({
 
         phase = nextPhase;
         duration = getRandomizedDuration(baseMinutes);
-        endsAt = Date.now() + duration;
+        endsAt = now() + duration;
         renderSettings();
 
         if (nextPhase === 'work') {
@@ -72,8 +76,12 @@ export function createScheduleController({
             scheduleSettings.enabled &&
             phase === 'work' &&
             endsAt > 0 &&
-            Date.now() >= endsAt
+            now() >= endsAt
         );
+    }
+
+    function isRestActive() {
+        return phase === 'rest' && endsAt > 0 && now() < endsAt;
     }
 
     function shouldEnterRest(currentLoopId) {
@@ -123,18 +131,25 @@ export function createScheduleController({
                 return false;
             }
 
-            const remaining = endsAt - Date.now();
+            const remaining = endsAt - now();
 
             if (remaining <= 0) {
+                if ((await prepareForWork?.()) === false) {
+                    await sleepFor(CONFIG.gameAutoFishingPollInterval);
+                    continue;
+                }
+
                 startPhase('work');
                 return true;
             }
 
-            setStatus('定时休息中');
+            const restStatus = await onRestTick?.();
+
+            setStatus(restStatus || '定时休息中');
             setNextDelay(`剩余 ${formatScheduleDuration(remaining)}`);
             renderStatus(remaining);
 
-            await sleep(Math.min(1000, remaining));
+            await sleepFor(Math.min(1000, remaining));
         }
     }
 
@@ -146,6 +161,7 @@ export function createScheduleController({
                 schedulePhase: phase,
             };
         },
+        isRestActive,
         isWorkExpired,
         reset,
         shouldEnterRest,

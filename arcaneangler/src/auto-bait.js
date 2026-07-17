@@ -194,7 +194,9 @@ export function createAutoBaitController({
     }
 
     async function evaluate({
+        baitGrade: requestedBaitGrade = null,
         biomeId: requestedBiomeId = null,
+        contextLabel: requestedContextLabel = null,
         force = false,
     }) {
         const state = getState();
@@ -206,7 +208,7 @@ export function createAutoBaitController({
                 quantity: null,
                 nextStatus: '未启用',
             });
-            return;
+            return false;
         }
 
         if (!enabled) {
@@ -215,21 +217,21 @@ export function createAutoBaitController({
                 quantity: null,
                 nextStatus: '脚本启动后自动检查',
             });
-            return;
+            return false;
         }
 
         const api = window.ApiService;
 
         if (typeof api?.equipBait !== 'function') {
             updateSnapshot({ nextStatus: '等待游戏鱼饵接口' });
-            return;
+            return false;
         }
 
         const player = getPlayer?.();
 
         if (!player) {
             updateSnapshot({ nextStatus: '等待游戏角色数据' });
-            return;
+            return false;
         }
 
         checking = true;
@@ -244,12 +246,17 @@ export function createAutoBaitController({
                 biomeId,
                 autoBiomeCompetitionBiomes,
             );
-            const baitGrade = getBaitGradeForBiome(
-                biomeId,
-                autoBaitSettings,
-                autoBiomeCompetitionBiomes,
-                state,
-            );
+            const baitGrade = Object.hasOwn(
+                BAIT_GRADE_LABELS,
+                requestedBaitGrade,
+            )
+                ? requestedBaitGrade
+                : getBaitGradeForBiome(
+                      biomeId,
+                      autoBaitSettings,
+                      autoBiomeCompetitionBiomes,
+                      state,
+                  );
             const baitId = getBaitIdForBiome(biomeId, baitGrade);
 
             attemptedBaitId = baitId;
@@ -259,20 +266,21 @@ export function createAutoBaitController({
             }
 
             if (!force && baitId === retryBaitId && Date.now() < retryAfter) {
-                return;
+                return false;
             }
 
             if (baitGrade !== 'default' && typeof api?.buyBait !== 'function') {
                 updateSnapshot({ nextStatus: '等待游戏鱼饵购买接口' });
-                return;
+                return false;
             }
 
             const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
             const contextLabel =
-                state.autoBiomeWeatherByBiome?.[biomeId]?.weather ===
+                requestedContextLabel ??
+                (state.autoBiomeWeatherByBiome?.[biomeId]?.weather ===
                 GOLD_BREEZE_WEATHER
                     ? '金风'
-                    : AUTO_BAIT_CONTEXT_LABELS[baitContext];
+                    : AUTO_BAIT_CONTEXT_LABELS[baitContext]);
 
             lastCheckedAt = Date.now();
 
@@ -285,7 +293,7 @@ export function createAutoBaitController({
                     quantity: null,
                     nextStatus: `${contextLabel} · ${baitLabel} · 无限`,
                 });
-                return;
+                return true;
             }
 
             let quantity = normalizeQuantity(player?.baitInventory?.[baitId]);
@@ -339,7 +347,7 @@ export function createAutoBaitController({
                         quantity,
                         nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币，已切换免费饵`,
                     });
-                    return;
+                    return true;
                 }
 
                 updateSnapshot({
@@ -375,6 +383,7 @@ export function createAutoBaitController({
                     ? `已购买${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个`
                     : `${contextLabel} · ${baitLabel} · ${quantity.toLocaleString()} 个`,
             });
+            return true;
         } catch (error) {
             console.error('[自动买鱼饵] 检查或购买失败：', error);
             retryBaitId = attemptedBaitId ?? currentBaitId;
@@ -382,6 +391,7 @@ export function createAutoBaitController({
             updateSnapshot({
                 nextStatus: `鱼饵处理失败：${getErrorMessage(error)}`,
             });
+            return false;
         } finally {
             checking = false;
         }
@@ -473,6 +483,16 @@ export function createAutoBaitController({
         },
         isChecking() {
             return checking;
+        },
+        prepareGameAutoFishing(baitGrade) {
+            if (getState().autoBaitSettings.enabled !== true) {
+                return Promise.resolve(true);
+            }
+
+            return checkNow({
+                baitGrade,
+                contextLabel: '内置自动钓鱼',
+            });
         },
     };
 }

@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.8.0
+// @version      2.9.0
 // @author       Codex
-// @description  自动抛竿和自动打 Boss，带随机等待和启停控制
+// @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
 // @downloadURL  https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -118,7 +118,7 @@
 			const result = await api.equipBait(baitId);
 			if (result?.success !== true) throw new Error(result?.message ?? `无法装备${baitLabel}`);
 		}
-		async function evaluate({ biomeId: requestedBiomeId = null, force = false }) {
+		async function evaluate({ baitGrade: requestedBaitGrade = null, biomeId: requestedBiomeId = null, contextLabel: requestedContextLabel = null, force = false }) {
 			const state = getState();
 			const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = state;
 			if (!autoBaitSettings.enabled) {
@@ -127,7 +127,7 @@
 					quantity: null,
 					nextStatus: "未启用"
 				});
-				return;
+				return false;
 			}
 			if (!enabled) {
 				updateSnapshot({
@@ -135,17 +135,17 @@
 					quantity: null,
 					nextStatus: "脚本启动后自动检查"
 				});
-				return;
+				return false;
 			}
 			const api = window.ApiService;
 			if (typeof api?.equipBait !== "function") {
 				updateSnapshot({ nextStatus: "等待游戏鱼饵接口" });
-				return;
+				return false;
 			}
 			const player = getPlayer?.();
 			if (!player) {
 				updateSnapshot({ nextStatus: "等待游戏角色数据" });
-				return;
+				return false;
 			}
 			checking = true;
 			updateSnapshot({ nextStatus: "正在检查鱼饵库存" });
@@ -153,17 +153,17 @@
 			try {
 				const biomeId = normalizeBiomeId$2(requestedBiomeId) ?? normalizeBiomeId$2(player?.currentBiome);
 				const baitContext = getAutoBaitContext(biomeId, autoBiomeCompetitionBiomes);
-				const baitGrade = getBaitGradeForBiome(biomeId, autoBaitSettings, autoBiomeCompetitionBiomes, state);
+				const baitGrade = Object.hasOwn(BAIT_GRADE_LABELS, requestedBaitGrade) ? requestedBaitGrade : getBaitGradeForBiome(biomeId, autoBaitSettings, autoBiomeCompetitionBiomes, state);
 				const baitId = getBaitIdForBiome(biomeId, baitGrade);
 				attemptedBaitId = baitId;
 				if (!baitId) throw new Error("无法识别当前地图");
-				if (!force && baitId === retryBaitId && Date.now() < retryAfter) return;
+				if (!force && baitId === retryBaitId && Date.now() < retryAfter) return false;
 				if (baitGrade !== "default" && typeof api?.buyBait !== "function") {
 					updateSnapshot({ nextStatus: "等待游戏鱼饵购买接口" });
-					return;
+					return false;
 				}
 				const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
-				const contextLabel = state.autoBiomeWeatherByBiome?.[biomeId]?.weather === GOLD_BREEZE_WEATHER$1 ? "金风" : AUTO_BAIT_CONTEXT_LABELS[baitContext];
+				const contextLabel = requestedContextLabel ?? (state.autoBiomeWeatherByBiome?.[biomeId]?.weather === GOLD_BREEZE_WEATHER$1 ? "金风" : AUTO_BAIT_CONTEXT_LABELS[baitContext]);
 				lastCheckedAt = Date.now();
 				if (baitGrade === "default") {
 					await equipBait(api, player, baitId, baitLabel);
@@ -174,7 +174,7 @@
 						quantity: null,
 						nextStatus: `${contextLabel} · ${baitLabel} · 无限`
 					});
-					return;
+					return true;
 				}
 				let quantity = normalizeQuantity$1(player?.baitInventory?.[baitId]);
 				const pendingPurchaseQuantity = pendingPurchaseQuantities.get(baitId);
@@ -194,7 +194,7 @@
 							quantity,
 							nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币，已切换免费饵`
 						});
-						return;
+						return true;
 					}
 					updateSnapshot({
 						baitId,
@@ -216,11 +216,13 @@
 					quantity,
 					nextStatus: purchased ? `已购买${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个` : `${contextLabel} · ${baitLabel} · ${quantity.toLocaleString()} 个`
 				});
+				return true;
 			} catch (error) {
 				console.error("[自动买鱼饵] 检查或购买失败：", error);
 				retryBaitId = attemptedBaitId ?? currentBaitId;
 				retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
 				updateSnapshot({ nextStatus: `鱼饵处理失败：${getErrorMessage$2(error)}` });
+				return false;
 			} finally {
 				checking = false;
 			}
@@ -271,6 +273,13 @@
 			},
 			isChecking() {
 				return checking;
+			},
+			prepareGameAutoFishing(baitGrade) {
+				if (getState().autoBaitSettings.enabled !== true) return Promise.resolve(true);
+				return checkNow({
+					baitGrade,
+					contextLabel: "内置自动钓鱼"
+				});
 			}
 		};
 	}
@@ -694,7 +703,9 @@
 		autoBossAttackInterval: 6100,
 		autoBossPollInterval: 1e4,
 		scheduleRandomExtraRatioMin: -.05,
-		scheduleRandomExtraRatioMax: .1
+		scheduleRandomExtraRatioMax: .1,
+		gameAutoFishingPollInterval: 500,
+		gameAutoFishingRetryInterval: 5e3
 	};
 	var STORAGE_KEY = "arcane-angler-auto-cast-enabled-v1";
 	var CLICK_DELAY_SETTINGS_STORAGE_KEY = "arcane-angler-click-delay-settings-v1";
@@ -702,6 +713,7 @@
 	var PUSH_KEY_STORAGE_KEY = "arcane-angler-push-key-v1";
 	var NOTIFICATION_MODE_STORAGE_KEY = "arcane-angler-notification-mode-v1";
 	var SCHEDULE_SETTINGS_STORAGE_KEY = "arcane-angler-schedule-settings-v1";
+	var GAME_AUTO_FISHING_SETTINGS_STORAGE_KEY = "arcane-angler-game-auto-fishing-settings-v1";
 	var AUTO_BIOME_SETTINGS_STORAGE_KEY = "arcane-angler-auto-biome-settings-v1";
 	var AUTO_BAIT_SETTINGS_STORAGE_KEY = "arcane-angler-auto-bait-settings-v1";
 	var AUTO_BOSS_SETTINGS_STORAGE_KEY = "arcane-angler-auto-boss-settings-v1";
@@ -1474,6 +1486,155 @@
 			baitPrice: normalizeBaitPrice(bait?.price)
 		};
 	}
+	function findGameAutoFishingButton(root = document) {
+		const buttons = root.querySelectorAll("button");
+		for (const button of buttons) {
+			if (!isDisplayed(button)) continue;
+			const text = normalizeText(button.textContent);
+			const hasKnownIcon = text.includes("🤖") || text.includes("🛑");
+			if (button.classList.contains("flex-[15]") && hasKnownIcon) return button;
+		}
+		return null;
+	}
+	function getGameAutoFishingState(root = document) {
+		const button = findGameAutoFishingButton(root);
+		if (!button) return {
+			active: false,
+			available: false,
+			button: null,
+			enabled: false
+		};
+		return {
+			active: normalizeText(button.textContent).includes("🛑"),
+			available: true,
+			button,
+			enabled: !button.disabled && button.getAttribute("aria-disabled") !== "true"
+		};
+	}
+	function dismissGameAutoFishingSummary(root = document) {
+		const headings = root.querySelectorAll("h1, h2, h3");
+		for (const heading of headings) {
+			if (!normalizeText(heading.textContent).includes("🤖")) continue;
+			let overlay = heading.parentElement;
+			while (overlay && !overlay.classList.contains("fixed")) overlay = overlay.parentElement;
+			if (!overlay) continue;
+			const buttons = overlay.querySelectorAll("button");
+			for (const button of buttons) if (isDisplayed(button)) {
+				button.click();
+				return true;
+			}
+		}
+		return false;
+	}
+	function createGameAutoFishingController({ now = Date.now, onStateChange, prepareStart, retryInterval = CONFIG.gameAutoFishingRetryInterval, shouldStart = () => true } = {}) {
+		let mayBeActive = false;
+		let preparationRequired = true;
+		let startPendingUntil = 0;
+		let status = "未启用";
+		let wasActive = false;
+		function setStatus(nextStatus) {
+			if (status === nextStatus) return;
+			status = nextStatus;
+			onStateChange?.();
+		}
+		function observe() {
+			const state = getGameAutoFishingState();
+			if (state.active) {
+				mayBeActive = true;
+				preparationRequired = false;
+				startPendingUntil = 0;
+				wasActive = true;
+			} else if (state.available && now() >= startPendingUntil) {
+				if (wasActive) preparationRequired = true;
+				mayBeActive = false;
+				wasActive = false;
+			}
+			return state;
+		}
+		async function ensureActive() {
+			dismissGameAutoFishingSummary();
+			let state = observe();
+			if (state.active) {
+				setStatus("运行中，次数结束后自动续期");
+				return state;
+			}
+			if (!state.available) {
+				setStatus("等待游戏内置自动钓鱼按钮");
+				return state;
+			}
+			if (now() < startPendingUntil) {
+				setStatus("正在启动");
+				return state;
+			}
+			if (!state.enabled) {
+				setStatus("等待体力或按钮冷却");
+				return state;
+			}
+			if (!shouldStart()) {
+				setStatus("已取消启动");
+				return state;
+			}
+			if (preparationRequired) {
+				setStatus("正在准备内置自动钓鱼鱼饵");
+				if (await prepareStart?.() === false) {
+					setStatus("等待内置自动钓鱼鱼饵可用");
+					return observe();
+				}
+				preparationRequired = false;
+				state = observe();
+				if (state.active) {
+					setStatus("运行中，次数结束后自动续期");
+					return state;
+				}
+				if (!state.available || !state.enabled || !shouldStart()) {
+					setStatus(!state.available ? "等待游戏内置自动钓鱼按钮" : !state.enabled ? "等待体力或按钮冷却" : "已取消启动");
+					return state;
+				}
+			}
+			startPendingUntil = now() + retryInterval;
+			mayBeActive = true;
+			state.button.click();
+			const nextState = observe();
+			setStatus(nextState.active ? "运行中，次数结束后自动续期" : "正在启动");
+			return nextState;
+		}
+		function ensureStopped() {
+			const state = observe();
+			if (!state.active) {
+				if (now() < startPendingUntil) {
+					setStatus("等待启动操作完成后停止");
+					return false;
+				}
+				if (!state.available && mayBeActive) {
+					setStatus("等待返回钓鱼页面后停止");
+					return false;
+				}
+				dismissGameAutoFishingSummary();
+				mayBeActive = false;
+				setStatus("已停止");
+				return true;
+			}
+			if (!state.enabled) {
+				setStatus("等待按钮冷却后停止");
+				return false;
+			}
+			startPendingUntil = 0;
+			state.button.click();
+			setStatus("正在停止");
+			return false;
+		}
+		return {
+			ensureActive,
+			ensureStopped,
+			getSnapshot() {
+				return {
+					gameAutoFishingMayBeActive: mayBeActive,
+					gameAutoFishingStatus: status
+				};
+			},
+			observe
+		};
+	}
 	function isObject(value) {
 		return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 	}
@@ -1861,7 +2022,7 @@
 		if (minutes === 0) return `${seconds} 秒`;
 		return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
 	}
-	function createScheduleController({ getCaptcha, getState, onWorkStarted, renderSettings, renderStatus, setNextDelay, setStatus }) {
+	function createScheduleController({ getCaptcha, getState, now = Date.now, onRestTick, onWorkStarted, prepareForWork, renderSettings, renderStatus, setNextDelay, setStatus, sleepFor = sleep }) {
 		let phase = "work";
 		let endsAt = 0;
 		let duration = 0;
@@ -1880,14 +2041,17 @@
 			const baseMinutes = nextPhase === "rest" ? scheduleSettings.restMinutes : scheduleSettings.workMinutes;
 			phase = nextPhase;
 			duration = getRandomizedDuration(baseMinutes);
-			endsAt = Date.now() + duration;
+			endsAt = now() + duration;
 			renderSettings();
 			if (nextPhase === "work") onWorkStarted?.();
 			console.info(`[自动抛竿] 本轮${nextPhase === "rest" ? "休息" : "运行"}时长：` + formatScheduleDuration(duration));
 		}
 		function isWorkExpired() {
 			const { scheduleSettings } = getState();
-			return scheduleSettings.enabled && phase === "work" && endsAt > 0 && Date.now() >= endsAt;
+			return scheduleSettings.enabled && phase === "work" && endsAt > 0 && now() >= endsAt;
+		}
+		function isRestActive() {
+			return phase === "rest" && endsAt > 0 && now() < endsAt;
 		}
 		function shouldEnterRest(currentLoopId) {
 			const { enabled, loopId } = getState();
@@ -1909,15 +2073,19 @@
 					startPhase("rest");
 				}
 				if (getCaptcha().stopIfChallengeFound()) return false;
-				const remaining = endsAt - Date.now();
+				const remaining = endsAt - now();
 				if (remaining <= 0) {
+					if (await prepareForWork?.() === false) {
+						await sleepFor(CONFIG.gameAutoFishingPollInterval);
+						continue;
+					}
 					startPhase("work");
 					return true;
 				}
-				setStatus("定时休息中");
+				setStatus(await onRestTick?.() || "定时休息中");
 				setNextDelay(`剩余 ${formatScheduleDuration(remaining)}`);
 				renderStatus(remaining);
-				await sleep(Math.min(1e3, remaining));
+				await sleepFor(Math.min(1e3, remaining));
 			}
 		}
 		return {
@@ -1928,6 +2096,7 @@
 					schedulePhase: phase
 				};
 			},
+			isRestActive,
 			isWorkExpired,
 			reset,
 			shouldEnterRest,
@@ -1977,6 +2146,30 @@
 			localStorage.setItem(STORAGE_KEY, value ? "1" : "0");
 		} catch (error) {
 			console.warn("[自动抛竿] 无法保存设置：", error);
+		}
+	}
+	function loadGameAutoFishingSettings() {
+		const defaults = {
+			baitGrade: "low",
+			enabled: false
+		};
+		try {
+			const savedSettings = JSON.parse(localStorage.getItem(GAME_AUTO_FISHING_SETTINGS_STORAGE_KEY));
+			if (!savedSettings || typeof savedSettings !== "object") return defaults;
+			return {
+				baitGrade: normalizeAutoBaitGrade(savedSettings.baitGrade, defaults.baitGrade),
+				enabled: savedSettings.enabled === true
+			};
+		} catch (error) {
+			console.warn("[游戏内置自动钓鱼] 无法读取设置：", error);
+			return defaults;
+		}
+	}
+	function saveGameAutoFishingSettings(gameAutoFishingSettings) {
+		try {
+			localStorage.setItem(GAME_AUTO_FISHING_SETTINGS_STORAGE_KEY, JSON.stringify(gameAutoFishingSettings));
+		} catch (error) {
+			console.warn("[游戏内置自动钓鱼] 无法保存设置：", error);
 		}
 	}
 	function loadCaptchaBypassEnabled() {
@@ -2149,6 +2342,7 @@
 	function loadScheduleSettings() {
 		const defaults = {
 			enabled: false,
+			gameAutoFishingDuringRest: false,
 			workMinutes: 60,
 			restMinutes: 10
 		};
@@ -2157,6 +2351,7 @@
 			if (!savedSettings || typeof savedSettings !== "object") return defaults;
 			return {
 				enabled: savedSettings.enabled === true,
+				gameAutoFishingDuringRest: savedSettings.gameAutoFishingDuringRest === true,
 				workMinutes: normalizeScheduleMinutes(savedSettings.workMinutes, defaults.workMinutes),
 				restMinutes: normalizeScheduleMinutes(savedSettings.restMinutes, defaults.restMinutes)
 			};
@@ -2197,7 +2392,7 @@
 		let autoBaitPurchaseSaveTimer = null;
 		let autoBaitPurchaseSettingsDirty = false;
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitPurchaseSettings, setAutoBossEnabled, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setClickDelaySetting, setEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitPurchaseSettings, setAutoBossEnabled, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setClickDelaySetting, setEnabled, setGameAutoFishingBaitGrade, setGameAutoFishingEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleGameAutoFishingDuringRest, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
@@ -2311,6 +2506,11 @@
         <div class="row">
           <span class="label">点击次数</span>
           <span id="click-count" class="value">0</span>
+        </div>
+
+        <div class="row">
+          <span class="label">内置钓鱼</span>
+          <span id="game-auto-fishing-status" class="value">未启用</span>
         </div>
 
         <div class="row">
@@ -2492,6 +2692,34 @@
         aria-labelledby="settings-tab"
         hidden
       >
+        <details class="settings-section">
+          <summary class="settings-title">自动钓鱼方式</summary>
+
+          <label class="option-row">
+            <span>使用游戏内置自动钓鱼</span>
+            <span class="switch">
+              <input
+                id="game-auto-fishing-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="使用游戏内置自动钓鱼"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">游戏内置自动钓鱼鱼饵</span>
+            <select id="game-auto-fishing-bait-grade" class="input">
+              ${baitGradeOptions}
+            </select>
+          </label>
+
+          <div class="field-help">
+            开启后不再模拟点击抛竿按钮，改由游戏内置功能接管；“自动买鱼饵”开启时，首次启动和每次续期前都会确认独立设置的鱼饵，关闭时保持当前鱼饵不处理。
+          </div>
+        </details>
+
         <details class="settings-section">
           <summary class="settings-title">自动点击间隔</summary>
 
@@ -2706,7 +2934,7 @@
             </div>
 
             <div class="field-help">
-              金风天气优先使用独立鱼饵设置，默认为免费默认饵；其他天气根据当前地图是否为个人赛或公会赛地图选择鱼饵。库存低于设置值时购买，阈值按 100 的倍数保存。
+              金风天气优先使用独立鱼饵设置，默认为免费默认饵；其他天气根据当前地图是否为个人赛或公会赛地图选择鱼饵。游戏内置自动钓鱼使用“自动钓鱼方式”中的独立鱼饵。付费鱼饵库存低于设置值时购买，阈值按 100 的倍数保存。
             </div>
           </div>
 
@@ -2829,6 +3057,19 @@
           </label>
 
           <div id="schedule-settings" class="settings-group" hidden>
+            <label class="option-row">
+              <span>休息中使用游戏内置自动钓鱼</span>
+              <span class="switch">
+                <input
+                  id="schedule-game-auto-fishing-toggle"
+                  type="checkbox"
+                  role="switch"
+                  aria-label="定时休息中使用游戏内置自动钓鱼"
+                />
+                <span class="switch-track" aria-hidden="true"></span>
+              </span>
+            </label>
+
             <div class="number-grid">
               <label class="field">
                 <span class="field-label">运行分钟</span>
@@ -2862,7 +3103,7 @@
             </div>
 
             <div class="field-help">
-              每轮实际运行和休息时长，都会在设置值上加入 -5%～+10% 的随机时间。
+              每轮实际运行和休息时长，都会在设置值上加入 -5%～+10% 的随机时间。休息结束恢复脚本自动钓鱼前，会先停止游戏内置自动钓鱼。
             </div>
           </div>
         </details>
@@ -2876,6 +3117,9 @@
 				status: shadowRoot.querySelector("#status"),
 				nextDelay: shadowRoot.querySelector("#next-delay"),
 				clickCount: shadowRoot.querySelector("#click-count"),
+				gameAutoFishingStatus: shadowRoot.querySelector("#game-auto-fishing-status"),
+				gameAutoFishingBaitGrade: shadowRoot.querySelector("#game-auto-fishing-bait-grade"),
+				gameAutoFishingToggle: shadowRoot.querySelector("#game-auto-fishing-toggle"),
 				shortDelayMinSeconds: shadowRoot.querySelector("#short-delay-min-seconds"),
 				shortDelayMaxSeconds: shadowRoot.querySelector("#short-delay-max-seconds"),
 				longDelayMinSeconds: shadowRoot.querySelector("#long-delay-min-seconds"),
@@ -2917,6 +3161,7 @@
 				browserNotificationPermissionButton: shadowRoot.querySelector("#browser-notification-permission-button"),
 				scheduleEnabledToggle: shadowRoot.querySelector("#schedule-enabled-toggle"),
 				scheduleSettings: shadowRoot.querySelector("#schedule-settings"),
+				scheduleGameAutoFishingToggle: shadowRoot.querySelector("#schedule-game-auto-fishing-toggle"),
 				scheduleWorkMinutes: shadowRoot.querySelector("#schedule-work-minutes"),
 				scheduleRestMinutes: shadowRoot.querySelector("#schedule-rest-minutes"),
 				scheduleStatus: shadowRoot.querySelector("#schedule-status"),
@@ -2951,6 +3196,12 @@
 			});
 			ui.toggle.addEventListener("click", () => {
 				setEnabled(!getState().enabled);
+			});
+			ui.gameAutoFishingToggle.addEventListener("change", (event) => {
+				setGameAutoFishingEnabled(event.currentTarget.checked);
+			});
+			ui.gameAutoFishingBaitGrade.addEventListener("change", (event) => {
+				setGameAutoFishingBaitGrade(event.currentTarget.value);
 			});
 			ui.captchaBypassToggle.addEventListener("change", (event) => {
 				setCaptchaBypassEnabled(event.currentTarget.checked);
@@ -3026,6 +3277,9 @@
 			ui.scheduleEnabledToggle.addEventListener("change", (event) => {
 				setScheduleEnabled(event.currentTarget.checked);
 			});
+			ui.scheduleGameAutoFishingToggle.addEventListener("change", (event) => {
+				setScheduleGameAutoFishingDuringRest(event.currentTarget.checked);
+			});
 			ui.scheduleWorkMinutes.addEventListener("change", (event) => {
 				setScheduleMinutes("workMinutes", event.currentTarget.value);
 			});
@@ -3050,6 +3304,7 @@
 			renderAutoBossSettings();
 			renderCaptchaBypassToggle();
 			renderClickDelaySettings();
+			renderGameAutoFishingSettings();
 			renderIdleReloadSettings();
 			renderPanelCollapsed();
 			renderNotificationSettings();
@@ -3099,6 +3354,7 @@
 				renderAutoBiomeSettings();
 				renderAutoBossSettings();
 				renderClickDelaySettings();
+				renderGameAutoFishingSettings();
 				renderIdleReloadSettings();
 				renderNotificationSettings();
 				renderScheduleSettings();
@@ -3326,6 +3582,8 @@
 			ui.scheduleEnabledToggle.checked = scheduleSettings.enabled;
 			ui.scheduleEnabledToggle.setAttribute("aria-checked", scheduleSettings.enabled ? "true" : "false");
 			ui.scheduleSettings.hidden = !scheduleSettings.enabled;
+			ui.scheduleGameAutoFishingToggle.checked = scheduleSettings.gameAutoFishingDuringRest;
+			ui.scheduleGameAutoFishingToggle.setAttribute("aria-checked", scheduleSettings.gameAutoFishingDuringRest ? "true" : "false");
 			ui.scheduleWorkMinutes.value = String(scheduleSettings.workMinutes);
 			ui.scheduleRestMinutes.value = String(scheduleSettings.restMinutes);
 			renderScheduleStatus();
@@ -3346,7 +3604,8 @@
 		}
 		function renderAutoBaitSettings() {
 			if (!ui?.autoBaitToggle) return;
-			const { autoBaitLastPurchasedAt, autoBaitSettings, autoBaitStatus } = getState();
+			const { autoBaitLastPurchasedAt, autoBaitSettings, autoBaitStatus, gameAutoFishingSettings, scheduleSettings } = getState();
+			const usesPaidGameAutoFishingBait = gameAutoFishingSettings.baitGrade !== "default" && (gameAutoFishingSettings.enabled || scheduleSettings.gameAutoFishingDuringRest);
 			ui.autoBaitToggle.checked = autoBaitSettings.enabled;
 			ui.autoBaitToggle.setAttribute("aria-checked", autoBaitSettings.enabled ? "true" : "false");
 			ui.autoBaitStatus.textContent = autoBaitStatus;
@@ -3354,7 +3613,7 @@
 			ui.autoBaitPersonalGrade.value = autoBaitSettings.personalCompetitionBaitGrade;
 			ui.autoBaitGuildGrade.value = autoBaitSettings.guildCompetitionBaitGrade;
 			ui.autoBaitGoldBreezeGrade.value = autoBaitSettings.goldBreezeBaitGrade;
-			ui.autoBaitPurchaseSettings.hidden = autoBaitSettings.regularBaitGrade === "default" && autoBaitSettings.personalCompetitionBaitGrade === "default" && autoBaitSettings.guildCompetitionBaitGrade === "default" && autoBaitSettings.goldBreezeBaitGrade === "default";
+			ui.autoBaitPurchaseSettings.hidden = autoBaitSettings.regularBaitGrade === "default" && autoBaitSettings.personalCompetitionBaitGrade === "default" && autoBaitSettings.guildCompetitionBaitGrade === "default" && autoBaitSettings.goldBreezeBaitGrade === "default" && !usesPaidGameAutoFishingBait;
 			if (!autoBaitPurchaseSettingsDirty) {
 				ui.autoBaitMinimumQuantity.value = String(autoBaitSettings.minimumQuantity);
 				ui.autoBaitPurchaseQuantity.value = String(autoBaitSettings.purchaseQuantity);
@@ -3371,6 +3630,14 @@
 		function renderIdleReloadSettings() {
 			if (!ui?.idleReloadMinutes) return;
 			ui.idleReloadMinutes.value = String(getState().idleReloadSettings.minutes);
+		}
+		function renderGameAutoFishingSettings() {
+			if (!ui?.gameAutoFishingToggle) return;
+			const { gameAutoFishingSettings, gameAutoFishingStatus } = getState();
+			ui.gameAutoFishingToggle.checked = gameAutoFishingSettings.enabled;
+			ui.gameAutoFishingToggle.setAttribute("aria-checked", gameAutoFishingSettings.enabled ? "true" : "false");
+			ui.gameAutoFishingBaitGrade.value = gameAutoFishingSettings.baitGrade;
+			ui.gameAutoFishingStatus.textContent = gameAutoFishingStatus;
 		}
 		function renderClickDelaySettings() {
 			if (!ui?.shortDelayMinSeconds) return;
@@ -3401,6 +3668,7 @@
 			renderCaptchaBypassToggle,
 			renderClickDelaySettings,
 			renderEarningsStats,
+			renderGameAutoFishingSettings,
 			renderIdleReloadSettings,
 			renderNotificationSettings,
 			renderScheduleSettings,
@@ -3416,6 +3684,7 @@
 	var pushKey = loadPushKey();
 	var notificationMode = loadNotificationMode();
 	var clickDelaySettings = loadClickDelaySettings();
+	var gameAutoFishingSettings = loadGameAutoFishingSettings();
 	var scheduleSettings = loadScheduleSettings();
 	var autoBiomeSettings = loadAutoBiomeSettings();
 	var autoBaitSettings = loadAutoBaitSettings();
@@ -3427,6 +3696,7 @@
 	var captcha = null;
 	var panel = null;
 	var schedule = null;
+	var gameAutoFishing = null;
 	var autoBiome = null;
 	var autoBait = null;
 	var autoBoss = null;
@@ -3511,6 +3781,7 @@
 			clickCount,
 			earningsStats,
 			enabled,
+			gameAutoFishingSettings,
 			idleReloadSettings,
 			autoBaitSettings,
 			autoBiomeSettings,
@@ -3544,6 +3815,10 @@
 				autoBossLastStat: null,
 				autoBossStatus: "未启用"
 			},
+			...gameAutoFishing?.getSnapshot() ?? {
+				gameAutoFishingMayBeActive: false,
+				gameAutoFishingStatus: "未启用"
+			},
 			...schedule.getSnapshot()
 		};
 	}
@@ -3557,7 +3832,7 @@
 		});
 	}
 	function reloadIfFishingIdle() {
-		if (!enabled || schedule?.getSnapshot().schedulePhase === "rest") return false;
+		if (!enabled || gameAutoFishingSettings.enabled || schedule?.getSnapshot().schedulePhase === "rest") return false;
 		const timeoutMilliseconds = idleReloadSettings.minutes * 6e4;
 		if (!fishingActivityWatchdog.observe(timeoutMilliseconds)) return false;
 		panel.setStatus(`连续 ${idleReloadSettings.minutes} 分钟未钓鱼，正在刷新页面`);
@@ -3728,9 +4003,34 @@
 		}
 		return false;
 	}
+	async function waitForGameAutoFishingStopped(currentLoopId) {
+		while (currentLoopId === loopId) {
+			if (gameAutoFishing.ensureStopped()) return true;
+			panel.setStatus("正在停止游戏内置自动钓鱼");
+			panel.setNextDelay("停止后恢复脚本自动钓鱼");
+			await sleep(CONFIG.gameAutoFishingPollInterval);
+		}
+		return false;
+	}
+	async function waitForGameAutoFishingWork(currentLoopId) {
+		while (enabled && currentLoopId === loopId && gameAutoFishingSettings.enabled) {
+			if (schedule.isWorkExpired()) return;
+			if (captcha.stopIfChallengeFound()) return;
+			const state = await gameAutoFishing.ensureActive();
+			panel.setStatus(state.active ? "游戏内置自动钓鱼运行中" : state.available ? "等待游戏内置自动钓鱼可用" : "等待进入钓鱼页面");
+			panel.setNextDelay(state.active ? "本轮结束后自动续期" : "自动重试启动");
+			await sleep(CONFIG.gameAutoFishingPollInterval);
+		}
+	}
 	async function runLoop(currentLoopId) {
 		while (enabled && currentLoopId === loopId) {
 			if (!await schedule.waitForWork(currentLoopId)) return;
+			if (gameAutoFishingSettings.enabled) {
+				await waitForGameAutoFishingWork(currentLoopId);
+				if (!enabled || currentLoopId !== loopId) return;
+				if (schedule.shouldEnterRest(currentLoopId)) continue;
+			}
+			if (!await waitForGameAutoFishingStopped(currentLoopId) || !enabled) return;
 			if (!await waitForButton(currentLoopId)) {
 				if (schedule.shouldEnterRest(currentLoopId)) continue;
 				return;
@@ -3766,6 +4066,13 @@
 			}
 		}
 	}
+	function startRunLoop() {
+		const currentLoopId = loopId;
+		runLoop(currentLoopId).catch((error) => {
+			console.error("[自动抛竿] 运行异常：", error);
+			if (currentLoopId === loopId) panel.setStatus(`运行异常：${error.message}`);
+		});
+	}
 	function setEnabled(nextEnabled) {
 		enabled = Boolean(nextEnabled);
 		saveEnabled(enabled);
@@ -3775,19 +4082,46 @@
 		loopId += 1;
 		panel.renderToggle();
 		if (enabled) {
-			const currentLoopId = loopId;
-			panel.setStatus("已启动，正在查找按钮");
+			panel.setStatus(gameAutoFishingSettings.enabled ? "已启动，正在接管游戏内置自动钓鱼" : "已启动，正在查找按钮");
 			panel.setNextDelay("—");
-			runLoop(currentLoopId).catch((error) => {
-				console.error("[自动抛竿] 运行异常：", error);
-				if (currentLoopId === loopId) panel.setStatus(`运行异常：${error.message}`);
-			});
+			startRunLoop();
 		} else {
-			panel.setStatus("已停止");
+			const currentLoopId = loopId;
 			panel.setNextDelay("—");
+			if (gameAutoFishing.ensureStopped()) panel.setStatus("已停止");
+			else {
+				panel.setStatus("已停止，正在确认内置自动钓鱼已关闭");
+				waitForGameAutoFishingStopped(currentLoopId).then((stopped) => {
+					if (stopped && currentLoopId === loopId && !enabled) panel.setStatus("已停止");
+				});
+			}
 		}
 		handleAutomationStateChanged();
 		autoBoss?.handleStateChanged();
+	}
+	function setGameAutoFishingEnabled(nextEnabled) {
+		gameAutoFishingSettings = {
+			...gameAutoFishingSettings,
+			enabled: Boolean(nextEnabled)
+		};
+		saveGameAutoFishingSettings(gameAutoFishingSettings);
+		panel.renderGameAutoFishingSettings();
+		panel.renderAutoBaitSettings();
+		if (enabled) {
+			loopId += 1;
+			fishingActivityWatchdog.markFishing();
+			startRunLoop();
+		}
+	}
+	function setGameAutoFishingBaitGrade(nextGrade) {
+		gameAutoFishingSettings = {
+			...gameAutoFishingSettings,
+			baitGrade: normalizeAutoBaitGrade(nextGrade, gameAutoFishingSettings.baitGrade)
+		};
+		saveGameAutoFishingSettings(gameAutoFishingSettings);
+		panel.renderGameAutoFishingSettings();
+		panel.renderAutoBaitSettings();
+		if (enabled && gameAutoFishing.getSnapshot().gameAutoFishingMayBeActive) autoBait?.prepareGameAutoFishing(gameAutoFishingSettings.baitGrade);
 	}
 	function setCaptchaBypassEnabled(nextEnabled) {
 		captchaBypassEnabled = Boolean(nextEnabled);
@@ -3904,6 +4238,15 @@
 		fishingActivityWatchdog.markFishing();
 		if (enabled && scheduleSettings.enabled) schedule.startWork();
 	}
+	function setScheduleGameAutoFishingDuringRest(nextEnabled) {
+		scheduleSettings = {
+			...scheduleSettings,
+			gameAutoFishingDuringRest: Boolean(nextEnabled)
+		};
+		saveScheduleSettings(scheduleSettings);
+		panel.renderScheduleSettings();
+		panel.renderAutoBaitSettings();
+	}
 	document.addEventListener("keydown", (event) => {
 		const target = event.target;
 		if (target instanceof HTMLElement && (target.isContentEditable || target.matches("input, textarea, select"))) return;
@@ -3925,8 +4268,21 @@
 					scheduleSettings
 				};
 			},
+			async onRestTick() {
+				if (scheduleSettings.gameAutoFishingDuringRest) return (await gameAutoFishing.ensureActive()).active ? "定时休息中（游戏内置自动钓鱼运行中）" : "定时休息中（等待游戏内置自动钓鱼）";
+				return gameAutoFishing.ensureStopped() ? "定时休息中" : "定时休息中（正在停止游戏内置自动钓鱼）";
+			},
 			onWorkStarted() {
 				fishingActivityWatchdog.markFishing();
+			},
+			prepareForWork() {
+				if (gameAutoFishingSettings.enabled) return true;
+				const stopped = gameAutoFishing.ensureStopped();
+				if (!stopped) {
+					panel?.setStatus("正在停止游戏内置自动钓鱼");
+					panel?.setNextDelay("停止后恢复脚本自动钓鱼");
+				}
+				return stopped;
 			},
 			renderSettings() {
 				panel?.renderScheduleSettings();
@@ -3939,6 +4295,20 @@
 			},
 			setStatus(text) {
 				panel?.setStatus(text);
+			}
+		});
+		gameAutoFishing = createGameAutoFishingController({
+			onStateChange() {
+				panel?.renderGameAutoFishingSettings();
+			},
+			prepareStart() {
+				return autoBait?.prepareGameAutoFishing(gameAutoFishingSettings.baitGrade);
+			},
+			shouldStart() {
+				if (!enabled) return false;
+				const snapshot = schedule?.getSnapshot();
+				if (scheduleSettings.enabled && snapshot?.schedulePhase === "rest") return scheduleSettings.gameAutoFishingDuringRest && schedule.isRestActive();
+				return gameAutoFishingSettings.enabled && !schedule?.isWorkExpired();
 			}
 		});
 		panel = createPanelController({
@@ -3956,10 +4326,13 @@
 				setCaptchaBypassEnabled,
 				setClickDelaySetting,
 				setEnabled,
+				setGameAutoFishingBaitGrade,
+				setGameAutoFishingEnabled,
 				setIdleReloadMinutes,
 				setNotificationMode,
 				setPushKey,
 				setScheduleEnabled,
+				setScheduleGameAutoFishingDuringRest,
 				setScheduleMinutes
 			},
 			formatScheduleDuration,

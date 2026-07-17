@@ -31,6 +31,10 @@ export const CONFIG = {
     // 定时运行/休息会在设置值上加入 -5%～+10% 的随机量
     scheduleRandomExtraRatioMin: -0.05,
     scheduleRandomExtraRatioMax: 0.1,
+
+    // 游戏内置自动钓鱼状态检查与启动失败后的重试间隔
+    gameAutoFishingPollInterval: 500,
+    gameAutoFishingRetryInterval: 5000,
 };
 
 export const STORAGE_KEY = 'arcane-angler-auto-cast-enabled-v1';
@@ -43,6 +47,8 @@ export const NOTIFICATION_MODE_STORAGE_KEY =
     'arcane-angler-notification-mode-v1';
 export const SCHEDULE_SETTINGS_STORAGE_KEY =
     'arcane-angler-schedule-settings-v1';
+export const GAME_AUTO_FISHING_SETTINGS_STORAGE_KEY =
+    'arcane-angler-game-auto-fishing-settings-v1';
 export const AUTO_BIOME_SETTINGS_STORAGE_KEY =
     'arcane-angler-auto-biome-settings-v1';
 export const AUTO_BAIT_SETTINGS_STORAGE_KEY =

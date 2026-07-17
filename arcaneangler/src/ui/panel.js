@@ -30,10 +30,13 @@ export function createPanelController({
         setCaptchaBypassEnabled,
         setClickDelaySetting,
         setEnabled,
+        setGameAutoFishingBaitGrade,
+        setGameAutoFishingEnabled,
         setIdleReloadMinutes,
         setNotificationMode,
         setPushKey,
         setScheduleEnabled,
+        setScheduleGameAutoFishingDuringRest,
         setScheduleMinutes,
     } = actions;
 
@@ -184,6 +187,11 @@ export function createPanelController({
         <div class="row">
           <span class="label">点击次数</span>
           <span id="click-count" class="value">0</span>
+        </div>
+
+        <div class="row">
+          <span class="label">内置钓鱼</span>
+          <span id="game-auto-fishing-status" class="value">未启用</span>
         </div>
 
         <div class="row">
@@ -365,6 +373,34 @@ export function createPanelController({
         aria-labelledby="settings-tab"
         hidden
       >
+        <details class="settings-section">
+          <summary class="settings-title">自动钓鱼方式</summary>
+
+          <label class="option-row">
+            <span>使用游戏内置自动钓鱼</span>
+            <span class="switch">
+              <input
+                id="game-auto-fishing-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="使用游戏内置自动钓鱼"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
+          <label class="field">
+            <span class="field-label">游戏内置自动钓鱼鱼饵</span>
+            <select id="game-auto-fishing-bait-grade" class="input">
+              ${baitGradeOptions}
+            </select>
+          </label>
+
+          <div class="field-help">
+            开启后不再模拟点击抛竿按钮，改由游戏内置功能接管；“自动买鱼饵”开启时，首次启动和每次续期前都会确认独立设置的鱼饵，关闭时保持当前鱼饵不处理。
+          </div>
+        </details>
+
         <details class="settings-section">
           <summary class="settings-title">自动点击间隔</summary>
 
@@ -579,7 +615,7 @@ export function createPanelController({
             </div>
 
             <div class="field-help">
-              金风天气优先使用独立鱼饵设置，默认为免费默认饵；其他天气根据当前地图是否为个人赛或公会赛地图选择鱼饵。库存低于设置值时购买，阈值按 100 的倍数保存。
+              金风天气优先使用独立鱼饵设置，默认为免费默认饵；其他天气根据当前地图是否为个人赛或公会赛地图选择鱼饵。游戏内置自动钓鱼使用“自动钓鱼方式”中的独立鱼饵。付费鱼饵库存低于设置值时购买，阈值按 100 的倍数保存。
             </div>
           </div>
 
@@ -702,6 +738,19 @@ export function createPanelController({
           </label>
 
           <div id="schedule-settings" class="settings-group" hidden>
+            <label class="option-row">
+              <span>休息中使用游戏内置自动钓鱼</span>
+              <span class="switch">
+                <input
+                  id="schedule-game-auto-fishing-toggle"
+                  type="checkbox"
+                  role="switch"
+                  aria-label="定时休息中使用游戏内置自动钓鱼"
+                />
+                <span class="switch-track" aria-hidden="true"></span>
+              </span>
+            </label>
+
             <div class="number-grid">
               <label class="field">
                 <span class="field-label">运行分钟</span>
@@ -735,7 +784,7 @@ export function createPanelController({
             </div>
 
             <div class="field-help">
-              每轮实际运行和休息时长，都会在设置值上加入 -5%～+10% 的随机时间。
+              每轮实际运行和休息时长，都会在设置值上加入 -5%～+10% 的随机时间。休息结束恢复脚本自动钓鱼前，会先停止游戏内置自动钓鱼。
             </div>
           </div>
         </details>
@@ -751,6 +800,15 @@ export function createPanelController({
             status: shadowRoot.querySelector('#status'),
             nextDelay: shadowRoot.querySelector('#next-delay'),
             clickCount: shadowRoot.querySelector('#click-count'),
+            gameAutoFishingStatus: shadowRoot.querySelector(
+                '#game-auto-fishing-status',
+            ),
+            gameAutoFishingBaitGrade: shadowRoot.querySelector(
+                '#game-auto-fishing-bait-grade',
+            ),
+            gameAutoFishingToggle: shadowRoot.querySelector(
+                '#game-auto-fishing-toggle',
+            ),
             shortDelayMinSeconds: shadowRoot.querySelector(
                 '#short-delay-min-seconds',
             ),
@@ -842,6 +900,9 @@ export function createPanelController({
                 '#schedule-enabled-toggle',
             ),
             scheduleSettings: shadowRoot.querySelector('#schedule-settings'),
+            scheduleGameAutoFishingToggle: shadowRoot.querySelector(
+                '#schedule-game-auto-fishing-toggle',
+            ),
             scheduleWorkMinutes: shadowRoot.querySelector(
                 '#schedule-work-minutes',
             ),
@@ -884,6 +945,14 @@ export function createPanelController({
 
         ui.toggle.addEventListener('click', () => {
             setEnabled(!getState().enabled);
+        });
+
+        ui.gameAutoFishingToggle.addEventListener('change', (event) => {
+            setGameAutoFishingEnabled(event.currentTarget.checked);
+        });
+
+        ui.gameAutoFishingBaitGrade.addEventListener('change', (event) => {
+            setGameAutoFishingBaitGrade(event.currentTarget.value);
         });
 
         ui.captchaBypassToggle.addEventListener('change', (event) => {
@@ -998,6 +1067,10 @@ export function createPanelController({
             setScheduleEnabled(event.currentTarget.checked);
         });
 
+        ui.scheduleGameAutoFishingToggle.addEventListener('change', (event) => {
+            setScheduleGameAutoFishingDuringRest(event.currentTarget.checked);
+        });
+
         ui.scheduleWorkMinutes.addEventListener('change', (event) => {
             setScheduleMinutes('workMinutes', event.currentTarget.value);
         });
@@ -1028,6 +1101,7 @@ export function createPanelController({
         renderAutoBossSettings();
         renderCaptchaBypassToggle();
         renderClickDelaySettings();
+        renderGameAutoFishingSettings();
         renderIdleReloadSettings();
         renderPanelCollapsed();
         renderNotificationSettings();
@@ -1093,6 +1167,7 @@ export function createPanelController({
             renderAutoBiomeSettings();
             renderAutoBossSettings();
             renderClickDelaySettings();
+            renderGameAutoFishingSettings();
             renderIdleReloadSettings();
             renderNotificationSettings();
             renderScheduleSettings();
@@ -1547,6 +1622,12 @@ export function createPanelController({
             scheduleSettings.enabled ? 'true' : 'false',
         );
         ui.scheduleSettings.hidden = !scheduleSettings.enabled;
+        ui.scheduleGameAutoFishingToggle.checked =
+            scheduleSettings.gameAutoFishingDuringRest;
+        ui.scheduleGameAutoFishingToggle.setAttribute(
+            'aria-checked',
+            scheduleSettings.gameAutoFishingDuringRest ? 'true' : 'false',
+        );
         ui.scheduleWorkMinutes.value = String(scheduleSettings.workMinutes);
         ui.scheduleRestMinutes.value = String(scheduleSettings.restMinutes);
         renderScheduleStatus();
@@ -1599,8 +1680,18 @@ export function createPanelController({
             return;
         }
 
-        const { autoBaitLastPurchasedAt, autoBaitSettings, autoBaitStatus } =
-            getState();
+        const {
+            autoBaitLastPurchasedAt,
+            autoBaitSettings,
+            autoBaitStatus,
+            gameAutoFishingSettings,
+            scheduleSettings,
+        } = getState();
+
+        const usesPaidGameAutoFishingBait =
+            gameAutoFishingSettings.baitGrade !== 'default' &&
+            (gameAutoFishingSettings.enabled ||
+                scheduleSettings.gameAutoFishingDuringRest);
 
         ui.autoBaitToggle.checked = autoBaitSettings.enabled;
         ui.autoBaitToggle.setAttribute(
@@ -1618,7 +1709,8 @@ export function createPanelController({
             autoBaitSettings.regularBaitGrade === 'default' &&
             autoBaitSettings.personalCompetitionBaitGrade === 'default' &&
             autoBaitSettings.guildCompetitionBaitGrade === 'default' &&
-            autoBaitSettings.goldBreezeBaitGrade === 'default';
+            autoBaitSettings.goldBreezeBaitGrade === 'default' &&
+            !usesPaidGameAutoFishingBait;
         if (!autoBaitPurchaseSettingsDirty) {
             ui.autoBaitMinimumQuantity.value = String(
                 autoBaitSettings.minimumQuantity,
@@ -1655,6 +1747,22 @@ export function createPanelController({
         ui.idleReloadMinutes.value = String(
             getState().idleReloadSettings.minutes,
         );
+    }
+
+    function renderGameAutoFishingSettings() {
+        if (!ui?.gameAutoFishingToggle) {
+            return;
+        }
+
+        const { gameAutoFishingSettings, gameAutoFishingStatus } = getState();
+
+        ui.gameAutoFishingToggle.checked = gameAutoFishingSettings.enabled;
+        ui.gameAutoFishingToggle.setAttribute(
+            'aria-checked',
+            gameAutoFishingSettings.enabled ? 'true' : 'false',
+        );
+        ui.gameAutoFishingBaitGrade.value = gameAutoFishingSettings.baitGrade;
+        ui.gameAutoFishingStatus.textContent = gameAutoFishingStatus;
     }
 
     function renderClickDelaySettings() {
@@ -1715,6 +1823,7 @@ export function createPanelController({
         renderCaptchaBypassToggle,
         renderClickDelaySettings,
         renderEarningsStats,
+        renderGameAutoFishingSettings,
         renderIdleReloadSettings,
         renderNotificationSettings,
         renderScheduleSettings,

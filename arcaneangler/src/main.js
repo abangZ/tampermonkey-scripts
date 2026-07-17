@@ -28,6 +28,7 @@ import {
     updateEarningsStats,
 } from './earnings.js';
 import { getCastEarningsContext } from './game-data.js';
+import { createGameAutoFishingController } from './game-auto-fishing.js';
 import { createGameStateStore } from './game-state.js';
 import { installEventSourceInterceptor } from './network/event-source-interceptor.js';
 import { installFetchInterceptor } from './network/fetch-interceptor.js';
@@ -46,6 +47,7 @@ import {
     loadCaptchaBypassEnabled,
     loadClickDelaySettings,
     loadEnabled,
+    loadGameAutoFishingSettings,
     loadIdleReloadSettings,
     loadNotificationMode,
     loadPushKey,
@@ -62,6 +64,7 @@ import {
     saveCaptchaBypassEnabled,
     saveClickDelaySettings,
     saveEnabled,
+    saveGameAutoFishingSettings,
     saveIdleReloadSettings,
     saveNotificationMode,
     savePushKey,
@@ -76,6 +79,7 @@ let captchaBypassEnabled = loadCaptchaBypassEnabled();
 let pushKey = loadPushKey();
 let notificationMode = loadNotificationMode();
 let clickDelaySettings = loadClickDelaySettings();
+let gameAutoFishingSettings = loadGameAutoFishingSettings();
 let scheduleSettings = loadScheduleSettings();
 let autoBiomeSettings = loadAutoBiomeSettings();
 let autoBaitSettings = loadAutoBaitSettings();
@@ -87,6 +91,7 @@ let clickCount = 0;
 let captcha = null;
 let panel = null;
 let schedule = null;
+let gameAutoFishing = null;
 let autoBiome = null;
 let autoBait = null;
 let autoBoss = null;
@@ -206,6 +211,7 @@ function getPanelState() {
         clickCount,
         earningsStats,
         enabled,
+        gameAutoFishingSettings,
         idleReloadSettings,
         autoBaitSettings,
         autoBiomeSettings,
@@ -239,6 +245,10 @@ function getPanelState() {
             autoBossLastStat: null,
             autoBossStatus: '未启用',
         }),
+        ...(gameAutoFishing?.getSnapshot() ?? {
+            gameAutoFishingMayBeActive: false,
+            gameAutoFishingStatus: '未启用',
+        }),
         ...schedule.getSnapshot(),
     };
 }
@@ -258,7 +268,11 @@ function handleAutomationStateChanged({ forceBait = false } = {}) {
 }
 
 function reloadIfFishingIdle() {
-    if (!enabled || schedule?.getSnapshot().schedulePhase === 'rest') {
+    if (
+        !enabled ||
+        gameAutoFishingSettings.enabled ||
+        schedule?.getSnapshot().schedulePhase === 'rest'
+    ) {
         return false;
     }
 
@@ -598,6 +612,51 @@ async function waitWithCountdown(milliseconds, isLongDelay, currentLoopId) {
     return false;
 }
 
+async function waitForGameAutoFishingStopped(currentLoopId) {
+    while (currentLoopId === loopId) {
+        if (gameAutoFishing.ensureStopped()) {
+            return true;
+        }
+
+        panel.setStatus('正在停止游戏内置自动钓鱼');
+        panel.setNextDelay('停止后恢复脚本自动钓鱼');
+        await sleep(CONFIG.gameAutoFishingPollInterval);
+    }
+
+    return false;
+}
+
+async function waitForGameAutoFishingWork(currentLoopId) {
+    while (
+        enabled &&
+        currentLoopId === loopId &&
+        gameAutoFishingSettings.enabled
+    ) {
+        if (schedule.isWorkExpired()) {
+            return;
+        }
+
+        if (captcha.stopIfChallengeFound()) {
+            return;
+        }
+
+        const state = await gameAutoFishing.ensureActive();
+
+        panel.setStatus(
+            state.active
+                ? '游戏内置自动钓鱼运行中'
+                : state.available
+                  ? '等待游戏内置自动钓鱼可用'
+                  : '等待进入钓鱼页面',
+        );
+        panel.setNextDelay(
+            state.active ? '本轮结束后自动续期' : '自动重试启动',
+        );
+
+        await sleep(CONFIG.gameAutoFishingPollInterval);
+    }
+}
+
 /**
  * 主循环。
  */
@@ -606,6 +665,25 @@ async function runLoop(currentLoopId) {
         const scheduleReady = await schedule.waitForWork(currentLoopId);
 
         if (!scheduleReady) {
+            return;
+        }
+
+        if (gameAutoFishingSettings.enabled) {
+            await waitForGameAutoFishingWork(currentLoopId);
+
+            if (!enabled || currentLoopId !== loopId) {
+                return;
+            }
+
+            if (schedule.shouldEnterRest(currentLoopId)) {
+                continue;
+            }
+        }
+
+        const gameAutoFishingStopped =
+            await waitForGameAutoFishingStopped(currentLoopId);
+
+        if (!gameAutoFishingStopped || !enabled) {
             return;
         }
 
@@ -690,6 +768,18 @@ async function runLoop(currentLoopId) {
     }
 }
 
+function startRunLoop() {
+    const currentLoopId = loopId;
+
+    runLoop(currentLoopId).catch((error) => {
+        console.error('[自动抛竿] 运行异常：', error);
+
+        if (currentLoopId === loopId) {
+            panel.setStatus(`运行异常：${error.message}`);
+        }
+    });
+}
+
 /**
  * 开关控制。
  */
@@ -709,25 +799,69 @@ function setEnabled(nextEnabled) {
     panel.renderToggle();
 
     if (enabled) {
+        panel.setStatus(
+            gameAutoFishingSettings.enabled
+                ? '已启动，正在接管游戏内置自动钓鱼'
+                : '已启动，正在查找按钮',
+        );
+        panel.setNextDelay('—');
+        startRunLoop();
+    } else {
         const currentLoopId = loopId;
 
-        panel.setStatus('已启动，正在查找按钮');
         panel.setNextDelay('—');
 
-        runLoop(currentLoopId).catch((error) => {
-            console.error('[自动抛竿] 运行异常：', error);
-
-            if (currentLoopId === loopId) {
-                panel.setStatus(`运行异常：${error.message}`);
-            }
-        });
-    } else {
-        panel.setStatus('已停止');
-        panel.setNextDelay('—');
+        if (gameAutoFishing.ensureStopped()) {
+            panel.setStatus('已停止');
+        } else {
+            panel.setStatus('已停止，正在确认内置自动钓鱼已关闭');
+            void waitForGameAutoFishingStopped(currentLoopId).then(
+                (stopped) => {
+                    if (stopped && currentLoopId === loopId && !enabled) {
+                        panel.setStatus('已停止');
+                    }
+                },
+            );
+        }
     }
 
     handleAutomationStateChanged();
     autoBoss?.handleStateChanged();
+}
+
+function setGameAutoFishingEnabled(nextEnabled) {
+    gameAutoFishingSettings = {
+        ...gameAutoFishingSettings,
+        enabled: Boolean(nextEnabled),
+    };
+    saveGameAutoFishingSettings(gameAutoFishingSettings);
+    panel.renderGameAutoFishingSettings();
+    panel.renderAutoBaitSettings();
+
+    if (enabled) {
+        loopId += 1;
+        fishingActivityWatchdog.markFishing();
+        startRunLoop();
+    }
+}
+
+function setGameAutoFishingBaitGrade(nextGrade) {
+    gameAutoFishingSettings = {
+        ...gameAutoFishingSettings,
+        baitGrade: normalizeAutoBaitGrade(
+            nextGrade,
+            gameAutoFishingSettings.baitGrade,
+        ),
+    };
+    saveGameAutoFishingSettings(gameAutoFishingSettings);
+    panel.renderGameAutoFishingSettings();
+    panel.renderAutoBaitSettings();
+
+    if (enabled && gameAutoFishing.getSnapshot().gameAutoFishingMayBeActive) {
+        void autoBait?.prepareGameAutoFishing(
+            gameAutoFishingSettings.baitGrade,
+        );
+    }
 }
 
 function setCaptchaBypassEnabled(nextEnabled) {
@@ -900,6 +1034,16 @@ function setScheduleMinutes(field, value) {
     }
 }
 
+function setScheduleGameAutoFishingDuringRest(nextEnabled) {
+    scheduleSettings = {
+        ...scheduleSettings,
+        gameAutoFishingDuringRest: Boolean(nextEnabled),
+    };
+    saveScheduleSettings(scheduleSettings);
+    panel.renderScheduleSettings();
+    panel.renderAutoBaitSettings();
+}
+
 /**
  * 快捷键 Alt + A。
  */
@@ -944,8 +1088,35 @@ function initialize() {
                 scheduleSettings,
             };
         },
+        async onRestTick() {
+            if (scheduleSettings.gameAutoFishingDuringRest) {
+                const state = await gameAutoFishing.ensureActive();
+
+                return state.active
+                    ? '定时休息中（游戏内置自动钓鱼运行中）'
+                    : '定时休息中（等待游戏内置自动钓鱼）';
+            }
+
+            return gameAutoFishing.ensureStopped()
+                ? '定时休息中'
+                : '定时休息中（正在停止游戏内置自动钓鱼）';
+        },
         onWorkStarted() {
             fishingActivityWatchdog.markFishing();
+        },
+        prepareForWork() {
+            if (gameAutoFishingSettings.enabled) {
+                return true;
+            }
+
+            const stopped = gameAutoFishing.ensureStopped();
+
+            if (!stopped) {
+                panel?.setStatus('正在停止游戏内置自动钓鱼');
+                panel?.setNextDelay('停止后恢复脚本自动钓鱼');
+            }
+
+            return stopped;
         },
         renderSettings() {
             panel?.renderScheduleSettings();
@@ -958,6 +1129,38 @@ function initialize() {
         },
         setStatus(text) {
             panel?.setStatus(text);
+        },
+    });
+
+    gameAutoFishing = createGameAutoFishingController({
+        onStateChange() {
+            panel?.renderGameAutoFishingSettings();
+        },
+        prepareStart() {
+            return autoBait?.prepareGameAutoFishing(
+                gameAutoFishingSettings.baitGrade,
+            );
+        },
+        shouldStart() {
+            if (!enabled) {
+                return false;
+            }
+
+            const snapshot = schedule?.getSnapshot();
+
+            if (
+                scheduleSettings.enabled &&
+                snapshot?.schedulePhase === 'rest'
+            ) {
+                return (
+                    scheduleSettings.gameAutoFishingDuringRest &&
+                    schedule.isRestActive()
+                );
+            }
+
+            return (
+                gameAutoFishingSettings.enabled && !schedule?.isWorkExpired()
+            );
         },
     });
 
@@ -976,10 +1179,13 @@ function initialize() {
             setCaptchaBypassEnabled,
             setClickDelaySetting,
             setEnabled,
+            setGameAutoFishingBaitGrade,
+            setGameAutoFishingEnabled,
             setIdleReloadMinutes,
             setNotificationMode,
             setPushKey,
             setScheduleEnabled,
+            setScheduleGameAutoFishingDuringRest,
             setScheduleMinutes,
         },
         formatScheduleDuration,

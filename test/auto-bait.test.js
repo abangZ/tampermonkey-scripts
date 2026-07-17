@@ -221,6 +221,93 @@ test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async
     }
 });
 
+test('游戏内置自动钓鱼使用独立鱼饵并在启动前补足库存', async () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+    const player = {
+        baitInventory: {
+            bait_4_high: 20,
+        },
+        currentBiome: 4,
+        equippedBait: 'bait_4_low',
+        gold: 100000,
+    };
+
+    globalThis.window = {
+        ApiService: {
+            async buyBait(baitId, quantity) {
+                calls.push(['buyBait', baitId, quantity]);
+                return { newBaitQuantity: 120, success: true };
+            },
+            async equipBait(baitId) {
+                calls.push(['equipBait', baitId]);
+                return { success: true };
+            },
+        },
+        BAITS: [{ id: 'bait_4_high', name: 'Test Bait', price: 100 }],
+    };
+
+    try {
+        const controller = createAutoBaitController({
+            getPlayer: () => player,
+            getState() {
+                return {
+                    autoBaitSettings: {
+                        enabled: true,
+                        minimumQuantity: 100,
+                        purchaseQuantity: 100,
+                    },
+                    autoBiomeCompetitionBiomes: {},
+                    enabled: true,
+                };
+            },
+        });
+
+        assert.equal(await controller.prepareGameAutoFishing('high'), true);
+        assert.deepEqual(calls, [
+            ['buyBait', 'bait_4_high', 100],
+            ['equipBait', 'bait_4_high'],
+        ]);
+        assert.match(controller.getSnapshot().autoBaitStatus, /内置自动钓鱼/);
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('自动买鱼饵关闭时内置自动钓鱼保持当前鱼饵', async () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+
+    globalThis.window = {
+        ApiService: {
+            async buyBait(...args) {
+                calls.push(['buyBait', ...args]);
+            },
+            async equipBait(...args) {
+                calls.push(['equipBait', ...args]);
+            },
+        },
+    };
+
+    try {
+        const controller = createAutoBaitController({
+            getPlayer: () => ({
+                currentBiome: 4,
+                equippedBait: 'bait_4_low',
+            }),
+            getState: () => ({
+                autoBaitSettings: { enabled: false },
+                enabled: true,
+            }),
+        });
+
+        assert.equal(await controller.prepareGameAutoFishing('super'), true);
+        assert.deepEqual(calls, []);
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
 test('多个检查排队时不会因角色库存尚未同步而重复购买', async () => {
     const previousWindow = globalThis.window;
     const calls = [];

@@ -4,6 +4,7 @@ import {
     AUTO_BOSS_SETTINGS_STORAGE_KEY,
     CAPTCHA_BYPASS_STORAGE_KEY,
     CLICK_DELAY_SETTINGS_STORAGE_KEY,
+    GAME_AUTO_FISHING_SETTINGS_STORAGE_KEY,
     IDLE_RELOAD_SETTINGS_STORAGE_KEY,
     NOTIFICATION_MODE_STORAGE_KEY,
     PANEL_COLLAPSED_STORAGE_KEY,
@@ -60,6 +61,45 @@ export function saveEnabled(value) {
         localStorage.setItem(STORAGE_KEY, value ? '1' : '0');
     } catch (error) {
         console.warn('[自动抛竿] 无法保存设置：', error);
+    }
+}
+
+export function loadGameAutoFishingSettings() {
+    const defaults = {
+        baitGrade: 'low',
+        enabled: false,
+    };
+
+    try {
+        const savedSettings = JSON.parse(
+            localStorage.getItem(GAME_AUTO_FISHING_SETTINGS_STORAGE_KEY),
+        );
+
+        if (!savedSettings || typeof savedSettings !== 'object') {
+            return defaults;
+        }
+
+        return {
+            baitGrade: normalizeAutoBaitGrade(
+                savedSettings.baitGrade,
+                defaults.baitGrade,
+            ),
+            enabled: savedSettings.enabled === true,
+        };
+    } catch (error) {
+        console.warn('[游戏内置自动钓鱼] 无法读取设置：', error);
+        return defaults;
+    }
+}
+
+export function saveGameAutoFishingSettings(gameAutoFishingSettings) {
+    try {
+        localStorage.setItem(
+            GAME_AUTO_FISHING_SETTINGS_STORAGE_KEY,
+            JSON.stringify(gameAutoFishingSettings),
+        );
+    } catch (error) {
+        console.warn('[游戏内置自动钓鱼] 无法保存设置：', error);
     }
 }
 
@@ -350,6 +390,7 @@ export function normalizeScheduleMinutes(value, fallback) {
 export function loadScheduleSettings() {
     const defaults = {
         enabled: false,
+        gameAutoFishingDuringRest: false,
         workMinutes: 60,
         restMinutes: 10,
     };
@@ -365,6 +406,8 @@ export function loadScheduleSettings() {
 
         return {
             enabled: savedSettings.enabled === true,
+            gameAutoFishingDuringRest:
+                savedSettings.gameAutoFishingDuringRest === true,
             workMinutes: normalizeScheduleMinutes(
                 savedSettings.workMinutes,
                 defaults.workMinutes,

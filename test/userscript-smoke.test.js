@@ -98,6 +98,22 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         );
         assert.ok(host.shadowRoot.querySelector('#auto-bait-toggle'));
         assert.ok(host.shadowRoot.querySelector('#auto-boss-toggle'));
+        assert.ok(host.shadowRoot.querySelector('#game-auto-fishing-toggle'));
+        assert.equal(
+            host.shadowRoot.querySelector('#game-auto-fishing-bait-grade')
+                .value,
+            'low',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#game-auto-fishing-status')
+                .textContent,
+            '已停止',
+        );
+        assert.equal(
+            host.shadowRoot.querySelector('#schedule-game-auto-fishing-toggle')
+                .checked,
+            false,
+        );
         assert.equal(
             host.shadowRoot.querySelector('#auto-boss-status').textContent,
             '未启用',
@@ -169,7 +185,7 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         );
         assert.equal(
             host.shadowRoot.querySelectorAll('details.settings-section').length,
-            6,
+            7,
         );
         assert.equal(
             host.shadowRoot.querySelector('details.settings-section').open,
@@ -179,6 +195,69 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
             host.shadowRoot.querySelector('#auto-bait-purchase-quantity').value,
             '100',
         );
+
+        const gameAutoFishingToggle = host.shadowRoot.querySelector(
+            '#game-auto-fishing-toggle',
+        );
+        const gameAutoFishingBaitGrade = host.shadowRoot.querySelector(
+            '#game-auto-fishing-bait-grade',
+        );
+
+        gameAutoFishingBaitGrade.value = 'high';
+        gameAutoFishingBaitGrade.dispatchEvent(
+            new window.Event('change', { bubbles: true }),
+        );
+
+        gameAutoFishingToggle.click();
+        assert.deepEqual(
+            JSON.parse(
+                window.localStorage.getItem(
+                    'arcane-angler-game-auto-fishing-settings-v1',
+                ),
+            ),
+            { baitGrade: 'high', enabled: true },
+        );
+        gameAutoFishingToggle.click();
+
+        const autoBaitPurchaseSettings = host.shadowRoot.querySelector(
+            '#auto-bait-purchase-settings',
+        );
+        const scheduleGameAutoFishingToggle = host.shadowRoot.querySelector(
+            '#schedule-game-auto-fishing-toggle',
+        );
+        const setBaitGrade = (selector, value) => {
+            const input = host.shadowRoot.querySelector(selector);
+
+            input.value = value;
+            input.dispatchEvent(new window.Event('change', { bubbles: true }));
+        };
+
+        for (const selector of [
+            '#auto-bait-regular-grade',
+            '#auto-bait-personal-grade',
+            '#auto-bait-guild-grade',
+        ]) {
+            setBaitGrade(selector, 'default');
+        }
+
+        assert.equal(autoBaitPurchaseSettings.hidden, true);
+        gameAutoFishingToggle.click();
+        assert.equal(autoBaitPurchaseSettings.hidden, false);
+        gameAutoFishingToggle.click();
+        assert.equal(autoBaitPurchaseSettings.hidden, true);
+        scheduleGameAutoFishingToggle.click();
+        assert.equal(autoBaitPurchaseSettings.hidden, false);
+        scheduleGameAutoFishingToggle.click();
+        assert.equal(autoBaitPurchaseSettings.hidden, true);
+
+        for (const selector of [
+            '#auto-bait-regular-grade',
+            '#auto-bait-personal-grade',
+            '#auto-bait-guild-grade',
+        ]) {
+            setBaitGrade(selector, 'low');
+        }
+        assert.equal(autoBaitPurchaseSettings.hidden, false);
 
         const autoBaitMinimumQuantity = host.shadowRoot.querySelector(
             '#auto-bait-minimum-quantity',
