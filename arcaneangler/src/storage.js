@@ -1,6 +1,7 @@
 import {
     AUTO_BAIT_SETTINGS_STORAGE_KEY,
     AUTO_BIOME_SETTINGS_STORAGE_KEY,
+    AUTO_BOSS_SETTINGS_STORAGE_KEY,
     CAPTCHA_BYPASS_STORAGE_KEY,
     CLICK_DELAY_SETTINGS_STORAGE_KEY,
     IDLE_RELOAD_SETTINGS_STORAGE_KEY,
@@ -303,6 +304,36 @@ export function saveAutoBaitSettings(autoBaitSettings) {
         );
     } catch (error) {
         console.warn('[自动买鱼饵] 无法保存设置：', error);
+    }
+}
+
+export function loadAutoBossSettings() {
+    const defaults = {
+        enabled: false,
+    };
+
+    try {
+        const savedSettings = JSON.parse(
+            localStorage.getItem(AUTO_BOSS_SETTINGS_STORAGE_KEY),
+        );
+
+        return {
+            enabled: savedSettings?.enabled === true,
+        };
+    } catch (error) {
+        console.warn('[自动打 Boss] 无法读取设置：', error);
+        return defaults;
+    }
+}
+
+export function saveAutoBossSettings(autoBossSettings) {
+    try {
+        localStorage.setItem(
+            AUTO_BOSS_SETTINGS_STORAGE_KEY,
+            JSON.stringify(autoBossSettings),
+        );
+    } catch (error) {
+        console.warn('[自动打 Boss] 无法保存设置：', error);
     }
 }
 

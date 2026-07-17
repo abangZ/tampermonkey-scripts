@@ -97,6 +97,11 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
             false,
         );
         assert.ok(host.shadowRoot.querySelector('#auto-bait-toggle'));
+        assert.ok(host.shadowRoot.querySelector('#auto-boss-toggle'));
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-boss-status').textContent,
+            '未启用',
+        );
         assert.equal(
             host.shadowRoot.querySelector('#auto-bait-status').textContent,
             '未启用',

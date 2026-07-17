@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.7.2
+// @version      2.8.0
 // @author       Codex
-// @description  自动点击“抛竿线”按钮，带随机等待和启停控制
+// @description  自动抛竿和自动打 Boss，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
 // @downloadURL  https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
 // @updateURL    https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/arcaneangler/arcane-angler-auto-cast.user.js
@@ -81,7 +81,7 @@
 		if (baitGrade === "default") return catalogName ? `${gradeLabel}（${catalogName}）` : gradeLabel;
 		return `[B${biomeId}] ${gradeLabel}${catalogName ? `（${catalogName}）` : ""}`;
 	}
-	function getErrorMessage$1(error) {
+	function getErrorMessage$2(error) {
 		return String(error?.message ?? error ?? "未知错误");
 	}
 	function createAutoBaitController({ getPlayer, getState, onStateChange }) {
@@ -220,7 +220,7 @@
 				console.error("[自动买鱼饵] 检查或购买失败：", error);
 				retryBaitId = attemptedBaitId ?? currentBaitId;
 				retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
-				updateSnapshot({ nextStatus: `鱼饵处理失败：${getErrorMessage$1(error)}` });
+				updateSnapshot({ nextStatus: `鱼饵处理失败：${getErrorMessage$2(error)}` });
 			} finally {
 				checking = false;
 			}
@@ -397,7 +397,7 @@
 		const signedXpBonus = target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
 		return `${target.competitionType === "guild" ? "公会锦标赛优先 · " : target.competitionType === "personal" ? "个人比赛优先 · " : ""}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
 	}
-	function getErrorMessage(error) {
+	function getErrorMessage$1(error) {
 		return String(error?.message ?? error ?? "未知错误");
 	}
 	async function autoEquipForBiome(player, target, { skipBait = false, skipRod = false } = {}) {
@@ -644,7 +644,7 @@
 				await notifyBiomeReady(target.biomeId);
 			} catch (error) {
 				console.error("[自动换图] 切换地图失败：", error);
-				setStatus(`切图失败：${getErrorMessage(error)}`);
+				setStatus(`切图失败：${getErrorMessage$1(error)}`);
 			} finally {
 				switching = false;
 			}
@@ -691,6 +691,8 @@
 		captchaDragDelayMax: 1800,
 		captchaConfirmDelayMin: 1400,
 		captchaConfirmDelayMax: 2600,
+		autoBossAttackInterval: 6100,
+		autoBossPollInterval: 1e4,
 		scheduleRandomExtraRatioMin: -.05,
 		scheduleRandomExtraRatioMax: .1
 	};
@@ -702,6 +704,7 @@
 	var SCHEDULE_SETTINGS_STORAGE_KEY = "arcane-angler-schedule-settings-v1";
 	var AUTO_BIOME_SETTINGS_STORAGE_KEY = "arcane-angler-auto-biome-settings-v1";
 	var AUTO_BAIT_SETTINGS_STORAGE_KEY = "arcane-angler-auto-bait-settings-v1";
+	var AUTO_BOSS_SETTINGS_STORAGE_KEY = "arcane-angler-auto-boss-settings-v1";
 	var IDLE_RELOAD_SETTINGS_STORAGE_KEY = "arcane-angler-idle-reload-settings-v1";
 	var PANEL_COLLAPSED_STORAGE_KEY = "arcane-angler-panel-collapsed-v1";
 	var EARNINGS_STORAGE_KEY = "arcane-angler-earnings-v1";
@@ -761,6 +764,186 @@
 			tone: "gear"
 		}
 	};
+	var BOSS_STAT_LABELS = {
+		strength: "力量",
+		intelligence: "智力",
+		luck: "幸运",
+		stamina: "耐力"
+	};
+	var BOSS_STATS = Object.keys(BOSS_STAT_LABELS);
+	function normalizeNumber(value) {
+		const number = Number(value);
+		return Number.isFinite(number) && number > 0 ? number : 0;
+	}
+	function getStatMultiplier(anomaly, stat) {
+		if (stat === anomaly?.primaryWeakness) return 3.75;
+		if (stat === anomaly?.secondaryWeakness) return 2;
+		if (stat === anomaly?.resistantStat) return .375;
+		return 1.125;
+	}
+	function getPlayerBossStats(player) {
+		let totalStats = null;
+		try {
+			totalStats = window.GameHelpers?.getTotalStats?.(player, null) ?? null;
+		} catch (error) {
+			console.warn("[自动打 Boss] 无法计算装备后的角色属性：", error);
+		}
+		const source = totalStats ?? player?.stats ?? player ?? {};
+		return Object.fromEntries(BOSS_STATS.map((stat) => [stat, normalizeNumber(source[stat])]));
+	}
+	function selectBestBossStat(anomaly, stats) {
+		const fallback = BOSS_STATS.includes(anomaly?.primaryWeakness) ? anomaly.primaryWeakness : "strength";
+		let bestStat = fallback;
+		let bestDamage = -1;
+		for (const stat of BOSS_STATS) {
+			const damage = normalizeNumber(stats?.[stat]) * getStatMultiplier(anomaly, stat);
+			if (damage > bestDamage) {
+				bestStat = stat;
+				bestDamage = damage;
+			}
+		}
+		return bestDamage > 0 ? bestStat : fallback;
+	}
+	function getErrorMessage(error) {
+		return String(error?.message ?? error ?? "未知错误");
+	}
+	function createAutoBossController({ getPlayer, getState, onStateChange }) {
+		let timer = null;
+		let checking = false;
+		let started = false;
+		let status = "未启用";
+		let lastAttackAt = 0;
+		let lastDamage = 0;
+		let lastStat = null;
+		let reevaluateAfterCurrent = false;
+		let revision = 0;
+		function notifyStateChanged() {
+			onStateChange?.();
+		}
+		function setStatus(nextStatus) {
+			status = nextStatus;
+			notifyStateChanged();
+		}
+		function schedule(delay) {
+			window.clearTimeout(timer);
+			timer = null;
+			if (!started) return;
+			timer = window.setTimeout(() => {
+				evaluate().catch((error) => {
+					checking = false;
+					reevaluateAfterCurrent = false;
+					console.error("[自动打 Boss] 未处理的运行异常：", error);
+					try {
+						setStatus(`运行异常：${getErrorMessage(error)}`);
+					} finally {
+						schedule(CONFIG.autoBossPollInterval);
+					}
+				});
+			}, delay);
+		}
+		function getSnapshot() {
+			return {
+				autoBossChecking: checking,
+				autoBossLastAttackAt: lastAttackAt,
+				autoBossLastDamage: lastDamage,
+				autoBossLastStat: lastStat,
+				autoBossStatus: status
+			};
+		}
+		async function evaluate() {
+			if (checking) {
+				reevaluateAfterCurrent = true;
+				return;
+			}
+			const currentRevision = ++revision;
+			const { autoBossSettings, enabled } = getState();
+			if (!autoBossSettings.enabled) {
+				setStatus("未启用");
+				return;
+			}
+			if (!enabled) {
+				setStatus("脚本启动后自动攻击");
+				return;
+			}
+			const api = window.ApiService;
+			if (typeof api?.getCurrentAnomaly !== "function" || typeof api?.attackAnomaly !== "function") {
+				setStatus("等待游戏 Boss 接口");
+				schedule(CONFIG.autoBossPollInterval);
+				return;
+			}
+			checking = true;
+			setStatus("正在检查世界 Boss");
+			try {
+				const current = await api.getCurrentAnomaly();
+				const event = current?.event;
+				if (currentRevision !== revision || !getState().enabled || !getState().autoBossSettings.enabled) return;
+				if (current?.active !== true || !event?.anomaly || normalizeNumber(event.currentHp) === 0) {
+					setStatus("暂无活动 Boss");
+					schedule(CONFIG.autoBossPollInterval);
+					return;
+				}
+				const lastServerAttackAt = Date.parse(current.playerParticipation?.lastAttackTime ?? "");
+				const cooldownRemaining = Number.isFinite(lastServerAttackAt) ? lastServerAttackAt + CONFIG.autoBossAttackInterval - Date.now() : 0;
+				if (cooldownRemaining > 0) {
+					setStatus(`冷却中，${Math.ceil(cooldownRemaining / 1e3)} 秒后攻击`);
+					schedule(cooldownRemaining);
+					return;
+				}
+				const stat = selectBestBossStat(event.anomaly, getPlayerBossStats(getPlayer?.()));
+				const statLabel = BOSS_STAT_LABELS[stat];
+				setStatus(`正在使用${statLabel}攻击`);
+				const result = await api.attackAnomaly(stat);
+				if (!result?.attack) throw new Error(result?.message ?? "游戏未返回攻击结果");
+				lastAttackAt = Date.now();
+				lastDamage = normalizeNumber(result.attack.finalDamage);
+				lastStat = stat;
+				setStatus(result.anomaly?.defeated ? `已击败 ${result.anomaly.name ?? "世界 Boss"}` : `${statLabel}造成 ${lastDamage.toLocaleString()} 伤害`);
+				schedule(CONFIG.autoBossAttackInterval);
+			} catch (error) {
+				console.error("[自动打 Boss] 攻击失败：", error);
+				setStatus(`攻击失败：${getErrorMessage(error)}`);
+				schedule(CONFIG.autoBossAttackInterval);
+			} finally {
+				checking = false;
+				if (reevaluateAfterCurrent) {
+					reevaluateAfterCurrent = false;
+					schedule(0);
+				}
+			}
+		}
+		function handleStateChanged() {
+			revision += 1;
+			window.clearTimeout(timer);
+			timer = null;
+			if (!started) return;
+			const { autoBossSettings, enabled } = getState();
+			if (!autoBossSettings.enabled) {
+				reevaluateAfterCurrent = false;
+				setStatus("未启用");
+				return;
+			}
+			if (!enabled) {
+				reevaluateAfterCurrent = false;
+				setStatus("脚本启动后自动攻击");
+				return;
+			}
+			if (checking) {
+				reevaluateAfterCurrent = true;
+				return;
+			}
+			schedule(0);
+		}
+		function start() {
+			started = true;
+			handleStateChanged();
+		}
+		return {
+			checkNow: evaluate,
+			getSnapshot,
+			handleStateChanged,
+			start
+		};
+	}
 	function normalizeText(text) {
 		return String(text ?? "").replace(/\s+/g, " ").trim();
 	}
@@ -1942,6 +2125,22 @@
 			console.warn("[自动买鱼饵] 无法保存设置：", error);
 		}
 	}
+	function loadAutoBossSettings() {
+		const defaults = { enabled: false };
+		try {
+			return { enabled: JSON.parse(localStorage.getItem(AUTO_BOSS_SETTINGS_STORAGE_KEY))?.enabled === true };
+		} catch (error) {
+			console.warn("[自动打 Boss] 无法读取设置：", error);
+			return defaults;
+		}
+	}
+	function saveAutoBossSettings(autoBossSettings) {
+		try {
+			localStorage.setItem(AUTO_BOSS_SETTINGS_STORAGE_KEY, JSON.stringify(autoBossSettings));
+		} catch (error) {
+			console.warn("[自动打 Boss] 无法保存设置：", error);
+		}
+	}
 	function normalizeScheduleMinutes(value, fallback) {
 		const minutes = Number(value);
 		if (!Number.isFinite(minutes) || minutes < 1) return fallback;
@@ -1998,7 +2197,7 @@
 		let autoBaitPurchaseSaveTimer = null;
 		let autoBaitPurchaseSettingsDirty = false;
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitPurchaseSettings, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setClickDelaySetting, setEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitPurchaseSettings, setAutoBossEnabled, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setClickDelaySetting, setEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
@@ -2124,6 +2323,11 @@
           <span id="auto-bait-status" class="value">未启用</span>
         </div>
 
+        <div class="row">
+          <span class="label">Boss 状态</span>
+          <span id="auto-boss-status" class="value">未启用</span>
+        </div>
+
         <label class="option-row">
           <span>自动换地图</span>
           <span class="switch">
@@ -2145,6 +2349,19 @@
               type="checkbox"
               role="switch"
               aria-label="自动买鱼饵"
+            />
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
+
+        <label class="option-row">
+          <span>自动打 Boss</span>
+          <span class="switch">
+            <input
+              id="auto-boss-toggle"
+              type="checkbox"
+              role="switch"
+              aria-label="自动打 Boss"
             />
             <span class="switch-track" aria-hidden="true"></span>
           </span>
@@ -2673,6 +2890,8 @@
 				autoBiomeUpdatedAt: shadowRoot.querySelector("#auto-biome-updated-at"),
 				autoBaitStatus: shadowRoot.querySelector("#auto-bait-status"),
 				autoBaitToggle: shadowRoot.querySelector("#auto-bait-toggle"),
+				autoBossStatus: shadowRoot.querySelector("#auto-boss-status"),
+				autoBossToggle: shadowRoot.querySelector("#auto-boss-toggle"),
 				autoBaitRegularGrade: shadowRoot.querySelector("#auto-bait-regular-grade"),
 				autoBaitPersonalGrade: shadowRoot.querySelector("#auto-bait-personal-grade"),
 				autoBaitGuildGrade: shadowRoot.querySelector("#auto-bait-guild-grade"),
@@ -2747,6 +2966,9 @@
 			});
 			ui.autoBaitToggle.addEventListener("change", (event) => {
 				setAutoBaitEnabled(event.currentTarget.checked);
+			});
+			ui.autoBossToggle.addEventListener("change", (event) => {
+				setAutoBossEnabled(event.currentTarget.checked);
 			});
 			ui.autoBaitRegularGrade.addEventListener("change", (event) => {
 				setAutoBaitGrade("regularBaitGrade", event.currentTarget.value);
@@ -2825,6 +3047,7 @@
 			renderToggle();
 			renderAutoBaitSettings();
 			renderAutoBiomeSettings();
+			renderAutoBossSettings();
 			renderCaptchaBypassToggle();
 			renderClickDelaySettings();
 			renderIdleReloadSettings();
@@ -2874,6 +3097,7 @@
 			else if (panelView === "settings") {
 				renderAutoBaitSettings();
 				renderAutoBiomeSettings();
+				renderAutoBossSettings();
 				renderClickDelaySettings();
 				renderIdleReloadSettings();
 				renderNotificationSettings();
@@ -3137,6 +3361,13 @@
 			}
 			ui.autoBaitLastPurchasedAt.textContent = autoBaitLastPurchasedAt ? new Date(autoBaitLastPurchasedAt).toLocaleTimeString() : "暂无";
 		}
+		function renderAutoBossSettings() {
+			if (!ui?.autoBossToggle) return;
+			const { autoBossSettings, autoBossStatus } = getState();
+			ui.autoBossToggle.checked = autoBossSettings.enabled;
+			ui.autoBossToggle.setAttribute("aria-checked", autoBossSettings.enabled ? "true" : "false");
+			ui.autoBossStatus.textContent = autoBossStatus;
+		}
 		function renderIdleReloadSettings() {
 			if (!ui?.idleReloadMinutes) return;
 			ui.idleReloadMinutes.value = String(getState().idleReloadSettings.minutes);
@@ -3166,6 +3397,7 @@
 		return {
 			renderAutoBaitSettings,
 			renderAutoBiomeSettings,
+			renderAutoBossSettings,
 			renderCaptchaBypassToggle,
 			renderClickDelaySettings,
 			renderEarningsStats,
@@ -3187,6 +3419,7 @@
 	var scheduleSettings = loadScheduleSettings();
 	var autoBiomeSettings = loadAutoBiomeSettings();
 	var autoBaitSettings = loadAutoBaitSettings();
+	var autoBossSettings = loadAutoBossSettings();
 	var idleReloadSettings = loadIdleReloadSettings();
 	var earningsStats = loadEarningsStats();
 	var loopId = 0;
@@ -3196,6 +3429,7 @@
 	var schedule = null;
 	var autoBiome = null;
 	var autoBait = null;
+	var autoBoss = null;
 	var forceNextAutoBaitCheck = false;
 	var pendingCaptchaChallenge = null;
 	var pendingCompetitionResponses = new Map();
@@ -3280,6 +3514,7 @@
 			idleReloadSettings,
 			autoBaitSettings,
 			autoBiomeSettings,
+			autoBossSettings,
 			notificationMode,
 			pushKey,
 			scheduleSettings,
@@ -3301,6 +3536,13 @@
 				autoBaitLastCheckedAt: 0,
 				autoBaitLastPurchasedAt: 0,
 				autoBaitStatus: "未启用"
+			},
+			...autoBoss?.getSnapshot() ?? {
+				autoBossChecking: false,
+				autoBossLastAttackAt: 0,
+				autoBossLastDamage: 0,
+				autoBossLastStat: null,
+				autoBossStatus: "未启用"
 			},
 			...schedule.getSnapshot()
 		};
@@ -3545,6 +3787,7 @@
 			panel.setNextDelay("—");
 		}
 		handleAutomationStateChanged();
+		autoBoss?.handleStateChanged();
 	}
 	function setCaptchaBypassEnabled(nextEnabled) {
 		captchaBypassEnabled = Boolean(nextEnabled);
@@ -3605,6 +3848,15 @@
 	}
 	function setAutoBaitEnabled(nextEnabled) {
 		updateAutoBaitSettings({ enabled: Boolean(nextEnabled) });
+	}
+	function setAutoBossEnabled(nextEnabled) {
+		autoBossSettings = {
+			...autoBossSettings,
+			enabled: Boolean(nextEnabled)
+		};
+		saveAutoBossSettings(autoBossSettings);
+		panel.renderAutoBossSettings();
+		autoBoss?.handleStateChanged();
 	}
 	function setAutoBaitGrade(field, nextGrade) {
 		if (!AUTO_BAIT_GRADE_FIELDS.has(field)) return;
@@ -3696,6 +3948,7 @@
 				setAutoBaitEnabled,
 				setAutoBaitGrade,
 				setAutoBaitPurchaseSettings,
+				setAutoBossEnabled,
 				setAutoBiomeEnabled,
 				setAutoBiomeChaseGoldBreeze,
 				setAutoBiomePreferCompetition,
@@ -3736,6 +3989,13 @@
 				panel?.renderAutoBaitSettings();
 			}
 		});
+		autoBoss = createAutoBossController({
+			getPlayer: gameState.getPlayerSnapshot,
+			getState: getPanelState,
+			onStateChange() {
+				panel?.renderAutoBossSettings();
+			}
+		});
 		autoBiome = createAutoBiomeController({
 			getPlayer: gameState.getPlayerSnapshot,
 			getState: getPanelState,
@@ -3761,6 +4021,7 @@
 		}
 		setEnabled(enabled);
 		autoBiome.start();
+		autoBoss.start();
 		console.info("[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。");
 	}
 	if (document.body) initialize();

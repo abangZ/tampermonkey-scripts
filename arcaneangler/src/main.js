@@ -9,6 +9,7 @@
 
 import { createAutoBiomeController } from './auto-biome.js';
 import { createAutoBaitController } from './auto-bait.js';
+import { createAutoBossController } from './auto-boss.js';
 import { createCaptchaController } from './captcha.js';
 import {
     getRandomClickDelay,
@@ -41,6 +42,7 @@ import {
 import {
     loadAutoBaitSettings,
     loadAutoBiomeSettings,
+    loadAutoBossSettings,
     loadCaptchaBypassEnabled,
     loadClickDelaySettings,
     loadEnabled,
@@ -56,6 +58,7 @@ import {
     normalizeScheduleMinutes,
     saveAutoBaitSettings,
     saveAutoBiomeSettings,
+    saveAutoBossSettings,
     saveCaptchaBypassEnabled,
     saveClickDelaySettings,
     saveEnabled,
@@ -76,6 +79,7 @@ let clickDelaySettings = loadClickDelaySettings();
 let scheduleSettings = loadScheduleSettings();
 let autoBiomeSettings = loadAutoBiomeSettings();
 let autoBaitSettings = loadAutoBaitSettings();
+let autoBossSettings = loadAutoBossSettings();
 let idleReloadSettings = loadIdleReloadSettings();
 let earningsStats = loadEarningsStats();
 let loopId = 0;
@@ -85,6 +89,7 @@ let panel = null;
 let schedule = null;
 let autoBiome = null;
 let autoBait = null;
+let autoBoss = null;
 let forceNextAutoBaitCheck = false;
 let pendingCaptchaChallenge = null;
 const pendingCompetitionResponses = new Map();
@@ -204,6 +209,7 @@ function getPanelState() {
         idleReloadSettings,
         autoBaitSettings,
         autoBiomeSettings,
+        autoBossSettings,
         notificationMode,
         pushKey,
         scheduleSettings,
@@ -225,6 +231,13 @@ function getPanelState() {
             autoBaitLastCheckedAt: 0,
             autoBaitLastPurchasedAt: 0,
             autoBaitStatus: '未启用',
+        }),
+        ...(autoBoss?.getSnapshot() ?? {
+            autoBossChecking: false,
+            autoBossLastAttackAt: 0,
+            autoBossLastDamage: 0,
+            autoBossLastStat: null,
+            autoBossStatus: '未启用',
         }),
         ...schedule.getSnapshot(),
     };
@@ -714,6 +727,7 @@ function setEnabled(nextEnabled) {
     }
 
     handleAutomationStateChanged();
+    autoBoss?.handleStateChanged();
 }
 
 function setCaptchaBypassEnabled(nextEnabled) {
@@ -793,6 +807,16 @@ function updateAutoBaitSettings(nextSettings) {
 
 function setAutoBaitEnabled(nextEnabled) {
     updateAutoBaitSettings({ enabled: Boolean(nextEnabled) });
+}
+
+function setAutoBossEnabled(nextEnabled) {
+    autoBossSettings = {
+        ...autoBossSettings,
+        enabled: Boolean(nextEnabled),
+    };
+    saveAutoBossSettings(autoBossSettings);
+    panel.renderAutoBossSettings();
+    autoBoss?.handleStateChanged();
 }
 
 function setAutoBaitGrade(field, nextGrade) {
@@ -944,6 +968,7 @@ function initialize() {
             setAutoBaitEnabled,
             setAutoBaitGrade,
             setAutoBaitPurchaseSettings,
+            setAutoBossEnabled,
             setAutoBiomeEnabled,
             setAutoBiomeChaseGoldBreeze,
             setAutoBiomePreferCompetition,
@@ -987,6 +1012,14 @@ function initialize() {
         },
     });
 
+    autoBoss = createAutoBossController({
+        getPlayer: gameState.getPlayerSnapshot,
+        getState: getPanelState,
+        onStateChange() {
+            panel?.renderAutoBossSettings();
+        },
+    });
+
     autoBiome = createAutoBiomeController({
         getPlayer: gameState.getPlayerSnapshot,
         getState: getPanelState,
@@ -1021,6 +1054,7 @@ function initialize() {
     // 第一次安装默认关闭；之后恢复上次保存的状态
     setEnabled(enabled);
     autoBiome.start();
+    autoBoss.start();
 
     console.info('[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。');
 }

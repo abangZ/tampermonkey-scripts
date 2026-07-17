@@ -22,6 +22,7 @@ export function createPanelController({
         setAutoBaitEnabled,
         setAutoBaitGrade,
         setAutoBaitPurchaseSettings,
+        setAutoBossEnabled,
         setAutoBiomeEnabled,
         setAutoBiomeChaseGoldBreeze,
         setAutoBiomePreferCompetition,
@@ -195,6 +196,11 @@ export function createPanelController({
           <span id="auto-bait-status" class="value">未启用</span>
         </div>
 
+        <div class="row">
+          <span class="label">Boss 状态</span>
+          <span id="auto-boss-status" class="value">未启用</span>
+        </div>
+
         <label class="option-row">
           <span>自动换地图</span>
           <span class="switch">
@@ -216,6 +222,19 @@ export function createPanelController({
               type="checkbox"
               role="switch"
               aria-label="自动买鱼饵"
+            />
+            <span class="switch-track" aria-hidden="true"></span>
+          </span>
+        </label>
+
+        <label class="option-row">
+          <span>自动打 Boss</span>
+          <span class="switch">
+            <input
+              id="auto-boss-toggle"
+              type="checkbox"
+              role="switch"
+              aria-label="自动打 Boss"
             />
             <span class="switch-track" aria-hidden="true"></span>
           </span>
@@ -766,6 +785,8 @@ export function createPanelController({
             ),
             autoBaitStatus: shadowRoot.querySelector('#auto-bait-status'),
             autoBaitToggle: shadowRoot.querySelector('#auto-bait-toggle'),
+            autoBossStatus: shadowRoot.querySelector('#auto-boss-status'),
+            autoBossToggle: shadowRoot.querySelector('#auto-boss-toggle'),
             autoBaitRegularGrade: shadowRoot.querySelector(
                 '#auto-bait-regular-grade',
             ),
@@ -885,6 +906,10 @@ export function createPanelController({
             setAutoBaitEnabled(event.currentTarget.checked);
         });
 
+        ui.autoBossToggle.addEventListener('change', (event) => {
+            setAutoBossEnabled(event.currentTarget.checked);
+        });
+
         ui.autoBaitRegularGrade.addEventListener('change', (event) => {
             setAutoBaitGrade('regularBaitGrade', event.currentTarget.value);
         });
@@ -1000,6 +1025,7 @@ export function createPanelController({
         renderToggle();
         renderAutoBaitSettings();
         renderAutoBiomeSettings();
+        renderAutoBossSettings();
         renderCaptchaBypassToggle();
         renderClickDelaySettings();
         renderIdleReloadSettings();
@@ -1065,6 +1091,7 @@ export function createPanelController({
         } else if (panelView === 'settings') {
             renderAutoBaitSettings();
             renderAutoBiomeSettings();
+            renderAutoBossSettings();
             renderClickDelaySettings();
             renderIdleReloadSettings();
             renderNotificationSettings();
@@ -1605,6 +1632,21 @@ export function createPanelController({
             : '暂无';
     }
 
+    function renderAutoBossSettings() {
+        if (!ui?.autoBossToggle) {
+            return;
+        }
+
+        const { autoBossSettings, autoBossStatus } = getState();
+
+        ui.autoBossToggle.checked = autoBossSettings.enabled;
+        ui.autoBossToggle.setAttribute(
+            'aria-checked',
+            autoBossSettings.enabled ? 'true' : 'false',
+        );
+        ui.autoBossStatus.textContent = autoBossStatus;
+    }
+
     function renderIdleReloadSettings() {
         if (!ui?.idleReloadMinutes) {
             return;
@@ -1669,6 +1711,7 @@ export function createPanelController({
     return {
         renderAutoBaitSettings,
         renderAutoBiomeSettings,
+        renderAutoBossSettings,
         renderCaptchaBypassToggle,
         renderClickDelaySettings,
         renderEarningsStats,

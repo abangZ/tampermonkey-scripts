@@ -24,6 +24,10 @@ export const CONFIG = {
     captchaConfirmDelayMin: 1400,
     captchaConfirmDelayMax: 2600,
 
+    // 世界 Boss 成功攻击后，游戏页面会进入 6 秒冷却。
+    autoBossAttackInterval: 6100,
+    autoBossPollInterval: 10000,
+
     // 定时运行/休息会在设置值上加入 -5%～+10% 的随机量
     scheduleRandomExtraRatioMin: -0.05,
     scheduleRandomExtraRatioMax: 0.1,
@@ -43,6 +47,8 @@ export const AUTO_BIOME_SETTINGS_STORAGE_KEY =
     'arcane-angler-auto-biome-settings-v1';
 export const AUTO_BAIT_SETTINGS_STORAGE_KEY =
     'arcane-angler-auto-bait-settings-v1';
+export const AUTO_BOSS_SETTINGS_STORAGE_KEY =
+    'arcane-angler-auto-boss-settings-v1';
 export const IDLE_RELOAD_SETTINGS_STORAGE_KEY =
     'arcane-angler-idle-reload-settings-v1';
 export const PANEL_COLLAPSED_STORAGE_KEY = 'arcane-angler-panel-collapsed-v1';
