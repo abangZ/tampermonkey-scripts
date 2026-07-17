@@ -103,8 +103,9 @@ test('金风天气使用独立鱼饵设置且默认为免费饵', () => {
 test('自动买鱼饵设置会限制等级、阈值和商店购买数量', () => {
     assert.equal(normalizeAutoBaitGrade('super'), 'super');
     assert.equal(normalizeAutoBaitGrade('unknown'), 'low');
-    assert.equal(normalizeAutoBaitMinimumQuantity(149), 100);
-    assert.equal(normalizeAutoBaitMinimumQuantity(151), 200);
+    assert.equal(normalizeAutoBaitMinimumQuantity(49), 49);
+    assert.equal(normalizeAutoBaitMinimumQuantity(151), 151);
+    assert.equal(normalizeAutoBaitMinimumQuantity(0), 100);
     assert.equal(normalizeAutoBaitPurchaseQuantity(1000), 1000);
     assert.equal(normalizeAutoBaitPurchaseQuantity(500), 100);
     assert.equal(normalizeIdleReloadMinutes(5), 5);
@@ -220,6 +221,71 @@ test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async
     }
 });
 
+test('多个检查排队时不会因角色库存尚未同步而重复购买', async () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+    const player = {
+        baitInventory: {
+            bait_3_medium: 0,
+        },
+        currentBiome: 3,
+        equippedBait: 'bait_3_low',
+        gold: 100000,
+    };
+
+    globalThis.window = {
+        ApiService: {
+            async buyBait(baitId, quantity) {
+                calls.push(['buyBait', baitId, quantity]);
+                return {
+                    newBaitQuantity: 100,
+                    success: true,
+                };
+            },
+            async equipBait(baitId) {
+                calls.push(['equipBait', baitId]);
+                return { success: true };
+            },
+        },
+        BAITS: [
+            {
+                id: 'bait_3_medium',
+                name: 'Test Larva',
+                price: 100,
+            },
+        ],
+    };
+
+    try {
+        const controller = createAutoBaitController({
+            getPlayer() {
+                return player;
+            },
+            getState() {
+                return {
+                    autoBaitSettings: {
+                        baitGrade: 'medium',
+                        enabled: true,
+                        minimumQuantity: 100,
+                        purchaseQuantity: 100,
+                    },
+                    enabled: true,
+                };
+            },
+        });
+
+        await Promise.all([
+            controller.checkNow({ force: true }),
+            controller.checkNow({ force: true }),
+        ]);
+
+        assert.equal(calls.filter(([name]) => name === 'buyBait').length, 1);
+        assert.equal(controller.getSnapshot().autoBaitCurrentQuantity, 100);
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
 test('默认饵只自动装备，不发起购买', async () => {
     const previousWindow = globalThis.window;
     const calls = [];
@@ -265,9 +331,11 @@ test('默认饵只自动装备，不发起购买', async () => {
     }
 });
 
-test('金币不足时保留并装备剩余鱼饵，不发起购买', async () => {
+test('金币不足时切换免费饵，金币足够后恢复购买目标鱼饵', async () => {
     const previousWindow = globalThis.window;
+    const previousDateNow = Date.now;
     const calls = [];
+    let now = 1000;
     const player = {
         baitInventory: {
             bait_5_super: 20,
@@ -281,6 +349,10 @@ test('金币不足时保留并装备剩余鱼饵，不发起购买', async () =>
         ApiService: {
             async buyBait(baitId, quantity) {
                 calls.push(['buyBait', baitId, quantity]);
+                return {
+                    newBaitQuantity: 120,
+                    success: true,
+                };
             },
             async equipBait(baitId) {
                 calls.push(['equipBait', baitId]);
@@ -295,6 +367,7 @@ test('金币不足时保留并装备剩余鱼饵，不发起购买', async () =>
             },
         ],
     };
+    Date.now = () => now;
 
     try {
         const controller = createAutoBaitController({
@@ -316,9 +389,23 @@ test('金币不足时保留并装备剩余鱼饵，不发起购买', async () =>
 
         await controller.checkNow();
 
-        assert.deepEqual(calls, [['equipBait', 'bait_5_super']]);
+        assert.deepEqual(calls, [['equipBait', 'bait_default']]);
         assert.match(controller.getSnapshot().autoBaitStatus, /购买需/);
+        assert.match(controller.getSnapshot().autoBaitStatus, /免费饵/);
+
+        player.equippedBait = 'bait_default';
+        player.gold = 100000;
+        now += 60000;
+        await controller.checkNow();
+
+        assert.deepEqual(calls, [
+            ['equipBait', 'bait_default'],
+            ['buyBait', 'bait_5_super', 100],
+            ['equipBait', 'bait_5_super'],
+        ]);
+        assert.match(controller.getSnapshot().autoBaitStatus, /已购买/);
     } finally {
+        Date.now = previousDateNow;
         globalThis.window = previousWindow;
     }
 });

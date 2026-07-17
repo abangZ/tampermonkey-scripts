@@ -181,10 +181,30 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         const autoBaitPurchaseQuantity = host.shadowRoot.querySelector(
             '#auto-bait-purchase-quantity',
         );
+        const autoBaitToggle =
+            host.shadowRoot.querySelector('#auto-bait-toggle');
 
-        autoBaitMinimumQuantity.value = '700';
+        autoBaitMinimumQuantity.value = '';
         autoBaitMinimumQuantity.dispatchEvent(
             new window.Event('input', { bubbles: true }),
+        );
+        autoBaitToggle.click();
+        autoBaitToggle.click();
+        await Promise.resolve();
+        assert.equal(autoBaitMinimumQuantity.value, '');
+
+        autoBaitMinimumQuantity.value = '75';
+        autoBaitMinimumQuantity.dispatchEvent(
+            new window.Event('input', { bubbles: true }),
+        );
+        await new Promise((resolve) => setTimeout(resolve, 350));
+        assert.equal(
+            JSON.parse(
+                window.localStorage.getItem(
+                    'arcane-angler-auto-bait-settings-v1',
+                ),
+            ).minimumQuantity,
+            75,
         );
         autoBaitPurchaseQuantity.value = '1000';
         autoBaitPurchaseQuantity.dispatchEvent(
@@ -201,15 +221,12 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
                 enabled: false,
                 goldBreezeBaitGrade: 'default',
                 guildCompetitionBaitGrade: 'low',
-                minimumQuantity: 700,
+                minimumQuantity: 75,
                 personalCompetitionBaitGrade: 'low',
                 purchaseQuantity: 1000,
                 regularBaitGrade: 'low',
             },
         );
-
-        const autoBaitToggle =
-            host.shadowRoot.querySelector('#auto-bait-toggle');
 
         autoBaitToggle.click();
         await Promise.resolve();

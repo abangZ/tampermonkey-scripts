@@ -125,3 +125,37 @@ test('船只响应会同步组队状态并请求重新评估地图', () => {
     });
     assert.deepEqual(store.getPlayerSnapshot().boat, { boat_id: 7 });
 });
+
+test('角色数据刷新不会覆盖单独获取的组队状态', () => {
+    const store = createGameStateStore();
+
+    store.handleResponse({
+        method: 'GET',
+        pathname: '/api/player/data',
+        payload: { currentBiome: 1, gold: 1000 },
+    });
+    store.handleResponse({
+        method: 'GET',
+        pathname: '/api/boats/my-boat',
+        payload: { boat: { boat_id: 7, isActive: true } },
+    });
+    store.handleResponse({
+        method: 'GET',
+        pathname: '/api/player/data',
+        payload: { currentBiome: 1, gold: 1200 },
+    });
+
+    assert.deepEqual(store.getPlayerSnapshot(), {
+        boat: { boat_id: 7, isActive: true },
+        currentBiome: 1,
+        gold: 1200,
+    });
+
+    store.handleResponse({
+        method: 'GET',
+        pathname: '/api/boats/my-boat',
+        payload: { boat: null },
+    });
+
+    assert.equal(store.getPlayerSnapshot().boat, null);
+});

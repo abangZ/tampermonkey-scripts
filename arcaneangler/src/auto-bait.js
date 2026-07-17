@@ -149,6 +149,7 @@ export function createAutoBaitController({
     let retryBaitId = null;
     let status = '未启用';
     let checkQueue = Promise.resolve();
+    const pendingPurchaseQuantities = new Map();
 
     function notifyStateChanged() {
         onStateChange?.();
@@ -288,9 +289,22 @@ export function createAutoBaitController({
             }
 
             let quantity = normalizeQuantity(player?.baitInventory?.[baitId]);
+            const pendingPurchaseQuantity =
+                pendingPurchaseQuantities.get(baitId);
+            const purchaseResultPending =
+                pendingPurchaseQuantity !== undefined &&
+                quantity < pendingPurchaseQuantity;
+
+            if (purchaseResultPending) {
+                quantity = pendingPurchaseQuantity;
+            } else if (pendingPurchaseQuantity !== undefined) {
+                pendingPurchaseQuantities.delete(baitId);
+            }
+
             let purchased = false;
 
             if (
+                !purchaseResultPending &&
                 shouldPurchaseBait(
                     quantity,
                     autoBaitSettings.minimumQuantity,
@@ -305,16 +319,25 @@ export function createAutoBaitController({
                     Number.isFinite(totalCost) &&
                     totalCost > Number(player?.gold ?? 0)
                 ) {
-                    if (quantity > 0) {
-                        await equipBait(api, player, baitId, baitLabel);
-                    }
+                    const defaultBaitLabel = getBaitLabel(
+                        DEFAULT_BAIT_ID,
+                        'default',
+                        biomeId,
+                    );
+
+                    await equipBait(
+                        api,
+                        player,
+                        DEFAULT_BAIT_ID,
+                        defaultBaitLabel,
+                    );
 
                     retryBaitId = baitId;
                     retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
                     updateSnapshot({
                         baitId,
                         quantity,
-                        nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币`,
+                        nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币，已切换免费饵`,
                     });
                     return;
                 }
@@ -337,6 +360,7 @@ export function createAutoBaitController({
                 quantity = Number.isFinite(Number(result.newBaitQuantity))
                     ? normalizeQuantity(result.newBaitQuantity)
                     : quantity + autoBaitSettings.purchaseQuantity;
+                pendingPurchaseQuantities.set(baitId, quantity);
                 lastPurchasedAt = Date.now();
                 purchased = true;
             }
@@ -422,6 +446,7 @@ export function createAutoBaitController({
         const quantity = normalizeQuantity(result?.baitQuantity);
         const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
 
+        pendingPurchaseQuantities.delete(baitId);
         updateSnapshot({
             baitId,
             quantity,

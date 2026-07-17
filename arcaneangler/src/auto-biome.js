@@ -604,6 +604,12 @@ export function createAutoBiomeController({
             return;
         }
 
+        if (!Object.hasOwn(player, 'boat')) {
+            target = null;
+            setStatus('等待游戏组队状态');
+            return;
+        }
+
         if (player?.boat) {
             target = null;
             setStatus('组队中暂不自动换图');

@@ -32,7 +32,14 @@ export function createGameStateStore() {
             return false;
         }
 
-        player = nextPlayer;
+        // 游戏会分别请求角色和船只数据，角色刷新不能抹掉已知的组队状态。
+        player =
+            player?.boat !== undefined && !Object.hasOwn(nextPlayer, 'boat')
+                ? {
+                      ...nextPlayer,
+                      boat: player.boat,
+                  }
+                : nextPlayer;
         updatedAt = Date.now();
         return true;
     }

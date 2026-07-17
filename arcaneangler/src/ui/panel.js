@@ -66,6 +66,18 @@ export function createPanelController({
     function scheduleAutoBaitPurchaseSettingsSave() {
         autoBaitPurchaseSettingsDirty = true;
         window.clearTimeout(autoBaitPurchaseSaveTimer);
+        autoBaitPurchaseSaveTimer = null;
+
+        const minimumQuantity = Number(ui?.autoBaitMinimumQuantity.value);
+
+        if (
+            !Number.isFinite(minimumQuantity) ||
+            minimumQuantity < 1 ||
+            minimumQuantity > 100000
+        ) {
+            return;
+        }
+
         autoBaitPurchaseSaveTimer = window.setTimeout(
             flushAutoBaitPurchaseSettings,
             300,
@@ -531,9 +543,9 @@ export function createPanelController({
                   id="auto-bait-minimum-quantity"
                   class="input"
                   type="number"
-                  min="100"
+                  min="1"
                   max="100000"
-                  step="100"
+                  step="1"
                   inputmode="numeric"
                 />
               </label>
@@ -1580,12 +1592,14 @@ export function createPanelController({
             autoBaitSettings.personalCompetitionBaitGrade === 'default' &&
             autoBaitSettings.guildCompetitionBaitGrade === 'default' &&
             autoBaitSettings.goldBreezeBaitGrade === 'default';
-        ui.autoBaitMinimumQuantity.value = String(
-            autoBaitSettings.minimumQuantity,
-        );
-        ui.autoBaitPurchaseQuantity.value = String(
-            autoBaitSettings.purchaseQuantity,
-        );
+        if (!autoBaitPurchaseSettingsDirty) {
+            ui.autoBaitMinimumQuantity.value = String(
+                autoBaitSettings.minimumQuantity,
+            );
+            ui.autoBaitPurchaseQuantity.value = String(
+                autoBaitSettings.purchaseQuantity,
+            );
+        }
         ui.autoBaitLastPurchasedAt.textContent = autoBaitLastPurchasedAt
             ? new Date(autoBaitLastPurchasedAt).toLocaleTimeString()
             : '暂无';

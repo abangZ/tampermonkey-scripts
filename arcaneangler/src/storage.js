@@ -175,11 +175,11 @@ export function normalizeAutoBaitGrade(value, fallback = 'low') {
 export function normalizeAutoBaitMinimumQuantity(value, fallback = 100) {
     const quantity = Number(value);
 
-    if (!Number.isFinite(quantity) || quantity < 100) {
+    if (!Number.isFinite(quantity) || quantity < 1) {
         return fallback;
     }
 
-    return Math.min(100000, Math.round(quantity / 100) * 100);
+    return Math.min(100000, Math.round(quantity));
 }
 
 export function normalizeAutoBaitPurchaseQuantity(value, fallback = 100) {

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.7.0
+// @version      2.7.2
 // @author       Codex
 // @description  自动点击“抛竿线”按钮，带随机等待和启停控制
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -94,6 +94,7 @@
 		let retryBaitId = null;
 		let status = "未启用";
 		let checkQueue = Promise.resolve();
+		const pendingPurchaseQuantities = new Map();
 		function notifyStateChanged() {
 			onStateChange?.();
 		}
@@ -176,18 +177,22 @@
 					return;
 				}
 				let quantity = normalizeQuantity$1(player?.baitInventory?.[baitId]);
+				const pendingPurchaseQuantity = pendingPurchaseQuantities.get(baitId);
+				const purchaseResultPending = pendingPurchaseQuantity !== void 0 && quantity < pendingPurchaseQuantity;
+				if (purchaseResultPending) quantity = pendingPurchaseQuantity;
+				else if (pendingPurchaseQuantity !== void 0) pendingPurchaseQuantities.delete(baitId);
 				let purchased = false;
-				if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) {
+				if (!purchaseResultPending && shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) {
 					const bait = getBaitById$1(baitId);
 					const totalCost = Number(bait?.price) * autoBaitSettings.purchaseQuantity;
 					if (Number.isFinite(totalCost) && totalCost > Number(player?.gold ?? 0)) {
-						if (quantity > 0) await equipBait(api, player, baitId, baitLabel);
+						await equipBait(api, player, DEFAULT_BAIT_ID, getBaitLabel(DEFAULT_BAIT_ID, "default", biomeId));
 						retryBaitId = baitId;
 						retryAfter = Date.now() + PURCHASE_RETRY_DELAY;
 						updateSnapshot({
 							baitId,
 							quantity,
-							nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币`
+							nextStatus: `${contextLabel} ${baitLabel}不足，购买需 ${totalCost.toLocaleString()} 金币，已切换免费饵`
 						});
 						return;
 					}
@@ -199,6 +204,7 @@
 					const result = await api.buyBait(baitId, autoBaitSettings.purchaseQuantity);
 					if (result?.success !== true) throw new Error(result?.message ?? "游戏未确认购买成功");
 					quantity = Number.isFinite(Number(result.newBaitQuantity)) ? normalizeQuantity$1(result.newBaitQuantity) : quantity + autoBaitSettings.purchaseQuantity;
+					pendingPurchaseQuantities.set(baitId, quantity);
 					lastPurchasedAt = Date.now();
 					purchased = true;
 				}
@@ -247,10 +253,12 @@
 				return;
 			}
 			const quantity = normalizeQuantity$1(result?.baitQuantity);
+			const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
+			pendingPurchaseQuantities.delete(baitId);
 			updateSnapshot({
 				baitId,
 				quantity,
-				nextStatus: `${contextLabel} · ${getBaitLabel(baitId, baitGrade, biomeId)} · ${quantity.toLocaleString()} 个`
+				nextStatus: `${contextLabel} · ${baitLabel} · ${quantity.toLocaleString()} 个`
 			});
 			if (shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) checkNow({ biomeId });
 		}
@@ -593,6 +601,11 @@
 				return;
 			}
 			if (currentEvaluationId !== evaluationId) return;
+			if (!Object.hasOwn(player, "boat")) {
+				target = null;
+				setStatus("等待游戏组队状态");
+				return;
+			}
 			if (player?.boat) {
 				target = null;
 				setStatus("组队中暂不自动换图");
@@ -1297,7 +1310,10 @@
 		let updatedAt = 0;
 		function replacePlayer(nextPlayer) {
 			if (!isObject(nextPlayer)) return false;
-			player = nextPlayer;
+			player = player?.boat !== void 0 && !Object.hasOwn(nextPlayer, "boat") ? {
+				...nextPlayer,
+				boat: player.boat
+			} : nextPlayer;
 			updatedAt = Date.now();
 			return true;
 		}
@@ -1861,8 +1877,8 @@
 	}
 	function normalizeAutoBaitMinimumQuantity(value, fallback = 100) {
 		const quantity = Number(value);
-		if (!Number.isFinite(quantity) || quantity < 100) return fallback;
-		return Math.min(1e5, Math.round(quantity / 100) * 100);
+		if (!Number.isFinite(quantity) || quantity < 1) return fallback;
+		return Math.min(1e5, Math.round(quantity));
 	}
 	function normalizeAutoBaitPurchaseQuantity(value, fallback = 100) {
 		const quantity = Number(value);
@@ -2003,6 +2019,9 @@
 		function scheduleAutoBaitPurchaseSettingsSave() {
 			autoBaitPurchaseSettingsDirty = true;
 			window.clearTimeout(autoBaitPurchaseSaveTimer);
+			autoBaitPurchaseSaveTimer = null;
+			const minimumQuantity = Number(ui?.autoBaitMinimumQuantity.value);
+			if (!Number.isFinite(minimumQuantity) || minimumQuantity < 1 || minimumQuantity > 1e5) return;
 			autoBaitPurchaseSaveTimer = window.setTimeout(flushAutoBaitPurchaseSettings, 300);
 		}
 		function createPanel() {
@@ -2453,9 +2472,9 @@
                   id="auto-bait-minimum-quantity"
                   class="input"
                   type="number"
-                  min="100"
+                  min="1"
                   max="100000"
-                  step="100"
+                  step="1"
                   inputmode="numeric"
                 />
               </label>
@@ -3112,8 +3131,10 @@
 			ui.autoBaitGuildGrade.value = autoBaitSettings.guildCompetitionBaitGrade;
 			ui.autoBaitGoldBreezeGrade.value = autoBaitSettings.goldBreezeBaitGrade;
 			ui.autoBaitPurchaseSettings.hidden = autoBaitSettings.regularBaitGrade === "default" && autoBaitSettings.personalCompetitionBaitGrade === "default" && autoBaitSettings.guildCompetitionBaitGrade === "default" && autoBaitSettings.goldBreezeBaitGrade === "default";
-			ui.autoBaitMinimumQuantity.value = String(autoBaitSettings.minimumQuantity);
-			ui.autoBaitPurchaseQuantity.value = String(autoBaitSettings.purchaseQuantity);
+			if (!autoBaitPurchaseSettingsDirty) {
+				ui.autoBaitMinimumQuantity.value = String(autoBaitSettings.minimumQuantity);
+				ui.autoBaitPurchaseQuantity.value = String(autoBaitSettings.purchaseQuantity);
+			}
 			ui.autoBaitLastPurchasedAt.textContent = autoBaitLastPurchasedAt ? new Date(autoBaitLastPurchasedAt).toLocaleTimeString() : "暂无";
 		}
 		function renderIdleReloadSettings() {
