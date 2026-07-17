@@ -15,6 +15,12 @@
 - userscript 文件名、版本和 metadata 的唯一配置入口是 `arcaneangler/userscript.config.js`。
 - `vite.config.js` 只维护通用构建行为，不要再复制一份脚本版本或发布 URL。
 
+## 版本与更新日志
+
+- 新增用户可感知功能时递增次版本号，仅修复问题时递增修订号。
+- 每次修改 `arcaneangler/userscript.config.js` 中的 `userscriptVersion`，必须同时在根目录 `CHANGELOG.md` 顶部新增对应版本、发布日期和主要用户可感知变更；不得只更新脚本版本而遗漏更新日志。
+- 发布相关提交应同时包含版本配置、`CHANGELOG.md` 和重新生成的 `.user.js` 文件。
+
 ## Arcane Angler 模块边界
 
 - `src/main.js`：组装各模块，维护自动抛竿主循环和用户操作入口。
