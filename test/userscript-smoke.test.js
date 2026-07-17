@@ -96,6 +96,25 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
                 .checked,
             false,
         );
+        assert.equal(
+            host.shadowRoot.querySelector('#auto-biome-daily-quest-toggle')
+                .checked,
+            false,
+        );
+        const autoBiomeDailyQuestToggle = host.shadowRoot.querySelector(
+            '#auto-biome-daily-quest-toggle',
+        );
+
+        autoBiomeDailyQuestToggle.click();
+        assert.equal(
+            JSON.parse(
+                window.localStorage.getItem(
+                    'arcane-angler-auto-biome-settings-v1',
+                ),
+            ).preferDailyQuests,
+            true,
+        );
+        autoBiomeDailyQuestToggle.click();
         assert.ok(host.shadowRoot.querySelector('#auto-bait-toggle'));
         assert.ok(host.shadowRoot.querySelector('#auto-boss-toggle'));
         assert.ok(host.shadowRoot.querySelector('#game-auto-fishing-toggle'));

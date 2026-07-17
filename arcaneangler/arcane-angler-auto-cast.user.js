@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.9.0
+// @version      2.10.0
 // @author       Codex
 // @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -295,6 +295,7 @@
 		arcane_surge: "奥术涌动"
 	};
 	var COMPETITION_HOOK_DEBOUNCE = 1e3;
+	var DAILY_QUEST_FALLBACK_FRESHNESS = 3600 * 1e3;
 	var GOLD_BREEZE_WEATHER = "gold_breeze";
 	var WEATHER_FALLBACK_FRESHNESS = 6e4;
 	function normalizeBiomeId$1(value) {
@@ -304,6 +305,58 @@
 	function normalizeXpBonus(value) {
 		const xpBonus = Number(value);
 		return Number.isFinite(xpBonus) ? xpBonus : 0;
+	}
+	function normalizeQuestMetadata(value) {
+		if (value && typeof value === "object" && !Array.isArray(value)) return value;
+		if (typeof value === "string") try {
+			const metadata = JSON.parse(value);
+			return metadata && typeof metadata === "object" && !Array.isArray(metadata) ? metadata : {};
+		} catch {
+			return {};
+		}
+		return {};
+	}
+	function isQuestCompleted(quest) {
+		if (quest?.completed === true || quest?.completed === 1 || quest?.completed === "1") return true;
+		const currentProgress = Number(quest?.current_progress);
+		const targetAmount = Number(quest?.target_amount);
+		return Number.isFinite(currentProgress) && Number.isFinite(targetAmount) && targetAmount > 0 && currentProgress >= targetAmount;
+	}
+	function getDailyQuestSource(payload) {
+		if (Array.isArray(payload?.quests?.daily)) return payload.quests.daily;
+		if (Array.isArray(payload?.daily)) return payload.daily;
+		return null;
+	}
+	function normalizeDailyQuests(payload) {
+		const source = getDailyQuestSource(payload);
+		if (!source) return [];
+		return source.filter((quest) => quest && typeof quest === "object").map((quest) => {
+			const metadata = normalizeQuestMetadata(quest.metadata);
+			const weatherRule = String(metadata.weather_rule ?? metadata.weatherRule ?? quest.weather_rule ?? quest.weatherRule ?? "").trim();
+			return {
+				completed: isQuestCompleted(quest),
+				expiresAt: String(quest.expires_at ?? "").trim() || null,
+				id: quest.id ?? quest.quest_template_id ?? null,
+				targetBiome: normalizeBiomeId$1(metadata.targetBiome ?? metadata.target_biome ?? quest.targetBiome ?? quest.target_biome),
+				weatherRule: weatherRule || null
+			};
+		});
+	}
+	function isDailyQuestActive(quest, now) {
+		if (quest.completed) return false;
+		const expiresAt = Date.parse(quest.expiresAt);
+		return !Number.isFinite(expiresAt) || expiresAt > now;
+	}
+	function findMatchingDailyQuests({ biomeId, dailyQuests, now = Date.now(), weather }) {
+		const normalizedBiomeId = normalizeBiomeId$1(biomeId);
+		if (!normalizedBiomeId || !Array.isArray(dailyQuests)) return [];
+		return dailyQuests.filter((quest) => {
+			if (!isDailyQuestActive(quest, now)) return false;
+			const hasBiomeRule = quest.targetBiome !== null;
+			const hasWeatherRule = Boolean(quest.weatherRule);
+			if (!hasBiomeRule && !hasWeatherRule) return false;
+			return (!hasBiomeRule || quest.targetBiome === normalizedBiomeId) && (!hasWeatherRule || quest.weatherRule === weather);
+		});
 	}
 	function normalizeWeatherByBiome(payload) {
 		const source = payload?.weather ?? payload;
@@ -367,7 +420,7 @@
 			personalDerbyBiomeId: activeDerby?.is_registered === true ? normalizeBiomeId$1(activeDerby.biome_id) : null
 		};
 	}
-	function selectBestBiome({ biomeWeight, chaseGoldBreeze = false, competitionBiomes, player, preferCompetitionBiomes = false, weatherByBiome }) {
+	function selectBestBiome({ biomeWeight, chaseGoldBreeze = false, competitionBiomes, dailyQuests = [], now = Date.now(), player, preferDailyQuests = false, preferCompetitionBiomes = false, weatherByBiome }) {
 		const unlockedBiomes = Array.isArray(player?.unlockedBiomes) ? player.unlockedBiomes : [player?.currentBiome ?? 1];
 		const candidates = [];
 		for (const rawBiomeId of unlockedBiomes) {
@@ -376,21 +429,32 @@
 			if (!biomeId || !weather) continue;
 			const competitionType = preferCompetitionBiomes ? getCompetitionType(biomeId, competitionBiomes) : null;
 			const goldBreezePriority = chaseGoldBreeze && weather.weather === GOLD_BREEZE_WEATHER ? 1 : 0;
+			const dailyQuestMatchCount = preferDailyQuests ? findMatchingDailyQuests({
+				biomeId,
+				dailyQuests,
+				now,
+				weather: weather.weather
+			}).length : 0;
 			candidates.push({
 				baitId: findAvailableBaitForBiome(player, biomeId),
 				biomeId,
 				competitionPriority: competitionType === "guild" ? 2 : competitionType === "personal" ? 1 : 0,
 				...competitionType ? { competitionType } : {},
+				dailyQuestMatchCount,
+				dailyQuestPriority: dailyQuestMatchCount > 0 ? 1 : 0,
 				goldBreezePriority,
 				score: getBiomeScore(biomeId, weather.xpBonus, biomeWeight),
 				weather: weather.weather,
 				xpBonus: weather.xpBonus
 			});
 		}
-		candidates.sort((left, right) => right.competitionPriority - left.competitionPriority || right.goldBreezePriority - left.goldBreezePriority || right.score - left.score || right.biomeId - left.biomeId);
+		candidates.sort((left, right) => right.competitionPriority - left.competitionPriority || right.goldBreezePriority - left.goldBreezePriority || right.dailyQuestPriority - left.dailyQuestPriority || right.score - left.score || right.biomeId - left.biomeId);
 		if (candidates.length === 0) return null;
-		const { competitionPriority, goldBreezePriority, ...bestBiome } = candidates[0];
-		return bestBiome;
+		const { competitionPriority, dailyQuestMatchCount, dailyQuestPriority, goldBreezePriority, ...bestBiome } = candidates[0];
+		return {
+			...bestBiome,
+			...dailyQuestPriority > 0 && competitionPriority === 0 && goldBreezePriority === 0 ? { dailyQuestCount: dailyQuestMatchCount } : {}
+		};
 	}
 	function getBiomeName(biomeId) {
 		return String(window.BIOMES?.[biomeId]?.name ?? "").trim() || `地图 ${biomeId}`;
@@ -404,7 +468,8 @@
 	function formatTargetSummary(target) {
 		const weatherLabel = getWeatherLabel(target.weather);
 		const signedXpBonus = target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
-		return `${target.competitionType === "guild" ? "公会锦标赛优先 · " : target.competitionType === "personal" ? "个人比赛优先 · " : ""}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
+		const competitionLabel = target.competitionType === "guild" ? "公会锦标赛优先 · " : target.competitionType === "personal" ? "个人比赛优先 · " : "";
+		return `${competitionLabel}${!competitionLabel && target.dailyQuestCount > 0 ? "每日任务优先 · " : ""}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
 	}
 	function getErrorMessage$1(error) {
 		return String(error?.message ?? error ?? "未知错误");
@@ -454,6 +519,14 @@
 		};
 		let competitionStatus = "自动换图开启后检测";
 		let competitionUpdatedAt = 0;
+		let dailyQuestState = {
+			fingerprint: null,
+			loadAttempted: false,
+			loading: false,
+			quests: [],
+			status: "开启优先每日任务后读取",
+			updatedAt: 0
+		};
 		let lastFullWeatherUpdatedAt = 0;
 		let lastUpdatedAt = 0;
 		let status = "等待天气数据";
@@ -473,6 +546,9 @@
 				autoBiomeCompetitionBiomes: competitionBiomes,
 				autoBiomeCompetitionStatus: competitionStatus,
 				autoBiomeCompetitionUpdatedAt: competitionUpdatedAt,
+				autoBiomeDailyQuestStatus: dailyQuestState.status,
+				autoBiomeDailyQuestUpdatedAt: dailyQuestState.updatedAt,
+				autoBiomeDailyQuests: dailyQuestState.quests,
 				autoBiomeLastUpdatedAt: lastUpdatedAt,
 				autoBiomeStatus: status,
 				autoBiomeTarget: target,
@@ -484,6 +560,11 @@
 			if (biomes.guildTournamentBiomeId) labels.push(`公会 B${biomes.guildTournamentBiomeId}`);
 			if (biomes.personalDerbyBiomeId) labels.push(`个人 B${biomes.personalDerbyBiomeId}`);
 			return labels.length > 0 ? labels.join(" · ") : "暂无已参与的比赛";
+		}
+		function formatDailyQuestStatus(quests) {
+			const labels = quests.filter((quest) => isDailyQuestActive(quest, Date.now())).flatMap((quest) => [...quest.targetBiome ? [`B${quest.targetBiome}`] : [], ...quest.weatherRule ? [getWeatherLabel(quest.weatherRule)] : []]);
+			const uniqueLabels = [...new Set(labels)];
+			return uniqueLabels.length > 0 ? uniqueLabels.join(" · ") : "暂无需要匹配地图的未完成任务";
 		}
 		function updateCompetitionState() {
 			competitionBiomes = resolveCompetitionBiomes({
@@ -526,6 +607,30 @@
 			scheduleCompetitionEvaluation();
 			return true;
 		}
+		function applyDailyQuestResponse(payload, source) {
+			if (!getDailyQuestSource(payload)) return false;
+			if (source === "fetch" && dailyQuestState.loading) return true;
+			const quests = normalizeDailyQuests(payload);
+			const fingerprint = JSON.stringify(quests);
+			const shouldEvaluate = dailyQuestState.loading || fingerprint !== dailyQuestState.fingerprint;
+			dailyQuestState = {
+				fingerprint,
+				loadAttempted: true,
+				loading: false,
+				quests,
+				status: formatDailyQuestStatus(quests),
+				updatedAt: Date.now()
+			};
+			if (shouldEvaluate) {
+				notifyStateChanged();
+				evaluateBestBiome();
+			}
+			return true;
+		}
+		function handleQuestResponse({ pathname, payload, source = "fetch" }) {
+			if (pathname !== "/api/quests") return false;
+			return applyDailyQuestResponse(payload, source);
+		}
 		async function notifyBiomeReady(biomeId) {
 			try {
 				await onBiomeReady?.(biomeId);
@@ -537,6 +642,12 @@
 			if (typeof window.ApiService?.getAllBiomeWeather === "function") return window.ApiService.getAllBiomeWeather();
 			const response = await window.fetch("/api/game/weather");
 			if (!response.ok) throw new Error(`天气接口返回 ${response.status}`);
+			return response.json();
+		}
+		async function loadDailyQuests() {
+			if (typeof window.ApiService?.getQuests === "function") return window.ApiService.getQuests();
+			const response = await window.fetch("/api/quests");
+			if (!response.ok) throw new Error(`每日任务接口返回 ${response.status}`);
 			return response.json();
 		}
 		function applyWeather(payload, source, { merge = false } = {}) {
@@ -567,16 +678,50 @@
 				if (Object.keys(weatherByBiome).length === 0) setStatus("天气数据读取失败");
 			}
 		}
+		async function refreshDailyQuests() {
+			if (dailyQuestState.loading) return;
+			dailyQuestState = {
+				...dailyQuestState,
+				loadAttempted: true,
+				loading: true,
+				status: dailyQuestState.updatedAt > 0 ? "正在更新每日任务" : "正在读取每日任务"
+			};
+			notifyStateChanged();
+			try {
+				if (!applyDailyQuestResponse(await loadDailyQuests(), "request")) {
+					dailyQuestState = {
+						...dailyQuestState,
+						loading: false,
+						status: dailyQuestState.updatedAt > 0 ? "每日任务响应异常，沿用上次数据" : "每日任务响应异常，按普通地图选择"
+					};
+					notifyStateChanged();
+					evaluateBestBiome();
+				}
+			} catch (error) {
+				console.warn("[自动换图] 无法读取每日任务：", error);
+				dailyQuestState = {
+					...dailyQuestState,
+					loading: false,
+					status: dailyQuestState.updatedAt > 0 ? "每日任务更新失败，沿用上次数据" : "每日任务读取失败，按普通地图选择"
+				};
+				notifyStateChanged();
+				evaluateBestBiome();
+			}
+		}
 		function scheduleHourlyFallback() {
 			window.clearTimeout(fallbackTimer);
 			fallbackTimer = window.setTimeout(async () => {
-				if (Date.now() - lastFullWeatherUpdatedAt > WEATHER_FALLBACK_FRESHNESS) await refreshWeather();
+				const refreshes = [];
+				if (Date.now() - lastFullWeatherUpdatedAt > WEATHER_FALLBACK_FRESHNESS) refreshes.push(refreshWeather());
+				const { autoBiomeSettings = {} } = getState?.() ?? {};
+				if (autoBiomeSettings.enabled === true && autoBiomeSettings?.preferDailyQuests === true && Date.now() - dailyQuestState.updatedAt > DAILY_QUEST_FALLBACK_FRESHNESS) refreshes.push(refreshDailyQuests());
+				await Promise.all(refreshes);
 				scheduleHourlyFallback();
 			}, getNextHourlyRefreshDelay());
 		}
 		async function evaluateBestBiome() {
 			const currentEvaluationId = ++evaluationId;
-			const { autoBaitSettings, autoBiomeSettings, enabled } = getState();
+			const { autoBaitSettings = {}, autoBiomeSettings = {}, enabled = false } = getState?.() ?? {};
 			if (!autoBiomeSettings.enabled) {
 				target = null;
 				competitionStatus = autoBiomeSettings.preferCompetitionBiomes !== false ? "自动换图开启后检测" : "已关闭";
@@ -597,6 +742,15 @@
 			if (autoBiomeSettings.preferCompetitionBiomes !== false && (!hasCompetitionSnapshot() || competitionHookPending)) {
 				competitionStatus = "等待游戏比赛轮询";
 				setStatus("等待游戏比赛数据");
+				return;
+			}
+			if (autoBiomeSettings.preferDailyQuests === true && dailyQuestState.loading) {
+				setStatus("等待每日任务数据");
+				return;
+			}
+			if (autoBiomeSettings.preferDailyQuests === true && !dailyQuestState.loadAttempted) {
+				setStatus("正在读取每日任务数据");
+				refreshDailyQuests();
 				return;
 			}
 			const api = window.ApiService;
@@ -625,7 +779,9 @@
 				biomeWeight: autoBiomeSettings.biomeWeight,
 				chaseGoldBreeze: autoBiomeSettings.chaseGoldBreeze === true,
 				competitionBiomes,
+				dailyQuests: dailyQuestState.quests,
 				player,
+				preferDailyQuests: autoBiomeSettings.preferDailyQuests === true,
 				preferCompetitionBiomes: autoBiomeSettings.preferCompetitionBiomes !== false,
 				weatherByBiome
 			});
@@ -662,6 +818,8 @@
 			return evaluateBestBiome();
 		}
 		function handleCastResult(result) {
+			const { autoBiomeSettings = {} } = getState?.() ?? {};
+			if (Array.isArray(result?.completedQuests) && result.completedQuests.length > 0 && autoBiomeSettings.enabled === true && autoBiomeSettings.preferDailyQuests === true) refreshDailyQuests();
 			if (target && normalizeBiomeId$1(result?.currentBiome) === target.biomeId) setStatus(`已在 ${formatTargetSummary(target)}`);
 		}
 		function start() {
@@ -678,12 +836,14 @@
 			getSnapshot,
 			handleCastResult,
 			handleCompetitionResponse,
+			handleQuestResponse,
 			handleStateChanged,
 			handleWeatherResponse,
 			isSwitching() {
 				return switching;
 			},
 			refreshWeather,
+			refreshDailyQuests,
 			start
 		};
 	}
@@ -1784,7 +1944,7 @@
 		} });
 		return true;
 	}
-	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult, onCompetitionResponse, onGameStateResponse, onWeatherResponse }) {
+	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult, onCompetitionResponse, onGameStateResponse, onQuestResponse, onWeatherResponse }) {
 		const originalFetch = window.fetch;
 		window.fetch = async function(input, init) {
 			const request = input instanceof Request ? input : null;
@@ -1826,6 +1986,14 @@
 			} catch (error) {
 				console.warn("[自动换图] 无法复制游戏天气响应：", error);
 			}
+			if (method === "GET" && isQuestResponsePath(url?.pathname)) try {
+				collectJsonResponse(response.clone(), {
+					method,
+					pathname: url.pathname
+				}, onQuestResponse, "[自动换图] 无法读取游戏每日任务响应：");
+			} catch (error) {
+				console.warn("[自动换图] 无法复制游戏每日任务响应：", error);
+			}
 			if (isGameStateResponsePath(method, url?.pathname)) try {
 				collectGameStateResponse(response.clone(), {
 					method,
@@ -1850,6 +2018,9 @@
 	}
 	function isWeatherResponsePath(pathname) {
 		return pathname === "/api/game/weather" || /^\/api\/game\/weather\/\d+$/.test(pathname ?? "");
+	}
+	function isQuestResponsePath(pathname) {
+		return pathname === "/api/quests";
 	}
 	function isCompetitionResponsePath(pathname) {
 		return pathname === "/api/guild/tournaments/current" || pathname === "/api/derby/current" || pathname === "/api/guild/my-guild" || /^\/api\/guild\/tournaments\/[^/]+\/standings$/.test(pathname ?? "");
@@ -2225,6 +2396,7 @@
 			chaseGoldBreeze: false,
 			enabled: false,
 			biomeWeight: 5,
+			preferDailyQuests: false,
 			preferCompetitionBiomes: true
 		};
 		try {
@@ -2234,6 +2406,7 @@
 				chaseGoldBreeze: savedSettings.chaseGoldBreeze === true,
 				enabled: savedSettings.enabled === true,
 				biomeWeight: normalizeAutoBiomeWeight(savedSettings.biomeWeight, defaults.biomeWeight),
+				preferDailyQuests: savedSettings.preferDailyQuests === true,
 				preferCompetitionBiomes: savedSettings.preferCompetitionBiomes !== false
 			};
 		} catch (error) {
@@ -2392,7 +2565,7 @@
 		let autoBaitPurchaseSaveTimer = null;
 		let autoBaitPurchaseSettingsDirty = false;
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitPurchaseSettings, setAutoBossEnabled, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomeWeight, setCaptchaBypassEnabled, setClickDelaySetting, setEnabled, setGameAutoFishingBaitGrade, setGameAutoFishingEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleGameAutoFishingDuringRest, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitPurchaseSettings, setAutoBossEnabled, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomePreferDailyQuests, setAutoBiomeWeight, setCaptchaBypassEnabled, setClickDelaySetting, setEnabled, setGameAutoFishingBaitGrade, setGameAutoFishingEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleGameAutoFishingDuringRest, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
@@ -2832,6 +3005,23 @@
             无可用比赛地图时优先选择金风天气；没有金风时再按经验评分选择。
           </div>
 
+          <label class="option-row">
+            <span>优先每日任务</span>
+            <span class="switch">
+              <input
+                id="auto-biome-daily-quest-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="无比赛和金风时优先选择每日任务地图"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
+          <div class="field-help">
+            无可用比赛和金风地图时，根据未完成每日任务筛选已解锁地图，再选择经验评分最高的地图。
+          </div>
+
           <div
             class="choice-list choice-list-three"
             role="radiogroup"
@@ -2864,12 +3054,17 @@
           </div>
 
           <div class="field-help">
-            无可用比赛地图和需追逐的金风地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+            无可用比赛、需追逐的金风和每日任务地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
           </div>
 
           <div class="row">
             <span class="label">比赛地图</span>
             <span id="auto-biome-competition-status" class="value">自动换图开启后检测</span>
+          </div>
+
+          <div class="row">
+            <span class="label">每日任务</span>
+            <span id="auto-biome-daily-quest-status" class="value">开启优先每日任务后读取</span>
           </div>
 
           <div class="row">
@@ -3129,7 +3324,9 @@
 				autoBiomeToggle: shadowRoot.querySelector("#auto-biome-toggle"),
 				autoBiomeCompetitionToggle: shadowRoot.querySelector("#auto-biome-competition-toggle"),
 				autoBiomeGoldBreezeToggle: shadowRoot.querySelector("#auto-biome-gold-breeze-toggle"),
+				autoBiomeDailyQuestToggle: shadowRoot.querySelector("#auto-biome-daily-quest-toggle"),
 				autoBiomeCompetitionStatus: shadowRoot.querySelector("#auto-biome-competition-status"),
+				autoBiomeDailyQuestStatus: shadowRoot.querySelector("#auto-biome-daily-quest-status"),
 				autoBiomeWeightInputs: shadowRoot.querySelectorAll("input[name=\"auto-biome-weight\"]"),
 				autoBiomeUpdatedAt: shadowRoot.querySelector("#auto-biome-updated-at"),
 				autoBaitStatus: shadowRoot.querySelector("#auto-bait-status"),
@@ -3214,6 +3411,9 @@
 			});
 			ui.autoBiomeGoldBreezeToggle.addEventListener("change", (event) => {
 				setAutoBiomeChaseGoldBreeze(event.currentTarget.checked);
+			});
+			ui.autoBiomeDailyQuestToggle.addEventListener("change", (event) => {
+				setAutoBiomePreferDailyQuests(event.currentTarget.checked);
 			});
 			ui.autoBaitToggle.addEventListener("change", (event) => {
 				setAutoBaitEnabled(event.currentTarget.checked);
@@ -3590,7 +3790,7 @@
 		}
 		function renderAutoBiomeSettings() {
 			if (!ui?.autoBiomeToggle) return;
-			const { autoBiomeCompetitionStatus, autoBiomeLastUpdatedAt, autoBiomeSettings, autoBiomeStatus } = getState();
+			const { autoBiomeCompetitionStatus, autoBiomeDailyQuestStatus, autoBiomeLastUpdatedAt, autoBiomeSettings, autoBiomeStatus } = getState();
 			ui.autoBiomeToggle.checked = autoBiomeSettings.enabled;
 			ui.autoBiomeToggle.setAttribute("aria-checked", autoBiomeSettings.enabled ? "true" : "false");
 			ui.autoBiomeStatus.textContent = autoBiomeStatus;
@@ -3598,7 +3798,10 @@
 			ui.autoBiomeCompetitionToggle.setAttribute("aria-checked", autoBiomeSettings.preferCompetitionBiomes ? "true" : "false");
 			ui.autoBiomeGoldBreezeToggle.checked = autoBiomeSettings.chaseGoldBreeze;
 			ui.autoBiomeGoldBreezeToggle.setAttribute("aria-checked", autoBiomeSettings.chaseGoldBreeze ? "true" : "false");
+			ui.autoBiomeDailyQuestToggle.checked = autoBiomeSettings.preferDailyQuests;
+			ui.autoBiomeDailyQuestToggle.setAttribute("aria-checked", autoBiomeSettings.preferDailyQuests ? "true" : "false");
 			ui.autoBiomeCompetitionStatus.textContent = autoBiomeCompetitionStatus;
+			ui.autoBiomeDailyQuestStatus.textContent = autoBiomeDailyQuestStatus;
 			for (const input of ui.autoBiomeWeightInputs) input.checked = Number(input.value) === autoBiomeSettings.biomeWeight;
 			ui.autoBiomeUpdatedAt.textContent = autoBiomeLastUpdatedAt ? new Date(autoBiomeLastUpdatedAt).toLocaleTimeString() : "等待接口数据";
 		}
@@ -3703,6 +3906,7 @@
 	var forceNextAutoBaitCheck = false;
 	var pendingCaptchaChallenge = null;
 	var pendingCompetitionResponses = new Map();
+	var pendingQuestResponse = null;
 	var pendingWeatherResponses = new Map();
 	var gameState = createGameStateStore();
 	var fishingActivityWatchdog = createFishingActivityWatchdog();
@@ -3756,6 +3960,10 @@
 		onGameStateResponse(response) {
 			if (gameState.handleResponse(response).shouldEvaluate && autoBiome) handleAutomationStateChanged();
 		},
+		onQuestResponse(response) {
+			if (autoBiome) autoBiome.handleQuestResponse(response);
+			else pendingQuestResponse = response;
+		},
 		onWeatherResponse(response) {
 			handleWeatherResponse(response);
 		}
@@ -3796,6 +4004,9 @@
 				},
 				autoBiomeCompetitionStatus: "自动换图开启后检测",
 				autoBiomeCompetitionUpdatedAt: 0,
+				autoBiomeDailyQuestStatus: "开启优先每日任务后读取",
+				autoBiomeDailyQuestUpdatedAt: 0,
+				autoBiomeDailyQuests: [],
 				autoBiomeLastUpdatedAt: 0,
 				autoBiomeStatus: "等待天气数据",
 				autoBiomeTarget: null,
@@ -4171,6 +4382,15 @@
 		panel.renderAutoBiomeSettings();
 		handleAutomationStateChanged();
 	}
+	function setAutoBiomePreferDailyQuests(nextEnabled) {
+		autoBiomeSettings = {
+			...autoBiomeSettings,
+			preferDailyQuests: Boolean(nextEnabled)
+		};
+		saveAutoBiomeSettings(autoBiomeSettings);
+		panel.renderAutoBiomeSettings();
+		handleAutomationStateChanged();
+	}
 	function updateAutoBaitSettings(nextSettings) {
 		autoBaitSettings = {
 			...autoBaitSettings,
@@ -4322,6 +4542,7 @@
 				setAutoBiomeEnabled,
 				setAutoBiomeChaseGoldBreeze,
 				setAutoBiomePreferCompetition,
+				setAutoBiomePreferDailyQuests,
 				setAutoBiomeWeight,
 				setCaptchaBypassEnabled,
 				setClickDelaySetting,
@@ -4388,6 +4609,10 @@
 		pendingWeatherResponses.clear();
 		for (const response of pendingCompetitionResponses.values()) if (autoBiome.handleCompetitionResponse(response)) autoBait.handleStateChanged({ force: true });
 		pendingCompetitionResponses.clear();
+		if (pendingQuestResponse) {
+			autoBiome.handleQuestResponse(pendingQuestResponse);
+			pendingQuestResponse = null;
+		}
 		if (pendingCaptchaChallenge) {
 			captcha.handleChallenge(pendingCaptchaChallenge);
 			pendingCaptchaChallenge = null;

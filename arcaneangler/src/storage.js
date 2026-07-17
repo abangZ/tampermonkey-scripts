@@ -170,6 +170,7 @@ export function loadAutoBiomeSettings() {
         chaseGoldBreeze: false,
         enabled: false,
         biomeWeight: 5,
+        preferDailyQuests: false,
         preferCompetitionBiomes: true,
     };
 
@@ -189,6 +190,7 @@ export function loadAutoBiomeSettings() {
                 savedSettings.biomeWeight,
                 defaults.biomeWeight,
             ),
+            preferDailyQuests: savedSettings.preferDailyQuests === true,
             preferCompetitionBiomes:
                 savedSettings.preferCompetitionBiomes !== false,
         };

@@ -5,6 +5,7 @@ import {
     installFetchInterceptor,
     isCompetitionResponsePath,
     isGameStateResponsePath,
+    isQuestResponsePath,
     isWeatherResponsePath,
     modifyCastRequest,
     normalizeRequestBody,
@@ -55,6 +56,8 @@ test('会识别角色状态和天气响应路径', () => {
     assert.equal(isWeatherResponsePath('/api/game/weather'), true);
     assert.equal(isWeatherResponsePath('/api/game/weather/4'), true);
     assert.equal(isWeatherResponsePath('/api/game/weather/stream'), false);
+    assert.equal(isQuestResponsePath('/api/quests'), true);
+    assert.equal(isQuestResponsePath('/api/quests/daily'), false);
 });
 
 test('fetch hook 会读取比赛轮询响应且不改变原响应', async () => {
@@ -184,6 +187,57 @@ test('fetch hook 会读取游戏自身的天气响应', async () => {
             {
                 method: 'GET',
                 pathname: '/api/game/weather/4',
+                payload,
+            },
+        ]);
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('fetch hook 会读取每日任务响应且不改变原响应', async () => {
+    const previousWindow = globalThis.window;
+    const captured = [];
+    const payload = {
+        quests: {
+            daily: [
+                {
+                    completed: 0,
+                    metadata: {
+                        targetBiome: 1,
+                    },
+                },
+            ],
+        },
+        success: true,
+    };
+
+    globalThis.window = {
+        async fetch() {
+            return new Response(JSON.stringify(payload));
+        },
+        location: {
+            href: 'https://arcaneangler.com/',
+        },
+    };
+
+    try {
+        installFetchInterceptor({
+            onQuestResponse(response) {
+                captured.push(response);
+            },
+        });
+
+        const response = await window.fetch(
+            'https://arcaneangler.com/api/quests',
+        );
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(await response.json(), payload);
+        assert.deepEqual(captured, [
+            {
+                method: 'GET',
+                pathname: '/api/quests',
                 payload,
             },
         ]);

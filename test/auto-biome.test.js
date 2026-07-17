@@ -4,7 +4,9 @@ import test from 'node:test';
 import {
     createAutoBiomeController,
     findAvailableBaitForBiome,
+    findMatchingDailyQuests,
     getBiomeScore,
+    normalizeDailyQuests,
     normalizeWeatherByBiome,
     normalizeWeatherResponse,
     resolveCompetitionBiomes,
@@ -30,6 +32,86 @@ test('单地图天气接口响应会归一化到对应地图', () => {
                 xpBonus: 25,
             },
         },
+    );
+});
+
+test('每日任务会从 metadata 归一化地图与天气条件', () => {
+    const dailyQuests = normalizeDailyQuests({
+        quests: {
+            daily: [
+                {
+                    completed: 0,
+                    current_progress: 7,
+                    description:
+                        'Catch 279 fish in your current biome (Tinker River).',
+                    expires_at: '2099-01-01T00:00:00.000Z',
+                    id: 250677,
+                    metadata: {
+                        biome_rule: 'current',
+                        targetBiome: 1,
+                    },
+                    target_amount: 279,
+                },
+                {
+                    completed: 0,
+                    current_progress: 0,
+                    description: 'Cast 238 times during Arcane Surge weather.',
+                    id: 250680,
+                    metadata: JSON.stringify({
+                        weather_rule: 'arcane_surge',
+                    }),
+                    target_amount: 238,
+                },
+                {
+                    completed: 1,
+                    description: 'Catch 3 treasure chests.',
+                    id: 250678,
+                    metadata: {},
+                },
+            ],
+        },
+    });
+
+    assert.deepEqual(dailyQuests, [
+        {
+            completed: false,
+            expiresAt: '2099-01-01T00:00:00.000Z',
+            id: 250677,
+            targetBiome: 1,
+            weatherRule: null,
+        },
+        {
+            completed: false,
+            expiresAt: null,
+            id: 250680,
+            targetBiome: null,
+            weatherRule: 'arcane_surge',
+        },
+        {
+            completed: true,
+            expiresAt: null,
+            id: 250678,
+            targetBiome: null,
+            weatherRule: null,
+        },
+    ]);
+    assert.deepEqual(
+        findMatchingDailyQuests({
+            biomeId: 1,
+            dailyQuests,
+            now: Date.parse('2026-07-17T00:00:00.000Z'),
+            weather: 'clear',
+        }).map((quest) => quest.id),
+        [250677],
+    );
+    assert.deepEqual(
+        findMatchingDailyQuests({
+            biomeId: 4,
+            dailyQuests,
+            now: Date.parse('2026-07-17T00:00:00.000Z'),
+            weather: 'arcane_surge',
+        }).map((quest) => quest.id),
+        [250680],
     );
 });
 
@@ -177,6 +259,79 @@ test('追逐金风时比赛优先，无比赛才优先金风', () => {
     );
 });
 
+test('每日任务低于金风、高于普通图，并从匹配地图中选择经验评分最高项', () => {
+    const weatherByBiome = normalizeWeatherByBiome({
+        weather: {
+            1: { weather: 'gold_breeze', xpBonus: -25 },
+            2: { weather: 'clear', xpBonus: 500 },
+            3: { weather: 'arcane_surge', xpBonus: 75 },
+            4: { weather: 'arcane_surge', xpBonus: 150 },
+        },
+    });
+    const dailyQuests = normalizeDailyQuests({
+        quests: {
+            daily: [
+                {
+                    completed: 0,
+                    id: 1,
+                    metadata: { targetBiome: 1 },
+                },
+                {
+                    completed: 0,
+                    id: 2,
+                    metadata: { weather_rule: 'arcane_surge' },
+                },
+            ],
+        },
+    });
+    const player = {
+        currentBiome: 2,
+        unlockedBiomes: [1, 2, 3],
+    };
+
+    assert.deepEqual(
+        selectBestBiome({
+            biomeWeight: 5,
+            dailyQuests,
+            player,
+            preferDailyQuests: true,
+            weatherByBiome,
+        }),
+        {
+            baitId: null,
+            biomeId: 3,
+            dailyQuestCount: 1,
+            score: 85,
+            weather: 'arcane_surge',
+            xpBonus: 75,
+        },
+    );
+    assert.equal(
+        selectBestBiome({
+            biomeWeight: 5,
+            chaseGoldBreeze: true,
+            dailyQuests,
+            player,
+            preferDailyQuests: true,
+            weatherByBiome,
+        }).biomeId,
+        1,
+    );
+    assert.equal(
+        selectBestBiome({
+            biomeWeight: 5,
+            chaseGoldBreeze: true,
+            competitionBiomes: { guildTournamentBiomeId: 2 },
+            dailyQuests,
+            player,
+            preferCompetitionBiomes: true,
+            preferDailyQuests: true,
+            weatherByBiome,
+        }).biomeId,
+        2,
+    );
+});
+
 test('只识别已经报名的个人比赛和当前公会参加的锦标赛', () => {
     assert.deepEqual(
         resolveCompetitionBiomes({
@@ -252,6 +407,7 @@ test('旧版自动换图设置默认开启比赛地图优先', () => {
             biomeWeight: 10,
             chaseGoldBreeze: false,
             enabled: true,
+            preferDailyQuests: false,
             preferCompetitionBiomes: true,
         });
     } finally {
@@ -321,6 +477,285 @@ test('控制器会聚合游戏 hook 捕获的比赛响应', () => {
         });
         assert.equal(snapshot.autoBiomeCompetitionStatus, '公会 B5 · 个人 B4');
         assert.ok(snapshot.autoBiomeCompetitionUpdatedAt > 0);
+        controller.destroy();
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('控制器会读取 fetch hook 捕获的每日任务响应', () => {
+    const previousWindow = globalThis.window;
+
+    globalThis.window = {
+        clearTimeout() {},
+        setTimeout() {
+            return 1;
+        },
+    };
+
+    try {
+        const controller = createAutoBiomeController({
+            getState() {
+                return {};
+            },
+        });
+
+        assert.equal(
+            controller.handleQuestResponse({
+                pathname: '/api/quests',
+                payload: {
+                    quests: {
+                        daily: [
+                            {
+                                completed: 0,
+                                id: 250677,
+                                metadata: { targetBiome: 1 },
+                            },
+                            {
+                                completed: 0,
+                                id: 250680,
+                                metadata: {
+                                    weather_rule: 'arcane_surge',
+                                },
+                            },
+                        ],
+                    },
+                },
+            }),
+            true,
+        );
+
+        const snapshot = controller.getSnapshot();
+
+        assert.equal(snapshot.autoBiomeDailyQuestStatus, 'B1 · 奥术涌动');
+        assert.equal(snapshot.autoBiomeDailyQuests.length, 2);
+        assert.ok(snapshot.autoBiomeDailyQuestUpdatedAt > 0);
+        controller.destroy();
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('关闭自动换图后不会因小时兜底或完成任务刷新每日任务', async () => {
+    const previousWindow = globalThis.window;
+    const scheduledCallbacks = [];
+    let questRequestCount = 0;
+
+    globalThis.window = {
+        ApiService: {
+            async getAllBiomeWeather() {
+                return {
+                    weather: {
+                        1: { weather: 'clear', xpBonus: 0 },
+                    },
+                };
+            },
+            async getQuests() {
+                questRequestCount += 1;
+                return { quests: { daily: [] } };
+            },
+        },
+        clearTimeout() {},
+        setTimeout(callback) {
+            scheduledCallbacks.push(callback);
+            return scheduledCallbacks.length;
+        },
+    };
+
+    try {
+        const controller = createAutoBiomeController({
+            getState() {
+                return {
+                    autoBiomeSettings: {
+                        enabled: false,
+                        preferDailyQuests: true,
+                    },
+                    enabled: true,
+                };
+            },
+        });
+
+        controller.start();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await scheduledCallbacks[0]();
+        controller.handleCastResult({ completedQuests: [250677] });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.equal(questRequestCount, 0);
+        controller.destroy();
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('每日任务响应缺少 daily 数组时会结束读取状态', async () => {
+    const previousWindow = globalThis.window;
+
+    globalThis.window = {
+        ApiService: {
+            async getQuests() {
+                return { success: true };
+            },
+        },
+        clearTimeout() {},
+        setTimeout() {
+            return 1;
+        },
+    };
+
+    try {
+        const controller = createAutoBiomeController({
+            getState() {
+                return {};
+            },
+        });
+
+        await controller.refreshDailyQuests();
+
+        assert.equal(
+            controller.getSnapshot().autoBiomeDailyQuestStatus,
+            '每日任务响应异常，按普通地图选择',
+        );
+        controller.destroy();
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('主动读取与 fetch hook 捕获同一每日任务响应时只重新评估一次', async () => {
+    const previousWindow = globalThis.window;
+    const payload = {
+        quests: {
+            daily: [
+                {
+                    completed: 0,
+                    id: 250677,
+                    metadata: { targetBiome: 1 },
+                },
+            ],
+        },
+    };
+    let controller;
+    let evaluationCount = 0;
+
+    globalThis.window = {
+        ApiService: {
+            async getQuests() {
+                controller.handleQuestResponse({
+                    pathname: '/api/quests',
+                    payload,
+                    source: 'fetch',
+                });
+                return payload;
+            },
+        },
+        clearTimeout() {},
+        setTimeout() {
+            return 1;
+        },
+    };
+
+    try {
+        controller = createAutoBiomeController({
+            getState() {
+                evaluationCount += 1;
+                return {};
+            },
+        });
+
+        await controller.refreshDailyQuests();
+        controller.handleQuestResponse({
+            pathname: '/api/quests',
+            payload,
+            source: 'fetch',
+        });
+
+        assert.equal(evaluationCount, 1);
+        assert.equal(controller.getSnapshot().autoBiomeDailyQuestStatus, 'B1');
+        controller.destroy();
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('开启每日任务优先后会主动读取任务并切到匹配地图', async () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+    const player = {
+        boat: null,
+        currentBiome: 1,
+        unlockedBiomes: [1, 2, 3],
+    };
+
+    globalThis.window = {
+        ApiService: {
+            async changeBiome(biomeId) {
+                calls.push(['changeBiome', biomeId]);
+                return { success: true };
+            },
+            async getAllBiomeWeather() {
+                return {
+                    weather: {
+                        1: { weather: 'clear', xpBonus: 0 },
+                        2: { weather: 'arcane_surge', xpBonus: 75 },
+                        3: { weather: 'clear', xpBonus: 500 },
+                    },
+                };
+            },
+            async getQuests() {
+                calls.push(['getQuests']);
+                return {
+                    quests: {
+                        daily: [
+                            {
+                                completed: 0,
+                                id: 250680,
+                                metadata: {
+                                    weather_rule: 'arcane_surge',
+                                },
+                            },
+                        ],
+                    },
+                    success: true,
+                };
+            },
+        },
+        BIOMES: {
+            2: { name: 'Sunken Ruins' },
+        },
+        clearTimeout() {},
+        setTimeout() {
+            return 1;
+        },
+    };
+
+    try {
+        const controller = createAutoBiomeController({
+            getPlayer() {
+                return player;
+            },
+            getState() {
+                return {
+                    autoBiomeSettings: {
+                        biomeWeight: 0,
+                        enabled: true,
+                        preferCompetitionBiomes: false,
+                        preferDailyQuests: true,
+                    },
+                    enabled: true,
+                };
+            },
+        });
+
+        controller.start();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.deepEqual(calls, [['getQuests'], ['changeBiome', 2]]);
+        assert.match(
+            controller.getSnapshot().autoBiomeStatus,
+            /每日任务优先.*\[B2\]/,
+        );
         controller.destroy();
     } finally {
         globalThis.window = previousWindow;

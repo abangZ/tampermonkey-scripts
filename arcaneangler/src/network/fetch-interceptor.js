@@ -7,6 +7,7 @@ export function installFetchInterceptor({
     onCastResult,
     onCompetitionResponse,
     onGameStateResponse,
+    onQuestResponse,
     onWeatherResponse,
 }) {
     const originalFetch = window.fetch;
@@ -117,6 +118,22 @@ export function installFetchInterceptor({
             }
         }
 
+        if (method === 'GET' && isQuestResponsePath(url?.pathname)) {
+            try {
+                void collectJsonResponse(
+                    response.clone(),
+                    {
+                        method,
+                        pathname: url.pathname,
+                    },
+                    onQuestResponse,
+                    '[自动换图] 无法读取游戏每日任务响应：',
+                );
+            } catch (error) {
+                console.warn('[自动换图] 无法复制游戏每日任务响应：', error);
+            }
+        }
+
         if (isGameStateResponsePath(method, url?.pathname)) {
             try {
                 void collectGameStateResponse(
@@ -161,6 +178,10 @@ export function isWeatherResponsePath(pathname) {
         pathname === '/api/game/weather' ||
         /^\/api\/game\/weather\/\d+$/.test(pathname ?? '')
     );
+}
+
+export function isQuestResponsePath(pathname) {
+    return pathname === '/api/quests';
 }
 
 export function isCompetitionResponsePath(pathname) {

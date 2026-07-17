@@ -26,6 +26,7 @@ export function createPanelController({
         setAutoBiomeEnabled,
         setAutoBiomeChaseGoldBreeze,
         setAutoBiomePreferCompetition,
+        setAutoBiomePreferDailyQuests,
         setAutoBiomeWeight,
         setCaptchaBypassEnabled,
         setClickDelaySetting,
@@ -513,6 +514,23 @@ export function createPanelController({
             无可用比赛地图时优先选择金风天气；没有金风时再按经验评分选择。
           </div>
 
+          <label class="option-row">
+            <span>优先每日任务</span>
+            <span class="switch">
+              <input
+                id="auto-biome-daily-quest-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="无比赛和金风时优先选择每日任务地图"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
+          <div class="field-help">
+            无可用比赛和金风地图时，根据未完成每日任务筛选已解锁地图，再选择经验评分最高的地图。
+          </div>
+
           <div
             class="choice-list choice-list-three"
             role="radiogroup"
@@ -545,12 +563,17 @@ export function createPanelController({
           </div>
 
           <div class="field-help">
-            无可用比赛地图和需追逐的金风地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+            无可用比赛、需追逐的金风和每日任务地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
           </div>
 
           <div class="row">
             <span class="label">比赛地图</span>
             <span id="auto-biome-competition-status" class="value">自动换图开启后检测</span>
+          </div>
+
+          <div class="row">
+            <span class="label">每日任务</span>
+            <span id="auto-biome-daily-quest-status" class="value">开启优先每日任务后读取</span>
           </div>
 
           <div class="row">
@@ -832,8 +855,14 @@ export function createPanelController({
             autoBiomeGoldBreezeToggle: shadowRoot.querySelector(
                 '#auto-biome-gold-breeze-toggle',
             ),
+            autoBiomeDailyQuestToggle: shadowRoot.querySelector(
+                '#auto-biome-daily-quest-toggle',
+            ),
             autoBiomeCompetitionStatus: shadowRoot.querySelector(
                 '#auto-biome-competition-status',
+            ),
+            autoBiomeDailyQuestStatus: shadowRoot.querySelector(
+                '#auto-biome-daily-quest-status',
             ),
             autoBiomeWeightInputs: shadowRoot.querySelectorAll(
                 'input[name="auto-biome-weight"]',
@@ -969,6 +998,10 @@ export function createPanelController({
 
         ui.autoBiomeGoldBreezeToggle.addEventListener('change', (event) => {
             setAutoBiomeChaseGoldBreeze(event.currentTarget.checked);
+        });
+
+        ui.autoBiomeDailyQuestToggle.addEventListener('change', (event) => {
+            setAutoBiomePreferDailyQuests(event.currentTarget.checked);
         });
 
         ui.autoBaitToggle.addEventListener('change', (event) => {
@@ -1640,6 +1673,7 @@ export function createPanelController({
 
         const {
             autoBiomeCompetitionStatus,
+            autoBiomeDailyQuestStatus,
             autoBiomeLastUpdatedAt,
             autoBiomeSettings,
             autoBiomeStatus,
@@ -1663,7 +1697,14 @@ export function createPanelController({
             'aria-checked',
             autoBiomeSettings.chaseGoldBreeze ? 'true' : 'false',
         );
+        ui.autoBiomeDailyQuestToggle.checked =
+            autoBiomeSettings.preferDailyQuests;
+        ui.autoBiomeDailyQuestToggle.setAttribute(
+            'aria-checked',
+            autoBiomeSettings.preferDailyQuests ? 'true' : 'false',
+        );
         ui.autoBiomeCompetitionStatus.textContent = autoBiomeCompetitionStatus;
+        ui.autoBiomeDailyQuestStatus.textContent = autoBiomeDailyQuestStatus;
 
         for (const input of ui.autoBiomeWeightInputs) {
             input.checked =

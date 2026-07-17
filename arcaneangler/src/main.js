@@ -98,6 +98,7 @@ let autoBoss = null;
 let forceNextAutoBaitCheck = false;
 let pendingCaptchaChallenge = null;
 const pendingCompetitionResponses = new Map();
+let pendingQuestResponse = null;
 const pendingWeatherResponses = new Map();
 const gameState = createGameStateStore();
 const fishingActivityWatchdog = createFishingActivityWatchdog();
@@ -179,6 +180,13 @@ installFetchInterceptor({
             handleAutomationStateChanged();
         }
     },
+    onQuestResponse(response) {
+        if (autoBiome) {
+            autoBiome.handleQuestResponse(response);
+        } else {
+            pendingQuestResponse = response;
+        }
+    },
     onWeatherResponse(response) {
         handleWeatherResponse(response);
     },
@@ -226,6 +234,9 @@ function getPanelState() {
             },
             autoBiomeCompetitionStatus: '自动换图开启后检测',
             autoBiomeCompetitionUpdatedAt: 0,
+            autoBiomeDailyQuestStatus: '开启优先每日任务后读取',
+            autoBiomeDailyQuestUpdatedAt: 0,
+            autoBiomeDailyQuests: [],
             autoBiomeLastUpdatedAt: 0,
             autoBiomeStatus: '等待天气数据',
             autoBiomeTarget: null,
@@ -929,6 +940,16 @@ function setAutoBiomePreferCompetition(nextEnabled) {
     handleAutomationStateChanged();
 }
 
+function setAutoBiomePreferDailyQuests(nextEnabled) {
+    autoBiomeSettings = {
+        ...autoBiomeSettings,
+        preferDailyQuests: Boolean(nextEnabled),
+    };
+    saveAutoBiomeSettings(autoBiomeSettings);
+    panel.renderAutoBiomeSettings();
+    handleAutomationStateChanged();
+}
+
 function updateAutoBaitSettings(nextSettings) {
     autoBaitSettings = {
         ...autoBaitSettings,
@@ -1175,6 +1196,7 @@ function initialize() {
             setAutoBiomeEnabled,
             setAutoBiomeChaseGoldBreeze,
             setAutoBiomePreferCompetition,
+            setAutoBiomePreferDailyQuests,
             setAutoBiomeWeight,
             setCaptchaBypassEnabled,
             setClickDelaySetting,
@@ -1251,6 +1273,11 @@ function initialize() {
         }
     }
     pendingCompetitionResponses.clear();
+
+    if (pendingQuestResponse) {
+        autoBiome.handleQuestResponse(pendingQuestResponse);
+        pendingQuestResponse = null;
+    }
 
     if (pendingCaptchaChallenge) {
         captcha.handleChallenge(pendingCaptchaChallenge);
