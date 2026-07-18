@@ -12,7 +12,32 @@ import {
     resolveCompetitionBiomes,
     selectBestBiome,
 } from '../arcaneangler/src/auto-biome.js';
+import {
+    AUTO_BIOME_PRIORITY_IDS,
+    DEFAULT_AUTO_BIOME_PRIORITY_ORDER,
+} from '../arcaneangler/src/auto-biome-priority.js';
 import { loadAutoBiomeSettings } from '../arcaneangler/src/storage.js';
+
+const {
+    arcaneSurge,
+    dailyQuest,
+    goldBreeze,
+    guildCompetition,
+    personalCompetition,
+    weightedExperience,
+} = AUTO_BIOME_PRIORITY_IDS;
+
+function createPriorityOrder(...enabledPriorities) {
+    return [
+        ...enabledPriorities,
+        weightedExperience,
+        ...DEFAULT_AUTO_BIOME_PRIORITY_ORDER.filter(
+            (priorityId) =>
+                priorityId !== weightedExperience &&
+                !enabledPriorities.includes(priorityId),
+        ),
+    ];
+}
 
 test('地图评分会叠加天气经验和地图等级权重', () => {
     assert.equal(getBiomeScore(1, 30, 5), 30);
@@ -147,6 +172,7 @@ test('只从已解锁地图选择，鱼饵库存不影响候选地图', () => {
             baitId: null,
             biomeId: 4,
             score: 90,
+            selectionPriority: arcaneSurge,
             weather: 'arcane_surge',
             xpBonus: 75,
         },
@@ -176,7 +202,10 @@ test('公会锦标赛优先于个人比赛，比赛优先于天气评分', () =>
             biomeWeight: 5,
             competitionBiomes,
             player,
-            preferCompetitionBiomes: true,
+            priorityOrder: createPriorityOrder(
+                guildCompetition,
+                personalCompetition,
+            ),
             weatherByBiome,
         }),
         {
@@ -184,6 +213,7 @@ test('公会锦标赛优先于个人比赛，比赛优先于天气评分', () =>
             biomeId: 3,
             competitionType: 'guild',
             score: 10,
+            selectionPriority: guildCompetition,
             weather: 'clear',
             xpBonus: 0,
         },
@@ -197,7 +227,10 @@ test('公会锦标赛优先于个人比赛，比赛优先于天气评分', () =>
                 ...player,
                 unlockedBiomes: [1, 2, 4],
             },
-            preferCompetitionBiomes: true,
+            priorityOrder: createPriorityOrder(
+                guildCompetition,
+                personalCompetition,
+            ),
             weatherByBiome,
         }).biomeId,
         2,
@@ -208,14 +241,14 @@ test('公会锦标赛优先于个人比赛，比赛优先于天气评分', () =>
             biomeWeight: 5,
             competitionBiomes,
             player,
-            preferCompetitionBiomes: false,
+            priorityOrder: createPriorityOrder(),
             weatherByBiome,
         }).biomeId,
         4,
     );
 });
 
-test('追逐金风时比赛优先，无比赛才优先金风', () => {
+test('排序列表会决定比赛、天气与加权经验的优先级', () => {
     const weatherByBiome = normalizeWeatherByBiome({
         weather: {
             1: { weather: 'gold_breeze', xpBonus: -25 },
@@ -231,10 +264,9 @@ test('追逐金风时比赛优先，无比赛才优先金风', () => {
     assert.equal(
         selectBestBiome({
             biomeWeight: 0,
-            chaseGoldBreeze: true,
             competitionBiomes: { guildTournamentBiomeId: 3 },
             player,
-            preferCompetitionBiomes: true,
+            priorityOrder: createPriorityOrder(guildCompetition, goldBreeze),
             weatherByBiome,
         }).biomeId,
         3,
@@ -242,8 +274,8 @@ test('追逐金风时比赛优先，无比赛才优先金风', () => {
     assert.equal(
         selectBestBiome({
             biomeWeight: 0,
-            chaseGoldBreeze: true,
             player,
+            priorityOrder: createPriorityOrder(goldBreeze),
             weatherByBiome,
         }).biomeId,
         1,
@@ -251,11 +283,43 @@ test('追逐金风时比赛优先，无比赛才优先金风', () => {
     assert.equal(
         selectBestBiome({
             biomeWeight: 0,
-            chaseGoldBreeze: false,
             player,
+            priorityOrder: createPriorityOrder(),
             weatherByBiome,
         }).biomeId,
         2,
+    );
+});
+
+test('奥术涌动默认高于金风，拖动后可以让金风优先', () => {
+    const weatherByBiome = normalizeWeatherByBiome({
+        weather: {
+            1: { weather: 'gold_breeze', xpBonus: 500 },
+            2: { weather: 'arcane_surge', xpBonus: 75 },
+        },
+    });
+    const player = {
+        currentBiome: 1,
+        unlockedBiomes: [1, 2],
+    };
+
+    assert.equal(
+        selectBestBiome({
+            biomeWeight: 0,
+            player,
+            priorityOrder: DEFAULT_AUTO_BIOME_PRIORITY_ORDER,
+            weatherByBiome,
+        }).biomeId,
+        2,
+    );
+    assert.equal(
+        selectBestBiome({
+            biomeWeight: 0,
+            player,
+            priorityOrder: createPriorityOrder(goldBreeze, arcaneSurge),
+            weatherByBiome,
+        }).biomeId,
+        1,
     );
 });
 
@@ -294,7 +358,7 @@ test('每日任务低于金风、高于普通图，并从匹配地图中选择�
             biomeWeight: 5,
             dailyQuests,
             player,
-            preferDailyQuests: true,
+            priorityOrder: createPriorityOrder(dailyQuest),
             weatherByBiome,
         }),
         {
@@ -302,6 +366,7 @@ test('每日任务低于金风、高于普通图，并从匹配地图中选择�
             biomeId: 3,
             dailyQuestCount: 1,
             score: 85,
+            selectionPriority: dailyQuest,
             weather: 'arcane_surge',
             xpBonus: 75,
         },
@@ -309,10 +374,9 @@ test('每日任务低于金风、高于普通图，并从匹配地图中选择�
     assert.equal(
         selectBestBiome({
             biomeWeight: 5,
-            chaseGoldBreeze: true,
             dailyQuests,
             player,
-            preferDailyQuests: true,
+            priorityOrder: createPriorityOrder(goldBreeze, dailyQuest),
             weatherByBiome,
         }).biomeId,
         1,
@@ -320,12 +384,14 @@ test('每日任务低于金风、高于普通图，并从匹配地图中选择�
     assert.equal(
         selectBestBiome({
             biomeWeight: 5,
-            chaseGoldBreeze: true,
             competitionBiomes: { guildTournamentBiomeId: 2 },
             dailyQuests,
             player,
-            preferCompetitionBiomes: true,
-            preferDailyQuests: true,
+            priorityOrder: createPriorityOrder(
+                guildCompetition,
+                goldBreeze,
+                dailyQuest,
+            ),
             weatherByBiome,
         }).biomeId,
         2,
@@ -390,7 +456,7 @@ test('只识别已经报名的个人比赛和当前公会参加的锦标赛', ()
     );
 });
 
-test('旧版自动换图设置默认开启比赛地图优先', () => {
+test('旧版自动换图设置会迁移到排序列表并保留原开关', () => {
     const previousLocalStorage = globalThis.localStorage;
 
     globalThis.localStorage = {
@@ -405,10 +471,32 @@ test('旧版自动换图设置默认开启比赛地图优先', () => {
     try {
         assert.deepEqual(loadAutoBiomeSettings(), {
             biomeWeight: 10,
-            chaseGoldBreeze: false,
             enabled: true,
-            preferDailyQuests: false,
-            preferCompetitionBiomes: true,
+            priorityOrder: createPriorityOrder(
+                guildCompetition,
+                personalCompetition,
+                arcaneSurge,
+            ),
+        });
+    } finally {
+        globalThis.localStorage = previousLocalStorage;
+    }
+});
+
+test('首次使用自动换图时采用完整默认优先级', () => {
+    const previousLocalStorage = globalThis.localStorage;
+
+    globalThis.localStorage = {
+        getItem() {
+            return null;
+        },
+    };
+
+    try {
+        assert.deepEqual(loadAutoBiomeSettings(), {
+            biomeWeight: 5,
+            enabled: false,
+            priorityOrder: DEFAULT_AUTO_BIOME_PRIORITY_ORDER,
         });
     } finally {
         globalThis.localStorage = previousLocalStorage;
@@ -568,7 +656,7 @@ test('关闭自动换图后不会因小时兜底或完成任务刷新每日任�
                 return {
                     autoBiomeSettings: {
                         enabled: false,
-                        preferDailyQuests: true,
+                        priorityOrder: createPriorityOrder(dailyQuest),
                     },
                     enabled: true,
                 };
@@ -739,8 +827,7 @@ test('开启每日任务优先后会主动读取任务并切到匹配地图', as
                     autoBiomeSettings: {
                         biomeWeight: 0,
                         enabled: true,
-                        preferCompetitionBiomes: false,
-                        preferDailyQuests: true,
+                        priorityOrder: createPriorityOrder(dailyQuest),
                     },
                     enabled: true,
                 };
@@ -842,7 +929,7 @@ test('游戏天气 hook 更新后会切到评分最高的地图并同步装备',
                     autoBiomeSettings: {
                         biomeWeight: 0,
                         enabled: true,
-                        preferCompetitionBiomes: false,
+                        priorityOrder: createPriorityOrder(),
                     },
                     enabled: true,
                 };
@@ -915,7 +1002,7 @@ test('组队期间收到天气更新也不会自动切图', async () => {
                     autoBiomeSettings: {
                         biomeWeight: 0,
                         enabled: true,
-                        preferCompetitionBiomes: false,
+                        priorityOrder: createPriorityOrder(),
                     },
                     enabled: true,
                 };
@@ -975,7 +1062,7 @@ test('组队状态尚未返回前不会抢先按天气切图', async () => {
                     autoBiomeSettings: {
                         biomeWeight: 0,
                         enabled: true,
-                        preferCompetitionBiomes: false,
+                        priorityOrder: createPriorityOrder(),
                     },
                     enabled: true,
                 };

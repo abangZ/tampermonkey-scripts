@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.10.0
+// @version      2.11.0
 // @author       Codex
 // @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -283,6 +283,58 @@
 			}
 		};
 	}
+	var AUTO_BIOME_PRIORITY_IDS = {
+		guildCompetition: "guildCompetition",
+		personalCompetition: "personalCompetition",
+		arcaneSurge: "arcaneSurge",
+		goldBreeze: "goldBreeze",
+		dailyQuest: "dailyQuest",
+		weightedExperience: "weightedExperience"
+	};
+	var AUTO_BIOME_PRIORITY_OPTIONS = [
+		{
+			id: AUTO_BIOME_PRIORITY_IDS.guildCompetition,
+			label: "公会赛"
+		},
+		{
+			id: AUTO_BIOME_PRIORITY_IDS.personalCompetition,
+			label: "个人赛"
+		},
+		{
+			id: AUTO_BIOME_PRIORITY_IDS.arcaneSurge,
+			label: "奥术涌动"
+		},
+		{
+			id: AUTO_BIOME_PRIORITY_IDS.goldBreeze,
+			label: "金风"
+		},
+		{
+			id: AUTO_BIOME_PRIORITY_IDS.dailyQuest,
+			label: "每日任务"
+		},
+		{
+			id: AUTO_BIOME_PRIORITY_IDS.weightedExperience,
+			label: "加权经验对比"
+		}
+	];
+	var DEFAULT_AUTO_BIOME_PRIORITY_ORDER = AUTO_BIOME_PRIORITY_OPTIONS.map(({ id }) => id);
+	var AUTO_BIOME_PRIORITY_ID_SET = new Set(DEFAULT_AUTO_BIOME_PRIORITY_ORDER);
+	function normalizeAutoBiomePriorityOrder(priorityOrder) {
+		if (!Array.isArray(priorityOrder)) return [...DEFAULT_AUTO_BIOME_PRIORITY_ORDER];
+		const normalizedOrder = [];
+		for (const priorityId of priorityOrder) if (AUTO_BIOME_PRIORITY_ID_SET.has(priorityId) && !normalizedOrder.includes(priorityId)) normalizedOrder.push(priorityId);
+		for (const priorityId of DEFAULT_AUTO_BIOME_PRIORITY_ORDER) if (!normalizedOrder.includes(priorityId)) normalizedOrder.push(priorityId);
+		return normalizedOrder;
+	}
+	function getAutoBiomeDecisionOrder(priorityOrder) {
+		const normalizedOrder = normalizeAutoBiomePriorityOrder(priorityOrder);
+		const weightedExperienceIndex = normalizedOrder.indexOf(AUTO_BIOME_PRIORITY_IDS.weightedExperience);
+		return normalizedOrder.slice(0, weightedExperienceIndex + 1);
+	}
+	function isAutoBiomePriorityEnabled(priorityOrder, priorityId) {
+		if (priorityId === AUTO_BIOME_PRIORITY_IDS.weightedExperience) return true;
+		return getAutoBiomeDecisionOrder(priorityOrder).includes(priorityId);
+	}
 	var WEATHER_LABELS = {
 		clear: "晴朗",
 		rain: "雨天",
@@ -296,6 +348,7 @@
 	};
 	var COMPETITION_HOOK_DEBOUNCE = 1e3;
 	var DAILY_QUEST_FALLBACK_FRESHNESS = 3600 * 1e3;
+	var ARCANE_SURGE_WEATHER = "arcane_surge";
 	var GOLD_BREEZE_WEATHER = "gold_breeze";
 	var WEATHER_FALLBACK_FRESHNESS = 6e4;
 	function normalizeBiomeId$1(value) {
@@ -405,11 +458,6 @@
 		}
 		return null;
 	}
-	function getCompetitionType(biomeId, competitionBiomes) {
-		if (biomeId === normalizeBiomeId$1(competitionBiomes?.guildTournamentBiomeId)) return "guild";
-		if (biomeId === normalizeBiomeId$1(competitionBiomes?.personalDerbyBiomeId)) return "personal";
-		return null;
-	}
 	function resolveCompetitionBiomes({ derbyResponse, guildResponse, tournamentResponse, tournamentStandingsResponse }) {
 		const activeTournament = tournamentResponse?.active;
 		const activeDerby = derbyResponse?.active;
@@ -420,40 +468,55 @@
 			personalDerbyBiomeId: activeDerby?.is_registered === true ? normalizeBiomeId$1(activeDerby.biome_id) : null
 		};
 	}
-	function selectBestBiome({ biomeWeight, chaseGoldBreeze = false, competitionBiomes, dailyQuests = [], now = Date.now(), player, preferDailyQuests = false, preferCompetitionBiomes = false, weatherByBiome }) {
+	function selectBestBiome({ biomeWeight, competitionBiomes, dailyQuests = [], now = Date.now(), player, priorityOrder, weatherByBiome }) {
+		const decisionOrder = getAutoBiomeDecisionOrder(priorityOrder);
+		const usesDailyQuests = decisionOrder.includes(AUTO_BIOME_PRIORITY_IDS.dailyQuest);
 		const unlockedBiomes = Array.isArray(player?.unlockedBiomes) ? player.unlockedBiomes : [player?.currentBiome ?? 1];
 		const candidates = [];
 		for (const rawBiomeId of unlockedBiomes) {
 			const biomeId = normalizeBiomeId$1(rawBiomeId);
 			const weather = weatherByBiome?.[biomeId];
 			if (!biomeId || !weather) continue;
-			const competitionType = preferCompetitionBiomes ? getCompetitionType(biomeId, competitionBiomes) : null;
-			const goldBreezePriority = chaseGoldBreeze && weather.weather === GOLD_BREEZE_WEATHER ? 1 : 0;
-			const dailyQuestMatchCount = preferDailyQuests ? findMatchingDailyQuests({
+			const dailyQuestMatchCount = usesDailyQuests ? findMatchingDailyQuests({
 				biomeId,
 				dailyQuests,
 				now,
 				weather: weather.weather
 			}).length : 0;
+			const score = getBiomeScore(biomeId, weather.xpBonus, biomeWeight);
 			candidates.push({
 				baitId: findAvailableBaitForBiome(player, biomeId),
 				biomeId,
-				competitionPriority: competitionType === "guild" ? 2 : competitionType === "personal" ? 1 : 0,
-				...competitionType ? { competitionType } : {},
 				dailyQuestMatchCount,
-				dailyQuestPriority: dailyQuestMatchCount > 0 ? 1 : 0,
-				goldBreezePriority,
-				score: getBiomeScore(biomeId, weather.xpBonus, biomeWeight),
+				priorityValues: {
+					[AUTO_BIOME_PRIORITY_IDS.guildCompetition]: biomeId === normalizeBiomeId$1(competitionBiomes?.guildTournamentBiomeId) ? 1 : 0,
+					[AUTO_BIOME_PRIORITY_IDS.personalCompetition]: biomeId === normalizeBiomeId$1(competitionBiomes?.personalDerbyBiomeId) ? 1 : 0,
+					[AUTO_BIOME_PRIORITY_IDS.arcaneSurge]: weather.weather === ARCANE_SURGE_WEATHER ? 1 : 0,
+					[AUTO_BIOME_PRIORITY_IDS.goldBreeze]: weather.weather === GOLD_BREEZE_WEATHER ? 1 : 0,
+					[AUTO_BIOME_PRIORITY_IDS.dailyQuest]: dailyQuestMatchCount > 0 ? 1 : 0,
+					[AUTO_BIOME_PRIORITY_IDS.weightedExperience]: score
+				},
+				score,
 				weather: weather.weather,
 				xpBonus: weather.xpBonus
 			});
 		}
-		candidates.sort((left, right) => right.competitionPriority - left.competitionPriority || right.goldBreezePriority - left.goldBreezePriority || right.dailyQuestPriority - left.dailyQuestPriority || right.score - left.score || right.biomeId - left.biomeId);
+		candidates.sort((left, right) => {
+			for (const priorityId of decisionOrder) {
+				const difference = right.priorityValues[priorityId] - left.priorityValues[priorityId];
+				if (difference !== 0) return difference;
+			}
+			return right.biomeId - left.biomeId;
+		});
 		if (candidates.length === 0) return null;
-		const { competitionPriority, dailyQuestMatchCount, dailyQuestPriority, goldBreezePriority, ...bestBiome } = candidates[0];
+		const { dailyQuestMatchCount, priorityValues, ...bestBiome } = candidates[0];
+		const selectionPriority = decisionOrder.find((priorityId) => priorityId === AUTO_BIOME_PRIORITY_IDS.weightedExperience || priorityValues[priorityId] > 0) ?? AUTO_BIOME_PRIORITY_IDS.weightedExperience;
 		return {
 			...bestBiome,
-			...dailyQuestPriority > 0 && competitionPriority === 0 && goldBreezePriority === 0 ? { dailyQuestCount: dailyQuestMatchCount } : {}
+			selectionPriority,
+			...selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition ? { competitionType: "guild" } : {},
+			...selectionPriority === AUTO_BIOME_PRIORITY_IDS.personalCompetition ? { competitionType: "personal" } : {},
+			...selectionPriority === AUTO_BIOME_PRIORITY_IDS.dailyQuest ? { dailyQuestCount: dailyQuestMatchCount } : {}
 		};
 	}
 	function getBiomeName(biomeId) {
@@ -468,11 +531,20 @@
 	function formatTargetSummary(target) {
 		const weatherLabel = getWeatherLabel(target.weather);
 		const signedXpBonus = target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
-		const competitionLabel = target.competitionType === "guild" ? "公会锦标赛优先 · " : target.competitionType === "personal" ? "个人比赛优先 · " : "";
-		return `${competitionLabel}${!competitionLabel && target.dailyQuestCount > 0 ? "每日任务优先 · " : ""}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
+		return `${target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition ? "公会赛优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.personalCompetition ? "个人赛优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.arcaneSurge ? "奥术涌动优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.goldBreeze ? "金风优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.dailyQuest ? "每日任务优先 · " : ""}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
 	}
 	function getErrorMessage$1(error) {
 		return String(error?.message ?? error ?? "未知错误");
+	}
+	function getPriorityState(priorityOrder) {
+		const normalizedPriorityOrder = normalizeAutoBiomePriorityOrder(priorityOrder);
+		return {
+			dailyQuestEnabled: isAutoBiomePriorityEnabled(normalizedPriorityOrder, AUTO_BIOME_PRIORITY_IDS.dailyQuest),
+			goldBreezeEnabled: isAutoBiomePriorityEnabled(normalizedPriorityOrder, AUTO_BIOME_PRIORITY_IDS.goldBreeze),
+			guildCompetitionEnabled: isAutoBiomePriorityEnabled(normalizedPriorityOrder, AUTO_BIOME_PRIORITY_IDS.guildCompetition),
+			normalizedPriorityOrder,
+			personalCompetitionEnabled: isAutoBiomePriorityEnabled(normalizedPriorityOrder, AUTO_BIOME_PRIORITY_IDS.personalCompetition)
+		};
 	}
 	async function autoEquipForBiome(player, target, { skipBait = false, skipRod = false } = {}) {
 		const api = window.ApiService;
@@ -524,7 +596,7 @@
 			loadAttempted: false,
 			loading: false,
 			quests: [],
-			status: "开启优先每日任务后读取",
+			status: "自动换图开启后读取",
 			updatedAt: 0
 		};
 		let lastFullWeatherUpdatedAt = 0;
@@ -555,10 +627,12 @@
 				autoBiomeWeatherByBiome: weatherByBiome
 			};
 		}
-		function formatCompetitionStatus(biomes) {
+		function formatCompetitionStatus(biomes, priorityOrder) {
+			const { guildCompetitionEnabled, personalCompetitionEnabled } = getPriorityState(priorityOrder);
 			const labels = [];
-			if (biomes.guildTournamentBiomeId) labels.push(`公会 B${biomes.guildTournamentBiomeId}`);
-			if (biomes.personalDerbyBiomeId) labels.push(`个人 B${biomes.personalDerbyBiomeId}`);
+			if (guildCompetitionEnabled && biomes.guildTournamentBiomeId) labels.push(`公会 B${biomes.guildTournamentBiomeId}`);
+			if (personalCompetitionEnabled && biomes.personalDerbyBiomeId) labels.push(`个人 B${biomes.personalDerbyBiomeId}`);
+			if (!guildCompetitionEnabled && !personalCompetitionEnabled) return "已关闭";
 			return labels.length > 0 ? labels.join(" · ") : "暂无已参与的比赛";
 		}
 		function formatDailyQuestStatus(quests) {
@@ -573,12 +647,15 @@
 				tournamentResponse,
 				tournamentStandingsResponse: tournamentStandingsById.get(String(tournamentResponse?.active?.id ?? ""))
 			});
-			competitionStatus = formatCompetitionStatus(competitionBiomes);
+			competitionStatus = formatCompetitionStatus(competitionBiomes, getState?.()?.autoBiomeSettings?.priorityOrder);
 			competitionUpdatedAt = Date.now();
 			notifyStateChanged();
 		}
-		function hasCompetitionSnapshot() {
-			if (derbyResponse === void 0 || tournamentResponse === void 0) return false;
+		function hasCompetitionSnapshot(priorityOrder) {
+			const { guildCompetitionEnabled, personalCompetitionEnabled } = getPriorityState(priorityOrder);
+			if (personalCompetitionEnabled && derbyResponse === void 0) return false;
+			if (!guildCompetitionEnabled) return true;
+			if (tournamentResponse === void 0) return false;
 			const activeTournamentId = tournamentResponse?.active?.id;
 			if (!activeTournamentId) return true;
 			if (tournamentResponse.active.is_registered === true) return true;
@@ -714,7 +791,8 @@
 				const refreshes = [];
 				if (Date.now() - lastFullWeatherUpdatedAt > WEATHER_FALLBACK_FRESHNESS) refreshes.push(refreshWeather());
 				const { autoBiomeSettings = {} } = getState?.() ?? {};
-				if (autoBiomeSettings.enabled === true && autoBiomeSettings?.preferDailyQuests === true && Date.now() - dailyQuestState.updatedAt > DAILY_QUEST_FALLBACK_FRESHNESS) refreshes.push(refreshDailyQuests());
+				const { dailyQuestEnabled } = getPriorityState(autoBiomeSettings.priorityOrder);
+				if (autoBiomeSettings.enabled === true && dailyQuestEnabled && Date.now() - dailyQuestState.updatedAt > DAILY_QUEST_FALLBACK_FRESHNESS) refreshes.push(refreshDailyQuests());
 				await Promise.all(refreshes);
 				scheduleHourlyFallback();
 			}, getNextHourlyRefreshDelay());
@@ -722,15 +800,22 @@
 		async function evaluateBestBiome() {
 			const currentEvaluationId = ++evaluationId;
 			const { autoBaitSettings = {}, autoBiomeSettings = {}, enabled = false } = getState?.() ?? {};
+			const { dailyQuestEnabled, goldBreezeEnabled, guildCompetitionEnabled, normalizedPriorityOrder, personalCompetitionEnabled } = getPriorityState(autoBiomeSettings.priorityOrder);
+			const competitionEnabled = guildCompetitionEnabled || personalCompetitionEnabled;
+			if (!competitionEnabled) competitionStatus = "已关闭";
+			else if (competitionUpdatedAt > 0) competitionStatus = formatCompetitionStatus(competitionBiomes, normalizedPriorityOrder);
+			else if (competitionStatus === "已关闭") competitionStatus = "自动换图开启后检测";
+			if (!dailyQuestEnabled) dailyQuestState.status = "已关闭";
+			else if (dailyQuestState.status === "已关闭") dailyQuestState.status = dailyQuestState.updatedAt > 0 ? formatDailyQuestStatus(dailyQuestState.quests) : "自动换图开启后读取";
 			if (!autoBiomeSettings.enabled) {
 				target = null;
-				competitionStatus = autoBiomeSettings.preferCompetitionBiomes !== false ? "自动换图开启后检测" : "已关闭";
+				competitionStatus = competitionEnabled ? "自动换图开启后检测" : "已关闭";
 				setStatus("未启用");
 				return;
 			}
 			if (!enabled) {
 				target = null;
-				competitionStatus = autoBiomeSettings.preferCompetitionBiomes !== false ? "脚本启动后检测" : "已关闭";
+				competitionStatus = competitionEnabled ? "脚本启动后检测" : "已关闭";
 				setStatus("脚本启动后自动选择地图");
 				return;
 			}
@@ -739,16 +824,16 @@
 				return;
 			}
 			if (switching) return;
-			if (autoBiomeSettings.preferCompetitionBiomes !== false && (!hasCompetitionSnapshot() || competitionHookPending)) {
+			if (competitionEnabled && (!hasCompetitionSnapshot(normalizedPriorityOrder) || competitionHookPending)) {
 				competitionStatus = "等待游戏比赛轮询";
 				setStatus("等待游戏比赛数据");
 				return;
 			}
-			if (autoBiomeSettings.preferDailyQuests === true && dailyQuestState.loading) {
+			if (dailyQuestEnabled && dailyQuestState.loading) {
 				setStatus("等待每日任务数据");
 				return;
 			}
-			if (autoBiomeSettings.preferDailyQuests === true && !dailyQuestState.loadAttempted) {
+			if (dailyQuestEnabled && !dailyQuestState.loadAttempted) {
 				setStatus("正在读取每日任务数据");
 				refreshDailyQuests();
 				return;
@@ -777,15 +862,13 @@
 			}
 			target = selectBestBiome({
 				biomeWeight: autoBiomeSettings.biomeWeight,
-				chaseGoldBreeze: autoBiomeSettings.chaseGoldBreeze === true,
 				competitionBiomes,
 				dailyQuests: dailyQuestState.quests,
 				player,
-				preferDailyQuests: autoBiomeSettings.preferDailyQuests === true,
-				preferCompetitionBiomes: autoBiomeSettings.preferCompetitionBiomes !== false,
+				priorityOrder: normalizedPriorityOrder,
 				weatherByBiome
 			});
-			const chasingGoldBreeze = autoBiomeSettings.chaseGoldBreeze === true && target?.weather === GOLD_BREEZE_WEATHER;
+			const chasingGoldBreeze = goldBreezeEnabled && target?.weather === GOLD_BREEZE_WEATHER;
 			if (chasingGoldBreeze) target.baitId = getBaitIdForBiome(target.biomeId, autoBaitSettings?.goldBreezeBaitGrade ?? "default");
 			if (!target) {
 				setStatus("没有可用的已解锁地图数据");
@@ -819,7 +902,7 @@
 		}
 		function handleCastResult(result) {
 			const { autoBiomeSettings = {} } = getState?.() ?? {};
-			if (Array.isArray(result?.completedQuests) && result.completedQuests.length > 0 && autoBiomeSettings.enabled === true && autoBiomeSettings.preferDailyQuests === true) refreshDailyQuests();
+			if (Array.isArray(result?.completedQuests) && result.completedQuests.length > 0 && autoBiomeSettings.enabled === true && isAutoBiomePriorityEnabled(autoBiomeSettings.priorityOrder, AUTO_BIOME_PRIORITY_IDS.dailyQuest)) refreshDailyQuests();
 			if (target && normalizeBiomeId$1(result?.currentBiome) === target.biomeId) setStatus(`已在 ${formatTargetSummary(target)}`);
 		}
 		function start() {
@@ -2391,23 +2474,31 @@
 		const weight = Number(value);
 		return AUTO_BIOME_WEIGHTS.includes(weight) ? weight : fallback;
 	}
+	function migrateLegacyAutoBiomePriorityOrder(savedSettings) {
+		const enabledPriorities = [];
+		if (savedSettings.preferCompetitionBiomes !== false) enabledPriorities.push(AUTO_BIOME_PRIORITY_IDS.guildCompetition, AUTO_BIOME_PRIORITY_IDS.personalCompetition);
+		enabledPriorities.push(AUTO_BIOME_PRIORITY_IDS.arcaneSurge);
+		if (savedSettings.chaseGoldBreeze === true) enabledPriorities.push(AUTO_BIOME_PRIORITY_IDS.goldBreeze);
+		if (savedSettings.preferDailyQuests === true) enabledPriorities.push(AUTO_BIOME_PRIORITY_IDS.dailyQuest);
+		return [
+			...enabledPriorities,
+			AUTO_BIOME_PRIORITY_IDS.weightedExperience,
+			...DEFAULT_AUTO_BIOME_PRIORITY_ORDER.filter((priorityId) => priorityId !== AUTO_BIOME_PRIORITY_IDS.weightedExperience && !enabledPriorities.includes(priorityId))
+		];
+	}
 	function loadAutoBiomeSettings() {
 		const defaults = {
-			chaseGoldBreeze: false,
-			enabled: false,
 			biomeWeight: 5,
-			preferDailyQuests: false,
-			preferCompetitionBiomes: true
+			enabled: false,
+			priorityOrder: [...DEFAULT_AUTO_BIOME_PRIORITY_ORDER]
 		};
 		try {
 			const savedSettings = JSON.parse(localStorage.getItem(AUTO_BIOME_SETTINGS_STORAGE_KEY));
 			if (!savedSettings || typeof savedSettings !== "object") return defaults;
 			return {
-				chaseGoldBreeze: savedSettings.chaseGoldBreeze === true,
-				enabled: savedSettings.enabled === true,
 				biomeWeight: normalizeAutoBiomeWeight(savedSettings.biomeWeight, defaults.biomeWeight),
-				preferDailyQuests: savedSettings.preferDailyQuests === true,
-				preferCompetitionBiomes: savedSettings.preferCompetitionBiomes !== false
+				enabled: savedSettings.enabled === true,
+				priorityOrder: Array.isArray(savedSettings.priorityOrder) ? normalizeAutoBiomePriorityOrder(savedSettings.priorityOrder) : migrateLegacyAutoBiomePriorityOrder(savedSettings)
 			};
 		} catch (error) {
 			console.warn("[自动换图] 无法读取设置：", error);
@@ -2556,7 +2647,7 @@
 			console.warn("[自动抛竿] 无法保存面板折叠状态：", error);
 		}
 	}
-	var panel_default = "* {\n    box-sizing: border-box;\n}\n\n.panel {\n    width: 280px;\n    max-width: calc(100vw - 32px);\n    padding: 14px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 12px;\n    background: rgba(18, 18, 24, 0.94);\n    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);\n    color: #ffffff;\n    backdrop-filter: blur(12px);\n}\n\n.panel[data-collapsed='true'] {\n    width: auto;\n    padding: 7px;\n}\n\n.panel[data-collapsed='true'] .panel-content,\n.panel[data-collapsed='true'] .title-text {\n    display: none;\n}\n\n.header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n}\n\n.title {\n    display: flex;\n    align-items: center;\n    gap: 5px;\n    font-size: 15px;\n    font-weight: 700;\n}\n\n.collapse-toggle {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    width: 26px;\n    height: 26px;\n    flex-shrink: 0;\n    padding: 0;\n    border: 1px solid rgba(255, 255, 255, 0.16);\n    border-radius: 7px;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 16px;\n    line-height: 1;\n    cursor: pointer;\n}\n\n.collapse-toggle:hover {\n    background: rgba(255, 255, 255, 0.14);\n}\n\n.panel-content {\n    max-height: calc(100vh - 96px);\n    overflow-x: hidden;\n    overflow-y: auto;\n    overscroll-behavior: contain;\n    margin-top: 10px;\n    padding-right: 2px;\n    scrollbar-color: rgba(255, 255, 255, 0.28) transparent;\n    scrollbar-width: thin;\n}\n\n.panel-content::-webkit-scrollbar {\n    width: 6px;\n    height: 0;\n}\n\n.panel-content::-webkit-scrollbar-track {\n    background: transparent;\n}\n\n.panel-content::-webkit-scrollbar-thumb {\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.24);\n}\n\n.panel-content::-webkit-scrollbar-thumb:hover {\n    background: rgba(255, 255, 255, 0.38);\n}\n\n.panel-content::-webkit-scrollbar-corner {\n    background: transparent;\n}\n\n.tabs {\n    display: grid;\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n    gap: 4px;\n    margin-bottom: 10px;\n    padding: 3px;\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.07);\n}\n\n.panel-tab {\n    padding: 6px 8px;\n    border: 0;\n    border-radius: 6px;\n    background: transparent;\n    color: rgba(255, 255, 255, 0.56);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.panel-tab[data-active='true'] {\n    background: #6d5dfc;\n    color: #ffffff;\n}\n\n.panel-view[hidden] {\n    display: none;\n}\n\n.row {\n    display: flex;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 7px;\n    font-size: 12px;\n    line-height: 1.4;\n}\n\n.label {\n    flex-shrink: 0;\n    color: rgba(255, 255, 255, 0.58);\n}\n\n.value {\n    min-width: 0;\n    overflow-wrap: anywhere;\n    text-align: right;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.field {\n    display: block;\n    margin-top: 12px;\n}\n\n.field-label {\n    display: block;\n    margin-bottom: 5px;\n    color: rgba(255, 255, 255, 0.58);\n    font-size: 12px;\n}\n\n.input {\n    width: 100%;\n    padding: 8px 9px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 7px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.92);\n    color-scheme: dark;\n    font-size: 12px;\n}\n\n.input option {\n    background: #252530;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.input:focus {\n    border-color: #6d5dfc;\n}\n\n.input::placeholder {\n    color: rgba(255, 255, 255, 0.32);\n}\n\n.field-help {\n    margin-top: 6px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 11px;\n    line-height: 1.45;\n}\n\n.field-help[hidden] {\n    display: none;\n}\n\n.field-help a {\n    color: #9ea5ff;\n    text-decoration: underline;\n}\n\n.settings-section + .settings-section {\n    margin-top: 14px;\n    padding-top: 14px;\n    border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.settings-title {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 8px;\n    list-style: none;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.settings-title::-webkit-details-marker {\n    display: none;\n}\n\n.settings-title::after {\n    content: '›';\n    color: rgba(255, 255, 255, 0.45);\n    font-size: 18px;\n    line-height: 1;\n    transform: rotate(0deg);\n    transition: transform 160ms ease;\n}\n\n.settings-section[open] > .settings-title::after {\n    transform: rotate(90deg);\n}\n\n.choice-list {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n    margin-top: 8px;\n}\n\n.choice-list-three {\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n}\n\n.choice-option {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    padding: 7px 8px;\n    border: 1px solid rgba(255, 255, 255, 0.12);\n    border-radius: 7px;\n    color: rgba(255, 255, 255, 0.78);\n    font-size: 11px;\n    cursor: pointer;\n}\n\n.choice-option:has(input:checked) {\n    border-color: rgba(109, 93, 252, 0.72);\n    background: rgba(109, 93, 252, 0.14);\n    color: #ffffff;\n}\n\n.choice-option input {\n    margin: 0;\n    accent-color: #6d5dfc;\n}\n\n.settings-group[hidden] {\n    display: none;\n}\n\n.number-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n\n.secondary-button {\n    width: 100%;\n    margin-top: 9px;\n    padding: 7px 10px;\n    border: 1px solid rgba(109, 93, 252, 0.55);\n    border-radius: 7px;\n    background: rgba(109, 93, 252, 0.12);\n    color: #b9b5ff;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.secondary-button:hover {\n    background: rgba(109, 93, 252, 0.22);\n}\n\n.secondary-button:disabled {\n    cursor: default;\n    opacity: 0.48;\n}\n\n.toggle {\n    width: 100%;\n    margin-top: 12px;\n    padding: 9px 12px;\n    border: 0;\n    border-radius: 8px;\n    background: #6d5dfc;\n    color: #ffffff;\n    font-size: 13px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.toggle:hover {\n    filter: brightness(1.08);\n}\n\n.toggle[data-enabled='true'] {\n    background: #d34848;\n}\n\n.option-row {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 10px;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    cursor: pointer;\n}\n\n.switch {\n    position: relative;\n    width: 38px;\n    height: 22px;\n    flex-shrink: 0;\n}\n\n.switch input {\n    position: absolute;\n    width: 1px;\n    height: 1px;\n    opacity: 0;\n}\n\n.switch-track {\n    display: block;\n    width: 100%;\n    height: 100%;\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.2);\n    transition: background 0.15s ease;\n}\n\n.switch-track::after {\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #ffffff;\n    content: '';\n    transition: transform 0.15s ease;\n}\n\n.switch input:checked + .switch-track {\n    background: #6d5dfc;\n}\n\n.switch input:checked + .switch-track::after {\n    transform: translateX(16px);\n}\n\n.switch input:focus-visible + .switch-track {\n    outline: 2px solid #9ea5ff;\n    outline-offset: 2px;\n}\n\n.hint {\n    margin-top: 9px;\n    text-align: center;\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 11px;\n}\n\n.stats-filters {\n    display: grid;\n    gap: 6px;\n    margin-bottom: 8px;\n}\n\n.stats-filter span {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stats-select {\n    width: 100%;\n    padding: 6px 7px;\n    border: 1px solid rgba(255, 255, 255, 0.14);\n    border-radius: 6px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.9);\n    font-size: 10px;\n}\n\n.stats-select:focus {\n    border-color: #6d5dfc;\n}\n\n.stats-scope {\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.72);\n    font-size: 10px;\n    font-weight: 700;\n    text-align: center;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stats-start {\n    margin: 3px 0 9px;\n    color: rgba(255, 255, 255, 0.48);\n    font-size: 10px;\n    text-align: center;\n}\n\n.stats-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n\n.stat-card {\n    min-width: 0;\n    padding: 8px;\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.055);\n}\n\n.stat-card-label {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stat-card-value {\n    display: block;\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.94);\n    font-size: 13px;\n    line-height: 1.25;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-card-value[data-tone='income'],\n.stat-card-value[data-tone='positive'] {\n    color: #4ade80;\n}\n\n.stat-card-value[data-tone='gold'] {\n    color: #fbbf24;\n}\n\n.stat-card-value[data-tone='cost'],\n.stat-card-value[data-tone='negative'] {\n    color: #f87171;\n}\n\n.stats-section-title {\n    margin: 12px 0 6px;\n    color: rgba(255, 255, 255, 0.62);\n    font-size: 11px;\n    font-weight: 700;\n}\n\n.stats-list {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n\n.stat-chip {\n    max-width: 100%;\n    overflow: hidden;\n    padding: 4px 6px;\n    border-radius: 6px;\n    background: rgba(109, 93, 252, 0.16);\n    color: #d8d8df;\n    font-size: 10px;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-chip[data-tone='uncommon'] {\n    background: rgba(132, 204, 22, 0.14);\n    color: #84cc16;\n}\n\n.stat-chip[data-tone='common'] {\n    background: rgba(156, 163, 175, 0.14);\n    color: #9ca3af;\n}\n\n.stat-chip[data-tone='fine'] {\n    background: rgba(59, 130, 246, 0.14);\n    color: #3b82f6;\n}\n\n.stat-chip[data-tone='rare'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='epic'] {\n    background: rgba(236, 72, 153, 0.14);\n    color: #ec4899;\n}\n\n.stat-chip[data-tone='legendary'] {\n    background: rgba(245, 158, 11, 0.14);\n    color: #f59e0b;\n}\n\n.stat-chip[data-tone='mythic'] {\n    background: rgba(239, 68, 68, 0.14);\n    color: #ef4444;\n}\n\n.stat-chip[data-tone='exotic'] {\n    background: rgba(6, 182, 212, 0.14);\n    color: #06b6d4;\n}\n\n.stat-chip[data-tone='arcane'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='relic'],\n.stat-chip[data-tone='treasure'] {\n    background: rgba(242, 204, 96, 0.14);\n    color: #f2cc60;\n}\n\n.stat-chip[data-tone='gear'] {\n    background: rgba(86, 212, 221, 0.14);\n    color: #7ce7ee;\n}\n\n.empty-stat {\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 10px;\n    line-height: 1.45;\n}\n\n.stats-cost-note {\n    margin-top: 7px;\n    color: #fbbf24;\n    font-size: 10px;\n    line-height: 1.4;\n}\n\n.stats-cost-note[hidden] {\n    display: none;\n}\n\n.reset-stats {\n    width: 100%;\n    margin-top: 12px;\n    padding: 7px 10px;\n    border: 1px solid rgba(211, 72, 72, 0.52);\n    border-radius: 7px;\n    background: rgba(211, 72, 72, 0.12);\n    color: #ff9d9d;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.reset-stats:hover {\n    background: rgba(211, 72, 72, 0.22);\n}\n";
+	var panel_default = "* {\n    box-sizing: border-box;\n}\n\n.panel {\n    width: 280px;\n    max-width: calc(100vw - 32px);\n    padding: 14px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 12px;\n    background: rgba(18, 18, 24, 0.94);\n    box-shadow: 0 10px 32px rgba(0, 0, 0, 0.42);\n    color: #ffffff;\n    backdrop-filter: blur(12px);\n}\n\n.panel[data-collapsed='true'] {\n    width: auto;\n    padding: 7px;\n}\n\n.panel[data-collapsed='true'] .panel-content,\n.panel[data-collapsed='true'] .title-text {\n    display: none;\n}\n\n.header {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n}\n\n.title {\n    display: flex;\n    align-items: center;\n    gap: 5px;\n    font-size: 15px;\n    font-weight: 700;\n}\n\n.collapse-toggle {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    width: 26px;\n    height: 26px;\n    flex-shrink: 0;\n    padding: 0;\n    border: 1px solid rgba(255, 255, 255, 0.16);\n    border-radius: 7px;\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 16px;\n    line-height: 1;\n    cursor: pointer;\n}\n\n.collapse-toggle:hover {\n    background: rgba(255, 255, 255, 0.14);\n}\n\n.panel-content {\n    max-height: calc(100vh - 96px);\n    overflow-x: hidden;\n    overflow-y: auto;\n    overscroll-behavior: contain;\n    margin-top: 10px;\n    padding-right: 2px;\n    scrollbar-color: rgba(255, 255, 255, 0.28) transparent;\n    scrollbar-width: thin;\n}\n\n.panel-content::-webkit-scrollbar {\n    width: 6px;\n    height: 0;\n}\n\n.panel-content::-webkit-scrollbar-track {\n    background: transparent;\n}\n\n.panel-content::-webkit-scrollbar-thumb {\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.24);\n}\n\n.panel-content::-webkit-scrollbar-thumb:hover {\n    background: rgba(255, 255, 255, 0.38);\n}\n\n.panel-content::-webkit-scrollbar-corner {\n    background: transparent;\n}\n\n.tabs {\n    display: grid;\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n    gap: 4px;\n    margin-bottom: 10px;\n    padding: 3px;\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.07);\n}\n\n.panel-tab {\n    padding: 6px 8px;\n    border: 0;\n    border-radius: 6px;\n    background: transparent;\n    color: rgba(255, 255, 255, 0.56);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.panel-tab[data-active='true'] {\n    background: #6d5dfc;\n    color: #ffffff;\n}\n\n.panel-view[hidden] {\n    display: none;\n}\n\n.row {\n    display: flex;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 7px;\n    font-size: 12px;\n    line-height: 1.4;\n}\n\n.label {\n    flex-shrink: 0;\n    color: rgba(255, 255, 255, 0.58);\n}\n\n.value {\n    min-width: 0;\n    overflow-wrap: anywhere;\n    text-align: right;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.field {\n    display: block;\n    margin-top: 12px;\n}\n\n.field-label {\n    display: block;\n    margin-bottom: 5px;\n    color: rgba(255, 255, 255, 0.58);\n    font-size: 12px;\n}\n\n.input {\n    width: 100%;\n    padding: 8px 9px;\n    border: 1px solid rgba(255, 255, 255, 0.18);\n    border-radius: 7px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.92);\n    color-scheme: dark;\n    font-size: 12px;\n}\n\n.input option {\n    background: #252530;\n    color: rgba(255, 255, 255, 0.92);\n}\n\n.input:focus {\n    border-color: #6d5dfc;\n}\n\n.input::placeholder {\n    color: rgba(255, 255, 255, 0.32);\n}\n\n.field-help {\n    margin-top: 6px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 11px;\n    line-height: 1.45;\n}\n\n.field-help[hidden] {\n    display: none;\n}\n\n.field-help a {\n    color: #9ea5ff;\n    text-decoration: underline;\n}\n\n.settings-section + .settings-section {\n    margin-top: 14px;\n    padding-top: 14px;\n    border-top: 1px solid rgba(255, 255, 255, 0.1);\n}\n\n.settings-title {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 8px;\n    list-style: none;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.settings-title::-webkit-details-marker {\n    display: none;\n}\n\n.settings-title::after {\n    content: '›';\n    color: rgba(255, 255, 255, 0.45);\n    font-size: 18px;\n    line-height: 1;\n    transform: rotate(0deg);\n    transition: transform 160ms ease;\n}\n\n.settings-section[open] > .settings-title::after {\n    transform: rotate(90deg);\n}\n\n.priority-heading {\n    margin-top: 12px;\n}\n\n.priority-list {\n    display: grid;\n    gap: 5px;\n}\n\n.priority-item {\n    display: grid;\n    grid-template-columns: auto minmax(0, 1fr) auto auto;\n    align-items: center;\n    gap: 6px;\n    min-height: 34px;\n    padding: 5px 6px;\n    border: 1px solid rgba(255, 255, 255, 0.12);\n    border-radius: 7px;\n    background: rgba(255, 255, 255, 0.045);\n    color: rgba(255, 255, 255, 0.86);\n    font-size: 11px;\n    cursor: grab;\n}\n\n.priority-item[data-dragging='true'] {\n    border-color: rgba(109, 93, 252, 0.72);\n    background: rgba(109, 93, 252, 0.18);\n    opacity: 0.72;\n    cursor: grabbing;\n}\n\n.priority-item[data-enabled='false'] {\n    color: rgba(255, 255, 255, 0.44);\n    opacity: 0.72;\n}\n\n.priority-item[data-enabled='boundary'] {\n    border-color: rgba(251, 191, 36, 0.42);\n    background: rgba(251, 191, 36, 0.08);\n}\n\n.priority-drag-handle {\n    color: rgba(255, 255, 255, 0.38);\n    font-size: 15px;\n    line-height: 1;\n}\n\n.priority-label {\n    overflow: hidden;\n    font-weight: 700;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.priority-state {\n    padding: 2px 5px;\n    border-radius: 999px;\n    background: rgba(74, 222, 128, 0.12);\n    color: #86efac;\n    font-size: 9px;\n    white-space: nowrap;\n}\n\n.priority-item[data-enabled='false'] .priority-state {\n    background: rgba(255, 255, 255, 0.08);\n    color: rgba(255, 255, 255, 0.48);\n}\n\n.priority-item[data-enabled='boundary'] .priority-state {\n    background: rgba(251, 191, 36, 0.12);\n    color: #fcd34d;\n}\n\n.priority-actions {\n    display: inline-flex;\n    gap: 3px;\n}\n\n.priority-move {\n    display: inline-flex;\n    align-items: center;\n    justify-content: center;\n    width: 22px;\n    height: 22px;\n    padding: 0;\n    border: 1px solid rgba(255, 255, 255, 0.14);\n    border-radius: 5px;\n    background: rgba(255, 255, 255, 0.06);\n    color: rgba(255, 255, 255, 0.72);\n    font-size: 11px;\n    cursor: pointer;\n}\n\n.priority-move:hover:not(:disabled) {\n    background: rgba(109, 93, 252, 0.22);\n}\n\n.priority-move:disabled {\n    cursor: default;\n    opacity: 0.28;\n}\n\n.choice-list {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n    margin-top: 8px;\n}\n\n.choice-list-three {\n    grid-template-columns: repeat(3, minmax(0, 1fr));\n}\n\n.choice-option {\n    display: flex;\n    align-items: center;\n    gap: 6px;\n    padding: 7px 8px;\n    border: 1px solid rgba(255, 255, 255, 0.12);\n    border-radius: 7px;\n    color: rgba(255, 255, 255, 0.78);\n    font-size: 11px;\n    cursor: pointer;\n}\n\n.choice-option:has(input:checked) {\n    border-color: rgba(109, 93, 252, 0.72);\n    background: rgba(109, 93, 252, 0.14);\n    color: #ffffff;\n}\n\n.choice-option input {\n    margin: 0;\n    accent-color: #6d5dfc;\n}\n\n.settings-group[hidden] {\n    display: none;\n}\n\n.number-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 8px;\n}\n\n.secondary-button {\n    width: 100%;\n    margin-top: 9px;\n    padding: 7px 10px;\n    border: 1px solid rgba(109, 93, 252, 0.55);\n    border-radius: 7px;\n    background: rgba(109, 93, 252, 0.12);\n    color: #b9b5ff;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.secondary-button:hover {\n    background: rgba(109, 93, 252, 0.22);\n}\n\n.secondary-button:disabled {\n    cursor: default;\n    opacity: 0.48;\n}\n\n.toggle {\n    width: 100%;\n    margin-top: 12px;\n    padding: 9px 12px;\n    border: 0;\n    border-radius: 8px;\n    background: #6d5dfc;\n    color: #ffffff;\n    font-size: 13px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.toggle:hover {\n    filter: brightness(1.08);\n}\n\n.toggle[data-enabled='true'] {\n    background: #d34848;\n}\n\n.option-row {\n    display: flex;\n    align-items: center;\n    justify-content: space-between;\n    gap: 10px;\n    margin-top: 10px;\n    color: rgba(255, 255, 255, 0.88);\n    font-size: 12px;\n    cursor: pointer;\n}\n\n.switch {\n    position: relative;\n    width: 38px;\n    height: 22px;\n    flex-shrink: 0;\n}\n\n.switch input {\n    position: absolute;\n    width: 1px;\n    height: 1px;\n    opacity: 0;\n}\n\n.switch-track {\n    display: block;\n    width: 100%;\n    height: 100%;\n    border-radius: 999px;\n    background: rgba(255, 255, 255, 0.2);\n    transition: background 0.15s ease;\n}\n\n.switch-track::after {\n    position: absolute;\n    top: 3px;\n    left: 3px;\n    width: 16px;\n    height: 16px;\n    border-radius: 50%;\n    background: #ffffff;\n    content: '';\n    transition: transform 0.15s ease;\n}\n\n.switch input:checked + .switch-track {\n    background: #6d5dfc;\n}\n\n.switch input:checked + .switch-track::after {\n    transform: translateX(16px);\n}\n\n.switch input:focus-visible + .switch-track {\n    outline: 2px solid #9ea5ff;\n    outline-offset: 2px;\n}\n\n.hint {\n    margin-top: 9px;\n    text-align: center;\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 11px;\n}\n\n.stats-filters {\n    display: grid;\n    gap: 6px;\n    margin-bottom: 8px;\n}\n\n.stats-filter span {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stats-select {\n    width: 100%;\n    padding: 6px 7px;\n    border: 1px solid rgba(255, 255, 255, 0.14);\n    border-radius: 6px;\n    outline: none;\n    background: #252530;\n    color: rgba(255, 255, 255, 0.9);\n    font-size: 10px;\n}\n\n.stats-select:focus {\n    border-color: #6d5dfc;\n}\n\n.stats-scope {\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.72);\n    font-size: 10px;\n    font-weight: 700;\n    text-align: center;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stats-start {\n    margin: 3px 0 9px;\n    color: rgba(255, 255, 255, 0.48);\n    font-size: 10px;\n    text-align: center;\n}\n\n.stats-grid {\n    display: grid;\n    grid-template-columns: repeat(2, minmax(0, 1fr));\n    gap: 6px;\n}\n\n.stat-card {\n    min-width: 0;\n    padding: 8px;\n    border: 1px solid rgba(255, 255, 255, 0.1);\n    border-radius: 8px;\n    background: rgba(255, 255, 255, 0.055);\n}\n\n.stat-card-label {\n    display: block;\n    margin-bottom: 3px;\n    color: rgba(255, 255, 255, 0.5);\n    font-size: 10px;\n}\n\n.stat-card-value {\n    display: block;\n    overflow: hidden;\n    color: rgba(255, 255, 255, 0.94);\n    font-size: 13px;\n    line-height: 1.25;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-card-value[data-tone='income'],\n.stat-card-value[data-tone='positive'] {\n    color: #4ade80;\n}\n\n.stat-card-value[data-tone='gold'] {\n    color: #fbbf24;\n}\n\n.stat-card-value[data-tone='cost'],\n.stat-card-value[data-tone='negative'] {\n    color: #f87171;\n}\n\n.stats-section-title {\n    margin: 12px 0 6px;\n    color: rgba(255, 255, 255, 0.62);\n    font-size: 11px;\n    font-weight: 700;\n}\n\n.stats-list {\n    display: flex;\n    flex-wrap: wrap;\n    gap: 5px;\n}\n\n.stat-chip {\n    max-width: 100%;\n    overflow: hidden;\n    padding: 4px 6px;\n    border-radius: 6px;\n    background: rgba(109, 93, 252, 0.16);\n    color: #d8d8df;\n    font-size: 10px;\n    text-overflow: ellipsis;\n    white-space: nowrap;\n}\n\n.stat-chip[data-tone='uncommon'] {\n    background: rgba(132, 204, 22, 0.14);\n    color: #84cc16;\n}\n\n.stat-chip[data-tone='common'] {\n    background: rgba(156, 163, 175, 0.14);\n    color: #9ca3af;\n}\n\n.stat-chip[data-tone='fine'] {\n    background: rgba(59, 130, 246, 0.14);\n    color: #3b82f6;\n}\n\n.stat-chip[data-tone='rare'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='epic'] {\n    background: rgba(236, 72, 153, 0.14);\n    color: #ec4899;\n}\n\n.stat-chip[data-tone='legendary'] {\n    background: rgba(245, 158, 11, 0.14);\n    color: #f59e0b;\n}\n\n.stat-chip[data-tone='mythic'] {\n    background: rgba(239, 68, 68, 0.14);\n    color: #ef4444;\n}\n\n.stat-chip[data-tone='exotic'] {\n    background: rgba(6, 182, 212, 0.14);\n    color: #06b6d4;\n}\n\n.stat-chip[data-tone='arcane'] {\n    background: rgba(168, 85, 247, 0.14);\n    color: #a855f7;\n}\n\n.stat-chip[data-tone='relic'],\n.stat-chip[data-tone='treasure'] {\n    background: rgba(242, 204, 96, 0.14);\n    color: #f2cc60;\n}\n\n.stat-chip[data-tone='gear'] {\n    background: rgba(86, 212, 221, 0.14);\n    color: #7ce7ee;\n}\n\n.empty-stat {\n    color: rgba(255, 255, 255, 0.42);\n    font-size: 10px;\n    line-height: 1.45;\n}\n\n.stats-cost-note {\n    margin-top: 7px;\n    color: #fbbf24;\n    font-size: 10px;\n    line-height: 1.4;\n}\n\n.stats-cost-note[hidden] {\n    display: none;\n}\n\n.reset-stats {\n    width: 100%;\n    margin-top: 12px;\n    padding: 7px 10px;\n    border: 1px solid rgba(211, 72, 72, 0.52);\n    border-radius: 7px;\n    background: rgba(211, 72, 72, 0.12);\n    color: #ff9d9d;\n    font-size: 11px;\n    font-weight: 700;\n    cursor: pointer;\n}\n\n.reset-stats:hover {\n    background: rgba(211, 72, 72, 0.22);\n}\n";
 	function createPanelController({ actions, formatScheduleDuration, getState }) {
 		let panelCollapsed = loadPanelCollapsed();
 		let panelView = "control";
@@ -2564,8 +2655,9 @@
 		let earningsBaitFilter = "current";
 		let autoBaitPurchaseSaveTimer = null;
 		let autoBaitPurchaseSettingsDirty = false;
+		let draggedAutoBiomePriorityId = null;
 		let ui = null;
-		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitPurchaseSettings, setAutoBossEnabled, setAutoBiomeEnabled, setAutoBiomeChaseGoldBreeze, setAutoBiomePreferCompetition, setAutoBiomePreferDailyQuests, setAutoBiomeWeight, setCaptchaBypassEnabled, setClickDelaySetting, setEnabled, setGameAutoFishingBaitGrade, setGameAutoFishingEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleGameAutoFishingDuringRest, setScheduleMinutes } = actions;
+		const { requestBrowserNotificationPermission, resetEarningsStats, setAutoBaitEnabled, setAutoBaitGrade, setAutoBaitPurchaseSettings, setAutoBossEnabled, setAutoBiomeEnabled, setAutoBiomePriorityOrder, setAutoBiomeWeight, setCaptchaBypassEnabled, setClickDelaySetting, setEnabled, setGameAutoFishingBaitGrade, setGameAutoFishingEnabled, setIdleReloadMinutes, setNotificationMode, setPushKey, setScheduleEnabled, setScheduleGameAutoFishingDuringRest, setScheduleMinutes } = actions;
 		function normalizeText(text) {
 			return String(text ?? "").replace(/\s+/g, " ").trim();
 		}
@@ -2590,6 +2682,19 @@
 			const minimumQuantity = Number(ui?.autoBaitMinimumQuantity.value);
 			if (!Number.isFinite(minimumQuantity) || minimumQuantity < 1 || minimumQuantity > 1e5) return;
 			autoBaitPurchaseSaveTimer = window.setTimeout(flushAutoBaitPurchaseSettings, 300);
+		}
+		function getAutoBiomePriorityOrderFromUi() {
+			return Array.from(ui?.autoBiomePriorityList?.children ?? [], (item) => item.getAttribute("data-priority-id"));
+		}
+		function commitAutoBiomePriorityOrder() {
+			setAutoBiomePriorityOrder(getAutoBiomePriorityOrderFromUi());
+		}
+		function moveAutoBiomePriorityItem(item, direction) {
+			const sibling = direction < 0 ? item.previousElementSibling : item.nextElementSibling;
+			if (!sibling) return;
+			if (direction < 0) item.parentElement.insertBefore(item, sibling);
+			else item.parentElement.insertBefore(sibling, item);
+			commitAutoBiomePriorityOrder();
 		}
 		function createPanel() {
 			if (document.getElementById("arcane-angler-auto-cast-panel-host")) return;
@@ -2971,55 +3076,46 @@
         <details class="settings-section">
           <summary class="settings-title">自动换地图</summary>
 
-          <label class="option-row">
-            <span>优先比赛地图</span>
-            <span class="switch">
-              <input
-                id="auto-biome-competition-toggle"
-                type="checkbox"
-                role="switch"
-                aria-label="自动换图时优先比赛地图"
-              />
-              <span class="switch-track" aria-hidden="true"></span>
-            </span>
-          </label>
+          <div class="field-label priority-heading">选图优先级</div>
 
-          <div class="field-help">
-            仅优先已参与且已解锁的比赛地图；公会锦标赛优先于个人比赛。
+          <div
+            id="auto-biome-priority-list"
+            class="priority-list"
+            role="list"
+            aria-label="自动换图优先级，可拖动排序"
+          >
+            ${AUTO_BIOME_PRIORITY_OPTIONS.map(({ id, label }) => `
+              <div
+                class="priority-item"
+                data-priority-id="${id}"
+                draggable="true"
+                role="listitem"
+              >
+                <span class="priority-drag-handle" aria-hidden="true">⠿</span>
+                <span class="priority-label">${label}</span>
+                <span class="priority-state"></span>
+                <span class="priority-actions">
+                  <button
+                    class="priority-move"
+                    type="button"
+                    data-direction="-1"
+                    aria-label="上移${label}"
+                    title="上移"
+                  >↑</button>
+                  <button
+                    class="priority-move"
+                    type="button"
+                    data-direction="1"
+                    aria-label="下移${label}"
+                    title="下移"
+                  >↓</button>
+                </span>
+              </div>
+            `).join("")}
           </div>
 
-          <label class="option-row">
-            <span>追逐金风</span>
-            <span class="switch">
-              <input
-                id="auto-biome-gold-breeze-toggle"
-                type="checkbox"
-                role="switch"
-                aria-label="无比赛时优先选择金风地图"
-              />
-              <span class="switch-track" aria-hidden="true"></span>
-            </span>
-          </label>
-
           <div class="field-help">
-            无可用比赛地图时优先选择金风天气；没有金风时再按经验评分选择。
-          </div>
-
-          <label class="option-row">
-            <span>优先每日任务</span>
-            <span class="switch">
-              <input
-                id="auto-biome-daily-quest-toggle"
-                type="checkbox"
-                role="switch"
-                aria-label="无比赛和金风时优先选择每日任务地图"
-              />
-              <span class="switch-track" aria-hidden="true"></span>
-            </span>
-          </label>
-
-          <div class="field-help">
-            无可用比赛和金风地图时，根据未完成每日任务筛选已解锁地图，再选择经验评分最高的地图。
+            拖动列表调整顺序；也可使用右侧箭头。排在“加权经验对比”下面的项目视为未启用。
           </div>
 
           <div
@@ -3054,7 +3150,7 @@
           </div>
 
           <div class="field-help">
-            无可用比赛、需追逐的金风和每日任务地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+            加权经验评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
           </div>
 
           <div class="row">
@@ -3064,7 +3160,7 @@
 
           <div class="row">
             <span class="label">每日任务</span>
-            <span id="auto-biome-daily-quest-status" class="value">开启优先每日任务后读取</span>
+            <span id="auto-biome-daily-quest-status" class="value">自动换图开启后读取</span>
           </div>
 
           <div class="row">
@@ -3322,9 +3418,8 @@
 				longDelayChancePercent: shadowRoot.querySelector("#long-delay-chance-percent"),
 				autoBiomeStatus: shadowRoot.querySelector("#auto-biome-status"),
 				autoBiomeToggle: shadowRoot.querySelector("#auto-biome-toggle"),
-				autoBiomeCompetitionToggle: shadowRoot.querySelector("#auto-biome-competition-toggle"),
-				autoBiomeGoldBreezeToggle: shadowRoot.querySelector("#auto-biome-gold-breeze-toggle"),
-				autoBiomeDailyQuestToggle: shadowRoot.querySelector("#auto-biome-daily-quest-toggle"),
+				autoBiomePriorityList: shadowRoot.querySelector("#auto-biome-priority-list"),
+				autoBiomePriorityItems: shadowRoot.querySelectorAll("#auto-biome-priority-list .priority-item"),
 				autoBiomeCompetitionStatus: shadowRoot.querySelector("#auto-biome-competition-status"),
 				autoBiomeDailyQuestStatus: shadowRoot.querySelector("#auto-biome-daily-quest-status"),
 				autoBiomeWeightInputs: shadowRoot.querySelectorAll("input[name=\"auto-biome-weight\"]"),
@@ -3406,14 +3501,36 @@
 			ui.autoBiomeToggle.addEventListener("change", (event) => {
 				setAutoBiomeEnabled(event.currentTarget.checked);
 			});
-			ui.autoBiomeCompetitionToggle.addEventListener("change", (event) => {
-				setAutoBiomePreferCompetition(event.currentTarget.checked);
+			ui.autoBiomePriorityList.addEventListener("dragstart", (event) => {
+				const item = event.target.closest(".priority-item");
+				if (!item) return;
+				draggedAutoBiomePriorityId = item.getAttribute("data-priority-id");
+				item.setAttribute("data-dragging", "true");
+				event.dataTransfer?.setData("text/plain", draggedAutoBiomePriorityId);
+				if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
 			});
-			ui.autoBiomeGoldBreezeToggle.addEventListener("change", (event) => {
-				setAutoBiomeChaseGoldBreeze(event.currentTarget.checked);
+			ui.autoBiomePriorityList.addEventListener("dragover", (event) => {
+				const targetItem = event.target.closest(".priority-item");
+				const draggedItem = ui.autoBiomePriorityList.querySelector(`[data-priority-id="${draggedAutoBiomePriorityId}"]`);
+				if (!targetItem || !draggedItem || targetItem === draggedItem) return;
+				event.preventDefault();
+				const targetRect = targetItem.getBoundingClientRect();
+				const insertBefore = event.clientY < targetRect.top + targetRect.height / 2;
+				ui.autoBiomePriorityList.insertBefore(draggedItem, insertBefore ? targetItem : targetItem.nextElementSibling);
 			});
-			ui.autoBiomeDailyQuestToggle.addEventListener("change", (event) => {
-				setAutoBiomePreferDailyQuests(event.currentTarget.checked);
+			ui.autoBiomePriorityList.addEventListener("drop", (event) => {
+				event.preventDefault();
+			});
+			ui.autoBiomePriorityList.addEventListener("dragend", (event) => {
+				event.target.closest(".priority-item")?.removeAttribute("data-dragging");
+				draggedAutoBiomePriorityId = null;
+				commitAutoBiomePriorityOrder();
+			});
+			ui.autoBiomePriorityList.addEventListener("click", (event) => {
+				const button = event.target.closest(".priority-move");
+				const item = button?.closest(".priority-item");
+				if (!button || !item) return;
+				moveAutoBiomePriorityItem(item, Number(button.getAttribute("data-direction")));
 			});
 			ui.autoBaitToggle.addEventListener("change", (event) => {
 				setAutoBaitEnabled(event.currentTarget.checked);
@@ -3794,14 +3911,35 @@
 			ui.autoBiomeToggle.checked = autoBiomeSettings.enabled;
 			ui.autoBiomeToggle.setAttribute("aria-checked", autoBiomeSettings.enabled ? "true" : "false");
 			ui.autoBiomeStatus.textContent = autoBiomeStatus;
-			ui.autoBiomeCompetitionToggle.checked = autoBiomeSettings.preferCompetitionBiomes;
-			ui.autoBiomeCompetitionToggle.setAttribute("aria-checked", autoBiomeSettings.preferCompetitionBiomes ? "true" : "false");
-			ui.autoBiomeGoldBreezeToggle.checked = autoBiomeSettings.chaseGoldBreeze;
-			ui.autoBiomeGoldBreezeToggle.setAttribute("aria-checked", autoBiomeSettings.chaseGoldBreeze ? "true" : "false");
-			ui.autoBiomeDailyQuestToggle.checked = autoBiomeSettings.preferDailyQuests;
-			ui.autoBiomeDailyQuestToggle.setAttribute("aria-checked", autoBiomeSettings.preferDailyQuests ? "true" : "false");
 			ui.autoBiomeCompetitionStatus.textContent = autoBiomeCompetitionStatus;
 			ui.autoBiomeDailyQuestStatus.textContent = autoBiomeDailyQuestStatus;
+			const priorityOrder = autoBiomeSettings.priorityOrder;
+			const weightedExperienceIndex = priorityOrder.indexOf(AUTO_BIOME_PRIORITY_IDS.weightedExperience);
+			if (!draggedAutoBiomePriorityId) {
+				const itemsById = new Map(Array.from(ui.autoBiomePriorityItems, (item) => [item.getAttribute("data-priority-id"), item]));
+				for (const priorityId of priorityOrder) {
+					const item = itemsById.get(priorityId);
+					if (item) ui.autoBiomePriorityList.appendChild(item);
+				}
+			}
+			for (const item of ui.autoBiomePriorityList.children) {
+				const priorityId = item.getAttribute("data-priority-id");
+				const priorityIndex = priorityOrder.indexOf(priorityId);
+				const state = item.querySelector(".priority-state");
+				const moveButtons = item.querySelectorAll(".priority-move");
+				if (priorityId === AUTO_BIOME_PRIORITY_IDS.weightedExperience) {
+					item.setAttribute("data-enabled", "boundary");
+					state.textContent = "分界线";
+				} else if (priorityIndex < weightedExperienceIndex) {
+					item.setAttribute("data-enabled", "true");
+					state.textContent = "已启用";
+				} else {
+					item.setAttribute("data-enabled", "false");
+					state.textContent = "未启用";
+				}
+				moveButtons[0].disabled = priorityIndex === 0;
+				moveButtons[1].disabled = priorityIndex === priorityOrder.length - 1;
+			}
 			for (const input of ui.autoBiomeWeightInputs) input.checked = Number(input.value) === autoBiomeSettings.biomeWeight;
 			ui.autoBiomeUpdatedAt.textContent = autoBiomeLastUpdatedAt ? new Date(autoBiomeLastUpdatedAt).toLocaleTimeString() : "等待接口数据";
 		}
@@ -4004,7 +4142,7 @@
 				},
 				autoBiomeCompetitionStatus: "自动换图开启后检测",
 				autoBiomeCompetitionUpdatedAt: 0,
-				autoBiomeDailyQuestStatus: "开启优先每日任务后读取",
+				autoBiomeDailyQuestStatus: "自动换图开启后读取",
 				autoBiomeDailyQuestUpdatedAt: 0,
 				autoBiomeDailyQuests: [],
 				autoBiomeLastUpdatedAt: 0,
@@ -4364,32 +4502,14 @@
 		panel.renderAutoBiomeSettings();
 		handleAutomationStateChanged();
 	}
-	function setAutoBiomeChaseGoldBreeze(nextEnabled) {
+	function setAutoBiomePriorityOrder(nextPriorityOrder) {
 		autoBiomeSettings = {
 			...autoBiomeSettings,
-			chaseGoldBreeze: Boolean(nextEnabled)
+			priorityOrder: normalizeAutoBiomePriorityOrder(nextPriorityOrder)
 		};
 		saveAutoBiomeSettings(autoBiomeSettings);
 		panel.renderAutoBiomeSettings();
 		handleAutomationStateChanged({ forceBait: true });
-	}
-	function setAutoBiomePreferCompetition(nextEnabled) {
-		autoBiomeSettings = {
-			...autoBiomeSettings,
-			preferCompetitionBiomes: Boolean(nextEnabled)
-		};
-		saveAutoBiomeSettings(autoBiomeSettings);
-		panel.renderAutoBiomeSettings();
-		handleAutomationStateChanged();
-	}
-	function setAutoBiomePreferDailyQuests(nextEnabled) {
-		autoBiomeSettings = {
-			...autoBiomeSettings,
-			preferDailyQuests: Boolean(nextEnabled)
-		};
-		saveAutoBiomeSettings(autoBiomeSettings);
-		panel.renderAutoBiomeSettings();
-		handleAutomationStateChanged();
 	}
 	function updateAutoBaitSettings(nextSettings) {
 		autoBaitSettings = {
@@ -4540,9 +4660,7 @@
 				setAutoBaitPurchaseSettings,
 				setAutoBossEnabled,
 				setAutoBiomeEnabled,
-				setAutoBiomeChaseGoldBreeze,
-				setAutoBiomePreferCompetition,
-				setAutoBiomePreferDailyQuests,
+				setAutoBiomePriorityOrder,
 				setAutoBiomeWeight,
 				setCaptchaBypassEnabled,
 				setClickDelaySetting,

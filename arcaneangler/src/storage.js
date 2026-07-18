@@ -16,6 +16,11 @@ import {
     DEFAULT_CLICK_DELAY_SETTINGS,
     normalizeClickDelaySettings,
 } from './click-delay.js';
+import {
+    AUTO_BIOME_PRIORITY_IDS,
+    DEFAULT_AUTO_BIOME_PRIORITY_ORDER,
+    normalizeAutoBiomePriorityOrder,
+} from './auto-biome-priority.js';
 
 export const AUTO_BIOME_WEIGHTS = [0, 5, 10];
 export const AUTO_BAIT_GRADES = ['default', 'low', 'medium', 'high', 'super'];
@@ -165,13 +170,42 @@ export function normalizeAutoBiomeWeight(value, fallback = 5) {
     return AUTO_BIOME_WEIGHTS.includes(weight) ? weight : fallback;
 }
 
+function migrateLegacyAutoBiomePriorityOrder(savedSettings) {
+    const enabledPriorities = [];
+
+    if (savedSettings.preferCompetitionBiomes !== false) {
+        enabledPriorities.push(
+            AUTO_BIOME_PRIORITY_IDS.guildCompetition,
+            AUTO_BIOME_PRIORITY_IDS.personalCompetition,
+        );
+    }
+
+    enabledPriorities.push(AUTO_BIOME_PRIORITY_IDS.arcaneSurge);
+
+    if (savedSettings.chaseGoldBreeze === true) {
+        enabledPriorities.push(AUTO_BIOME_PRIORITY_IDS.goldBreeze);
+    }
+
+    if (savedSettings.preferDailyQuests === true) {
+        enabledPriorities.push(AUTO_BIOME_PRIORITY_IDS.dailyQuest);
+    }
+
+    return [
+        ...enabledPriorities,
+        AUTO_BIOME_PRIORITY_IDS.weightedExperience,
+        ...DEFAULT_AUTO_BIOME_PRIORITY_ORDER.filter(
+            (priorityId) =>
+                priorityId !== AUTO_BIOME_PRIORITY_IDS.weightedExperience &&
+                !enabledPriorities.includes(priorityId),
+        ),
+    ];
+}
+
 export function loadAutoBiomeSettings() {
     const defaults = {
-        chaseGoldBreeze: false,
-        enabled: false,
         biomeWeight: 5,
-        preferDailyQuests: false,
-        preferCompetitionBiomes: true,
+        enabled: false,
+        priorityOrder: [...DEFAULT_AUTO_BIOME_PRIORITY_ORDER],
     };
 
     try {
@@ -184,15 +218,14 @@ export function loadAutoBiomeSettings() {
         }
 
         return {
-            chaseGoldBreeze: savedSettings.chaseGoldBreeze === true,
-            enabled: savedSettings.enabled === true,
             biomeWeight: normalizeAutoBiomeWeight(
                 savedSettings.biomeWeight,
                 defaults.biomeWeight,
             ),
-            preferDailyQuests: savedSettings.preferDailyQuests === true,
-            preferCompetitionBiomes:
-                savedSettings.preferCompetitionBiomes !== false,
+            enabled: savedSettings.enabled === true,
+            priorityOrder: Array.isArray(savedSettings.priorityOrder)
+                ? normalizeAutoBiomePriorityOrder(savedSettings.priorityOrder)
+                : migrateLegacyAutoBiomePriorityOrder(savedSettings),
         };
     } catch (error) {
         console.warn('[自动换图] 无法读取设置：', error);

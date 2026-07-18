@@ -1,4 +1,10 @@
 import { getBaitIdForBiome } from './auto-bait.js';
+import {
+    AUTO_BIOME_PRIORITY_IDS,
+    getAutoBiomeDecisionOrder,
+    isAutoBiomePriorityEnabled,
+    normalizeAutoBiomePriorityOrder,
+} from './auto-biome-priority.js';
 
 const WEATHER_LABELS = {
     clear: '晴朗',
@@ -13,6 +19,7 @@ const WEATHER_LABELS = {
 };
 const COMPETITION_HOOK_DEBOUNCE = 1000;
 const DAILY_QUEST_FALLBACK_FRESHNESS = 60 * 60 * 1000;
+const ARCANE_SURGE_WEATHER = 'arcane_surge';
 const GOLD_BREEZE_WEATHER = 'gold_breeze';
 const WEATHER_FALLBACK_FRESHNESS = 60000;
 
@@ -249,20 +256,6 @@ export function findAvailableBaitForBiome(player, biomeId) {
     return null;
 }
 
-function getCompetitionType(biomeId, competitionBiomes) {
-    if (
-        biomeId === normalizeBiomeId(competitionBiomes?.guildTournamentBiomeId)
-    ) {
-        return 'guild';
-    }
-
-    if (biomeId === normalizeBiomeId(competitionBiomes?.personalDerbyBiomeId)) {
-        return 'personal';
-    }
-
-    return null;
-}
-
 export function resolveCompetitionBiomes({
     derbyResponse,
     guildResponse,
@@ -295,15 +288,17 @@ export function resolveCompetitionBiomes({
 
 export function selectBestBiome({
     biomeWeight,
-    chaseGoldBreeze = false,
     competitionBiomes,
     dailyQuests = [],
     now = Date.now(),
     player,
-    preferDailyQuests = false,
-    preferCompetitionBiomes = false,
+    priorityOrder,
     weatherByBiome,
 }) {
+    const decisionOrder = getAutoBiomeDecisionOrder(priorityOrder);
+    const usesDailyQuests = decisionOrder.includes(
+        AUTO_BIOME_PRIORITY_IDS.dailyQuest,
+    );
     const unlockedBiomes = Array.isArray(player?.unlockedBiomes)
         ? player.unlockedBiomes
         : [player?.currentBiome ?? 1];
@@ -317,12 +312,7 @@ export function selectBestBiome({
             continue;
         }
 
-        const competitionType = preferCompetitionBiomes
-            ? getCompetitionType(biomeId, competitionBiomes)
-            : null;
-        const goldBreezePriority =
-            chaseGoldBreeze && weather.weather === GOLD_BREEZE_WEATHER ? 1 : 0;
-        const dailyQuestMatchCount = preferDailyQuests
+        const dailyQuestMatchCount = usesDailyQuests
             ? findMatchingDailyQuests({
                   biomeId,
                   dailyQuests,
@@ -331,51 +321,74 @@ export function selectBestBiome({
               }).length
             : 0;
 
+        const score = getBiomeScore(biomeId, weather.xpBonus, biomeWeight);
+
         candidates.push({
             baitId: findAvailableBaitForBiome(player, biomeId),
             biomeId,
-            competitionPriority:
-                competitionType === 'guild'
-                    ? 2
-                    : competitionType === 'personal'
-                      ? 1
-                      : 0,
-            ...(competitionType ? { competitionType } : {}),
             dailyQuestMatchCount,
-            dailyQuestPriority: dailyQuestMatchCount > 0 ? 1 : 0,
-            goldBreezePriority,
-            score: getBiomeScore(biomeId, weather.xpBonus, biomeWeight),
+            priorityValues: {
+                [AUTO_BIOME_PRIORITY_IDS.guildCompetition]:
+                    biomeId ===
+                    normalizeBiomeId(competitionBiomes?.guildTournamentBiomeId)
+                        ? 1
+                        : 0,
+                [AUTO_BIOME_PRIORITY_IDS.personalCompetition]:
+                    biomeId ===
+                    normalizeBiomeId(competitionBiomes?.personalDerbyBiomeId)
+                        ? 1
+                        : 0,
+                [AUTO_BIOME_PRIORITY_IDS.arcaneSurge]:
+                    weather.weather === ARCANE_SURGE_WEATHER ? 1 : 0,
+                [AUTO_BIOME_PRIORITY_IDS.goldBreeze]:
+                    weather.weather === GOLD_BREEZE_WEATHER ? 1 : 0,
+                [AUTO_BIOME_PRIORITY_IDS.dailyQuest]:
+                    dailyQuestMatchCount > 0 ? 1 : 0,
+                [AUTO_BIOME_PRIORITY_IDS.weightedExperience]: score,
+            },
+            score,
             weather: weather.weather,
             xpBonus: weather.xpBonus,
         });
     }
 
-    candidates.sort(
-        (left, right) =>
-            right.competitionPriority - left.competitionPriority ||
-            right.goldBreezePriority - left.goldBreezePriority ||
-            right.dailyQuestPriority - left.dailyQuestPriority ||
-            right.score - left.score ||
-            right.biomeId - left.biomeId,
-    );
+    candidates.sort((left, right) => {
+        for (const priorityId of decisionOrder) {
+            const difference =
+                right.priorityValues[priorityId] -
+                left.priorityValues[priorityId];
+
+            if (difference !== 0) {
+                return difference;
+            }
+        }
+
+        return right.biomeId - left.biomeId;
+    });
 
     if (candidates.length === 0) {
         return null;
     }
 
-    const {
-        competitionPriority,
-        dailyQuestMatchCount,
-        dailyQuestPriority,
-        goldBreezePriority,
-        ...bestBiome
-    } = candidates[0];
+    const { dailyQuestMatchCount, priorityValues, ...bestBiome } =
+        candidates[0];
+    const selectionPriority =
+        decisionOrder.find(
+            (priorityId) =>
+                priorityId === AUTO_BIOME_PRIORITY_IDS.weightedExperience ||
+                priorityValues[priorityId] > 0,
+        ) ?? AUTO_BIOME_PRIORITY_IDS.weightedExperience;
 
     return {
         ...bestBiome,
-        ...(dailyQuestPriority > 0 &&
-        competitionPriority === 0 &&
-        goldBreezePriority === 0
+        selectionPriority,
+        ...(selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition
+            ? { competitionType: 'guild' }
+            : {}),
+        ...(selectionPriority === AUTO_BIOME_PRIORITY_IDS.personalCompetition
+            ? { competitionType: 'personal' }
+            : {}),
+        ...(selectionPriority === AUTO_BIOME_PRIORITY_IDS.dailyQuest
             ? { dailyQuestCount: dailyQuestMatchCount }
             : {}),
     };
@@ -400,22 +413,52 @@ function formatTargetSummary(target) {
     const signedXpBonus =
         target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
 
-    const competitionLabel =
-        target.competitionType === 'guild'
-            ? '公会锦标赛优先 · '
-            : target.competitionType === 'personal'
-              ? '个人比赛优先 · '
-              : '';
-    const dailyQuestLabel =
-        !competitionLabel && target.dailyQuestCount > 0
-            ? '每日任务优先 · '
-            : '';
+    const priorityLabel =
+        target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition
+            ? '公会赛优先 · '
+            : target.selectionPriority ===
+                AUTO_BIOME_PRIORITY_IDS.personalCompetition
+              ? '个人赛优先 · '
+              : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.arcaneSurge
+                ? '奥术涌动优先 · '
+                : target.selectionPriority ===
+                    AUTO_BIOME_PRIORITY_IDS.goldBreeze
+                  ? '金风优先 · '
+                  : target.selectionPriority ===
+                      AUTO_BIOME_PRIORITY_IDS.dailyQuest
+                    ? '每日任务优先 · '
+                    : '';
 
-    return `${competitionLabel}${dailyQuestLabel}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
+    return `${priorityLabel}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
 }
 
 function getErrorMessage(error) {
     return String(error?.message ?? error ?? '未知错误');
+}
+
+function getPriorityState(priorityOrder) {
+    const normalizedPriorityOrder =
+        normalizeAutoBiomePriorityOrder(priorityOrder);
+
+    return {
+        dailyQuestEnabled: isAutoBiomePriorityEnabled(
+            normalizedPriorityOrder,
+            AUTO_BIOME_PRIORITY_IDS.dailyQuest,
+        ),
+        goldBreezeEnabled: isAutoBiomePriorityEnabled(
+            normalizedPriorityOrder,
+            AUTO_BIOME_PRIORITY_IDS.goldBreeze,
+        ),
+        guildCompetitionEnabled: isAutoBiomePriorityEnabled(
+            normalizedPriorityOrder,
+            AUTO_BIOME_PRIORITY_IDS.guildCompetition,
+        ),
+        normalizedPriorityOrder,
+        personalCompetitionEnabled: isAutoBiomePriorityEnabled(
+            normalizedPriorityOrder,
+            AUTO_BIOME_PRIORITY_IDS.personalCompetition,
+        ),
+    };
 }
 
 async function autoEquipForBiome(
@@ -499,7 +542,7 @@ export function createAutoBiomeController({
         loadAttempted: false,
         loading: false,
         quests: [],
-        status: '开启优先每日任务后读取',
+        status: '自动换图开启后读取',
         updatedAt: 0,
     };
     let lastFullWeatherUpdatedAt = 0;
@@ -534,15 +577,21 @@ export function createAutoBiomeController({
         };
     }
 
-    function formatCompetitionStatus(biomes) {
+    function formatCompetitionStatus(biomes, priorityOrder) {
+        const { guildCompetitionEnabled, personalCompetitionEnabled } =
+            getPriorityState(priorityOrder);
         const labels = [];
 
-        if (biomes.guildTournamentBiomeId) {
+        if (guildCompetitionEnabled && biomes.guildTournamentBiomeId) {
             labels.push(`公会 B${biomes.guildTournamentBiomeId}`);
         }
 
-        if (biomes.personalDerbyBiomeId) {
+        if (personalCompetitionEnabled && biomes.personalDerbyBiomeId) {
             labels.push(`个人 B${biomes.personalDerbyBiomeId}`);
+        }
+
+        if (!guildCompetitionEnabled && !personalCompetitionEnabled) {
+            return '已关闭';
         }
 
         return labels.length > 0 ? labels.join(' · ') : '暂无已参与的比赛';
@@ -573,13 +622,27 @@ export function createAutoBiomeController({
                 String(tournamentResponse?.active?.id ?? ''),
             ),
         });
-        competitionStatus = formatCompetitionStatus(competitionBiomes);
+        competitionStatus = formatCompetitionStatus(
+            competitionBiomes,
+            getState?.()?.autoBiomeSettings?.priorityOrder,
+        );
         competitionUpdatedAt = Date.now();
         notifyStateChanged();
     }
 
-    function hasCompetitionSnapshot() {
-        if (derbyResponse === undefined || tournamentResponse === undefined) {
+    function hasCompetitionSnapshot(priorityOrder) {
+        const { guildCompetitionEnabled, personalCompetitionEnabled } =
+            getPriorityState(priorityOrder);
+
+        if (personalCompetitionEnabled && derbyResponse === undefined) {
+            return false;
+        }
+
+        if (!guildCompetitionEnabled) {
+            return true;
+        }
+
+        if (tournamentResponse === undefined) {
             return false;
         }
 
@@ -830,10 +893,13 @@ export function createAutoBiomeController({
             }
 
             const { autoBiomeSettings = {} } = getState?.() ?? {};
+            const { dailyQuestEnabled } = getPriorityState(
+                autoBiomeSettings.priorityOrder,
+            );
 
             if (
                 autoBiomeSettings.enabled === true &&
-                autoBiomeSettings?.preferDailyQuests === true &&
+                dailyQuestEnabled &&
                 Date.now() - dailyQuestState.updatedAt >
                     DAILY_QUEST_FALLBACK_FRESHNESS
             ) {
@@ -852,23 +918,51 @@ export function createAutoBiomeController({
             autoBiomeSettings = {},
             enabled = false,
         } = getState?.() ?? {};
+        const {
+            dailyQuestEnabled,
+            goldBreezeEnabled,
+            guildCompetitionEnabled,
+            normalizedPriorityOrder,
+            personalCompetitionEnabled,
+        } = getPriorityState(autoBiomeSettings.priorityOrder);
+        const competitionEnabled =
+            guildCompetitionEnabled || personalCompetitionEnabled;
+
+        if (!competitionEnabled) {
+            competitionStatus = '已关闭';
+        } else if (competitionUpdatedAt > 0) {
+            competitionStatus = formatCompetitionStatus(
+                competitionBiomes,
+                normalizedPriorityOrder,
+            );
+        } else if (competitionStatus === '已关闭') {
+            competitionStatus = '自动换图开启后检测';
+        }
+
+        if (!dailyQuestEnabled) {
+            dailyQuestState.status = '已关闭';
+        } else if (dailyQuestState.status === '已关闭') {
+            // 仅在从关闭状态重新启用时恢复展示，保留读取中或失败状态。
+            dailyQuestState.status =
+                dailyQuestState.updatedAt > 0
+                    ? formatDailyQuestStatus(dailyQuestState.quests)
+                    : '自动换图开启后读取';
+        }
 
         if (!autoBiomeSettings.enabled) {
             target = null;
-            competitionStatus =
-                autoBiomeSettings.preferCompetitionBiomes !== false
-                    ? '自动换图开启后检测'
-                    : '已关闭';
+            competitionStatus = competitionEnabled
+                ? '自动换图开启后检测'
+                : '已关闭';
             setStatus('未启用');
             return;
         }
 
         if (!enabled) {
             target = null;
-            competitionStatus =
-                autoBiomeSettings.preferCompetitionBiomes !== false
-                    ? '脚本启动后检测'
-                    : '已关闭';
+            competitionStatus = competitionEnabled
+                ? '脚本启动后检测'
+                : '已关闭';
             setStatus('脚本启动后自动选择地图');
             return;
         }
@@ -883,26 +977,21 @@ export function createAutoBiomeController({
         }
 
         if (
-            autoBiomeSettings.preferCompetitionBiomes !== false &&
-            (!hasCompetitionSnapshot() || competitionHookPending)
+            competitionEnabled &&
+            (!hasCompetitionSnapshot(normalizedPriorityOrder) ||
+                competitionHookPending)
         ) {
             competitionStatus = '等待游戏比赛轮询';
             setStatus('等待游戏比赛数据');
             return;
         }
 
-        if (
-            autoBiomeSettings.preferDailyQuests === true &&
-            dailyQuestState.loading
-        ) {
+        if (dailyQuestEnabled && dailyQuestState.loading) {
             setStatus('等待每日任务数据');
             return;
         }
 
-        if (
-            autoBiomeSettings.preferDailyQuests === true &&
-            !dailyQuestState.loadAttempted
-        ) {
+        if (dailyQuestEnabled && !dailyQuestState.loadAttempted) {
             setStatus('正在读取每日任务数据');
             void refreshDailyQuests();
             return;
@@ -941,19 +1030,15 @@ export function createAutoBiomeController({
 
         target = selectBestBiome({
             biomeWeight: autoBiomeSettings.biomeWeight,
-            chaseGoldBreeze: autoBiomeSettings.chaseGoldBreeze === true,
             competitionBiomes,
             dailyQuests: dailyQuestState.quests,
             player,
-            preferDailyQuests: autoBiomeSettings.preferDailyQuests === true,
-            preferCompetitionBiomes:
-                autoBiomeSettings.preferCompetitionBiomes !== false,
+            priorityOrder: normalizedPriorityOrder,
             weatherByBiome,
         });
 
         const chasingGoldBreeze =
-            autoBiomeSettings.chaseGoldBreeze === true &&
-            target?.weather === GOLD_BREEZE_WEATHER;
+            goldBreezeEnabled && target?.weather === GOLD_BREEZE_WEATHER;
 
         if (chasingGoldBreeze) {
             target.baitId = getBaitIdForBiome(
@@ -1014,7 +1099,10 @@ export function createAutoBiomeController({
             Array.isArray(result?.completedQuests) &&
             result.completedQuests.length > 0 &&
             autoBiomeSettings.enabled === true &&
-            autoBiomeSettings.preferDailyQuests === true
+            isAutoBiomePriorityEnabled(
+                autoBiomeSettings.priorityOrder,
+                AUTO_BIOME_PRIORITY_IDS.dailyQuest,
+            )
         ) {
             void refreshDailyQuests();
         }

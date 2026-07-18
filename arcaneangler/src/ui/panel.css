@@ -232,6 +232,108 @@
     transform: rotate(90deg);
 }
 
+.priority-heading {
+    margin-top: 12px;
+}
+
+.priority-list {
+    display: grid;
+    gap: 5px;
+}
+
+.priority-item {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 6px;
+    min-height: 34px;
+    padding: 5px 6px;
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.045);
+    color: rgba(255, 255, 255, 0.86);
+    font-size: 11px;
+    cursor: grab;
+}
+
+.priority-item[data-dragging='true'] {
+    border-color: rgba(109, 93, 252, 0.72);
+    background: rgba(109, 93, 252, 0.18);
+    opacity: 0.72;
+    cursor: grabbing;
+}
+
+.priority-item[data-enabled='false'] {
+    color: rgba(255, 255, 255, 0.44);
+    opacity: 0.72;
+}
+
+.priority-item[data-enabled='boundary'] {
+    border-color: rgba(251, 191, 36, 0.42);
+    background: rgba(251, 191, 36, 0.08);
+}
+
+.priority-drag-handle {
+    color: rgba(255, 255, 255, 0.38);
+    font-size: 15px;
+    line-height: 1;
+}
+
+.priority-label {
+    overflow: hidden;
+    font-weight: 700;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.priority-state {
+    padding: 2px 5px;
+    border-radius: 999px;
+    background: rgba(74, 222, 128, 0.12);
+    color: #86efac;
+    font-size: 9px;
+    white-space: nowrap;
+}
+
+.priority-item[data-enabled='false'] .priority-state {
+    background: rgba(255, 255, 255, 0.08);
+    color: rgba(255, 255, 255, 0.48);
+}
+
+.priority-item[data-enabled='boundary'] .priority-state {
+    background: rgba(251, 191, 36, 0.12);
+    color: #fcd34d;
+}
+
+.priority-actions {
+    display: inline-flex;
+    gap: 3px;
+}
+
+.priority-move {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.14);
+    border-radius: 5px;
+    background: rgba(255, 255, 255, 0.06);
+    color: rgba(255, 255, 255, 0.72);
+    font-size: 11px;
+    cursor: pointer;
+}
+
+.priority-move:hover:not(:disabled) {
+    background: rgba(109, 93, 252, 0.22);
+}
+
+.priority-move:disabled {
+    cursor: default;
+    opacity: 0.28;
+}
+
 .choice-list {
     display: grid;
     grid-template-columns: repeat(2, minmax(0, 1fr));

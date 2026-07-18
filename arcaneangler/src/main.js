@@ -8,6 +8,7 @@
 'use strict';
 
 import { createAutoBiomeController } from './auto-biome.js';
+import { normalizeAutoBiomePriorityOrder } from './auto-biome-priority.js';
 import { createAutoBaitController } from './auto-bait.js';
 import { createAutoBossController } from './auto-boss.js';
 import { createCaptchaController } from './captcha.js';
@@ -234,7 +235,7 @@ function getPanelState() {
             },
             autoBiomeCompetitionStatus: '自动换图开启后检测',
             autoBiomeCompetitionUpdatedAt: 0,
-            autoBiomeDailyQuestStatus: '开启优先每日任务后读取',
+            autoBiomeDailyQuestStatus: '自动换图开启后读取',
             autoBiomeDailyQuestUpdatedAt: 0,
             autoBiomeDailyQuests: [],
             autoBiomeLastUpdatedAt: 0,
@@ -920,34 +921,14 @@ function setAutoBiomeWeight(nextWeight) {
     handleAutomationStateChanged();
 }
 
-function setAutoBiomeChaseGoldBreeze(nextEnabled) {
+function setAutoBiomePriorityOrder(nextPriorityOrder) {
     autoBiomeSettings = {
         ...autoBiomeSettings,
-        chaseGoldBreeze: Boolean(nextEnabled),
+        priorityOrder: normalizeAutoBiomePriorityOrder(nextPriorityOrder),
     };
     saveAutoBiomeSettings(autoBiomeSettings);
     panel.renderAutoBiomeSettings();
     handleAutomationStateChanged({ forceBait: true });
-}
-
-function setAutoBiomePreferCompetition(nextEnabled) {
-    autoBiomeSettings = {
-        ...autoBiomeSettings,
-        preferCompetitionBiomes: Boolean(nextEnabled),
-    };
-    saveAutoBiomeSettings(autoBiomeSettings);
-    panel.renderAutoBiomeSettings();
-    handleAutomationStateChanged();
-}
-
-function setAutoBiomePreferDailyQuests(nextEnabled) {
-    autoBiomeSettings = {
-        ...autoBiomeSettings,
-        preferDailyQuests: Boolean(nextEnabled),
-    };
-    saveAutoBiomeSettings(autoBiomeSettings);
-    panel.renderAutoBiomeSettings();
-    handleAutomationStateChanged();
 }
 
 function updateAutoBaitSettings(nextSettings) {
@@ -1194,9 +1175,7 @@ function initialize() {
             setAutoBaitPurchaseSettings,
             setAutoBossEnabled,
             setAutoBiomeEnabled,
-            setAutoBiomeChaseGoldBreeze,
-            setAutoBiomePreferCompetition,
-            setAutoBiomePreferDailyQuests,
+            setAutoBiomePriorityOrder,
             setAutoBiomeWeight,
             setCaptchaBypassEnabled,
             setClickDelaySetting,

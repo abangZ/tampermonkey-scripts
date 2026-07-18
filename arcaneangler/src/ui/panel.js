@@ -1,4 +1,8 @@
 import { EARNINGS_CATEGORY_DISPLAY, PANEL_ID } from '../config.js';
+import {
+    AUTO_BIOME_PRIORITY_IDS,
+    AUTO_BIOME_PRIORITY_OPTIONS,
+} from '../auto-biome-priority.js';
 import { filterEarningsStats, listEarningsBreakdowns } from '../earnings.js';
 import { loadPanelCollapsed, savePanelCollapsed } from '../storage.js';
 import panelStyles from './panel.css?raw';
@@ -14,6 +18,7 @@ export function createPanelController({
     let earningsBaitFilter = 'current';
     let autoBaitPurchaseSaveTimer = null;
     let autoBaitPurchaseSettingsDirty = false;
+    let draggedAutoBiomePriorityId = null;
     let ui = null;
 
     const {
@@ -24,9 +29,7 @@ export function createPanelController({
         setAutoBaitPurchaseSettings,
         setAutoBossEnabled,
         setAutoBiomeEnabled,
-        setAutoBiomeChaseGoldBreeze,
-        setAutoBiomePreferCompetition,
-        setAutoBiomePreferDailyQuests,
+        setAutoBiomePriorityOrder,
         setAutoBiomeWeight,
         setCaptchaBypassEnabled,
         setClickDelaySetting,
@@ -89,6 +92,35 @@ export function createPanelController({
         );
     }
 
+    function getAutoBiomePriorityOrderFromUi() {
+        return Array.from(ui?.autoBiomePriorityList?.children ?? [], (item) =>
+            item.getAttribute('data-priority-id'),
+        );
+    }
+
+    function commitAutoBiomePriorityOrder() {
+        setAutoBiomePriorityOrder(getAutoBiomePriorityOrderFromUi());
+    }
+
+    function moveAutoBiomePriorityItem(item, direction) {
+        const sibling =
+            direction < 0
+                ? item.previousElementSibling
+                : item.nextElementSibling;
+
+        if (!sibling) {
+            return;
+        }
+
+        if (direction < 0) {
+            item.parentElement.insertBefore(item, sibling);
+        } else {
+            item.parentElement.insertBefore(sibling, item);
+        }
+
+        commitAutoBiomePriorityOrder();
+    }
+
     /**
      * 创建右下角控制面板。
      */
@@ -118,6 +150,36 @@ export function createPanelController({
               <option value="high">高级饵（+500 幸运）</option>
               <option value="super">超级饵（+1000 幸运）</option>
         `;
+        const autoBiomePriorityItems = AUTO_BIOME_PRIORITY_OPTIONS.map(
+            ({ id, label }) => `
+              <div
+                class="priority-item"
+                data-priority-id="${id}"
+                draggable="true"
+                role="listitem"
+              >
+                <span class="priority-drag-handle" aria-hidden="true">⠿</span>
+                <span class="priority-label">${label}</span>
+                <span class="priority-state"></span>
+                <span class="priority-actions">
+                  <button
+                    class="priority-move"
+                    type="button"
+                    data-direction="-1"
+                    aria-label="上移${label}"
+                    title="上移"
+                  >↑</button>
+                  <button
+                    class="priority-move"
+                    type="button"
+                    data-direction="1"
+                    aria-label="下移${label}"
+                    title="下移"
+                  >↓</button>
+                </span>
+              </div>
+            `,
+        ).join('');
 
         shadowRoot.innerHTML = `
   <style>${panelStyles}</style>
@@ -480,55 +542,19 @@ export function createPanelController({
         <details class="settings-section">
           <summary class="settings-title">自动换地图</summary>
 
-          <label class="option-row">
-            <span>优先比赛地图</span>
-            <span class="switch">
-              <input
-                id="auto-biome-competition-toggle"
-                type="checkbox"
-                role="switch"
-                aria-label="自动换图时优先比赛地图"
-              />
-              <span class="switch-track" aria-hidden="true"></span>
-            </span>
-          </label>
+          <div class="field-label priority-heading">选图优先级</div>
 
-          <div class="field-help">
-            仅优先已参与且已解锁的比赛地图；公会锦标赛优先于个人比赛。
+          <div
+            id="auto-biome-priority-list"
+            class="priority-list"
+            role="list"
+            aria-label="自动换图优先级，可拖动排序"
+          >
+            ${autoBiomePriorityItems}
           </div>
 
-          <label class="option-row">
-            <span>追逐金风</span>
-            <span class="switch">
-              <input
-                id="auto-biome-gold-breeze-toggle"
-                type="checkbox"
-                role="switch"
-                aria-label="无比赛时优先选择金风地图"
-              />
-              <span class="switch-track" aria-hidden="true"></span>
-            </span>
-          </label>
-
           <div class="field-help">
-            无可用比赛地图时优先选择金风天气；没有金风时再按经验评分选择。
-          </div>
-
-          <label class="option-row">
-            <span>优先每日任务</span>
-            <span class="switch">
-              <input
-                id="auto-biome-daily-quest-toggle"
-                type="checkbox"
-                role="switch"
-                aria-label="无比赛和金风时优先选择每日任务地图"
-              />
-              <span class="switch-track" aria-hidden="true"></span>
-            </span>
-          </label>
-
-          <div class="field-help">
-            无可用比赛和金风地图时，根据未完成每日任务筛选已解锁地图，再选择经验评分最高的地图。
+            拖动列表调整顺序；也可使用右侧箭头。排在“加权经验对比”下面的项目视为未启用。
           </div>
 
           <div
@@ -563,7 +589,7 @@ export function createPanelController({
           </div>
 
           <div class="field-help">
-            无可用比赛、需追逐的金风和每日任务地图时，评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+            加权经验评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
           </div>
 
           <div class="row">
@@ -573,7 +599,7 @@ export function createPanelController({
 
           <div class="row">
             <span class="label">每日任务</span>
-            <span id="auto-biome-daily-quest-status" class="value">开启优先每日任务后读取</span>
+            <span id="auto-biome-daily-quest-status" class="value">自动换图开启后读取</span>
           </div>
 
           <div class="row">
@@ -849,14 +875,11 @@ export function createPanelController({
             ),
             autoBiomeStatus: shadowRoot.querySelector('#auto-biome-status'),
             autoBiomeToggle: shadowRoot.querySelector('#auto-biome-toggle'),
-            autoBiomeCompetitionToggle: shadowRoot.querySelector(
-                '#auto-biome-competition-toggle',
+            autoBiomePriorityList: shadowRoot.querySelector(
+                '#auto-biome-priority-list',
             ),
-            autoBiomeGoldBreezeToggle: shadowRoot.querySelector(
-                '#auto-biome-gold-breeze-toggle',
-            ),
-            autoBiomeDailyQuestToggle: shadowRoot.querySelector(
-                '#auto-biome-daily-quest-toggle',
+            autoBiomePriorityItems: shadowRoot.querySelectorAll(
+                '#auto-biome-priority-list .priority-item',
             ),
             autoBiomeCompetitionStatus: shadowRoot.querySelector(
                 '#auto-biome-competition-status',
@@ -992,16 +1015,70 @@ export function createPanelController({
             setAutoBiomeEnabled(event.currentTarget.checked);
         });
 
-        ui.autoBiomeCompetitionToggle.addEventListener('change', (event) => {
-            setAutoBiomePreferCompetition(event.currentTarget.checked);
+        ui.autoBiomePriorityList.addEventListener('dragstart', (event) => {
+            const item = event.target.closest('.priority-item');
+
+            if (!item) {
+                return;
+            }
+
+            draggedAutoBiomePriorityId = item.getAttribute('data-priority-id');
+            item.setAttribute('data-dragging', 'true');
+            event.dataTransfer?.setData(
+                'text/plain',
+                draggedAutoBiomePriorityId,
+            );
+
+            if (event.dataTransfer) {
+                event.dataTransfer.effectAllowed = 'move';
+            }
         });
 
-        ui.autoBiomeGoldBreezeToggle.addEventListener('change', (event) => {
-            setAutoBiomeChaseGoldBreeze(event.currentTarget.checked);
+        ui.autoBiomePriorityList.addEventListener('dragover', (event) => {
+            const targetItem = event.target.closest('.priority-item');
+            const draggedItem = ui.autoBiomePriorityList.querySelector(
+                `[data-priority-id="${draggedAutoBiomePriorityId}"]`,
+            );
+
+            if (!targetItem || !draggedItem || targetItem === draggedItem) {
+                return;
+            }
+
+            event.preventDefault();
+            const targetRect = targetItem.getBoundingClientRect();
+            const insertBefore =
+                event.clientY < targetRect.top + targetRect.height / 2;
+
+            ui.autoBiomePriorityList.insertBefore(
+                draggedItem,
+                insertBefore ? targetItem : targetItem.nextElementSibling,
+            );
         });
 
-        ui.autoBiomeDailyQuestToggle.addEventListener('change', (event) => {
-            setAutoBiomePreferDailyQuests(event.currentTarget.checked);
+        ui.autoBiomePriorityList.addEventListener('drop', (event) => {
+            event.preventDefault();
+        });
+
+        ui.autoBiomePriorityList.addEventListener('dragend', (event) => {
+            const item = event.target.closest('.priority-item');
+
+            item?.removeAttribute('data-dragging');
+            draggedAutoBiomePriorityId = null;
+            commitAutoBiomePriorityOrder();
+        });
+
+        ui.autoBiomePriorityList.addEventListener('click', (event) => {
+            const button = event.target.closest('.priority-move');
+            const item = button?.closest('.priority-item');
+
+            if (!button || !item) {
+                return;
+            }
+
+            moveAutoBiomePriorityItem(
+                item,
+                Number(button.getAttribute('data-direction')),
+            );
         });
 
         ui.autoBaitToggle.addEventListener('change', (event) => {
@@ -1685,26 +1762,52 @@ export function createPanelController({
             autoBiomeSettings.enabled ? 'true' : 'false',
         );
         ui.autoBiomeStatus.textContent = autoBiomeStatus;
-        ui.autoBiomeCompetitionToggle.checked =
-            autoBiomeSettings.preferCompetitionBiomes;
-        ui.autoBiomeCompetitionToggle.setAttribute(
-            'aria-checked',
-            autoBiomeSettings.preferCompetitionBiomes ? 'true' : 'false',
-        );
-        ui.autoBiomeGoldBreezeToggle.checked =
-            autoBiomeSettings.chaseGoldBreeze;
-        ui.autoBiomeGoldBreezeToggle.setAttribute(
-            'aria-checked',
-            autoBiomeSettings.chaseGoldBreeze ? 'true' : 'false',
-        );
-        ui.autoBiomeDailyQuestToggle.checked =
-            autoBiomeSettings.preferDailyQuests;
-        ui.autoBiomeDailyQuestToggle.setAttribute(
-            'aria-checked',
-            autoBiomeSettings.preferDailyQuests ? 'true' : 'false',
-        );
         ui.autoBiomeCompetitionStatus.textContent = autoBiomeCompetitionStatus;
         ui.autoBiomeDailyQuestStatus.textContent = autoBiomeDailyQuestStatus;
+
+        const priorityOrder = autoBiomeSettings.priorityOrder;
+        const weightedExperienceIndex = priorityOrder.indexOf(
+            AUTO_BIOME_PRIORITY_IDS.weightedExperience,
+        );
+
+        if (!draggedAutoBiomePriorityId) {
+            const itemsById = new Map(
+                Array.from(ui.autoBiomePriorityItems, (item) => [
+                    item.getAttribute('data-priority-id'),
+                    item,
+                ]),
+            );
+
+            for (const priorityId of priorityOrder) {
+                const item = itemsById.get(priorityId);
+
+                if (item) {
+                    ui.autoBiomePriorityList.appendChild(item);
+                }
+            }
+        }
+
+        for (const item of ui.autoBiomePriorityList.children) {
+            const priorityId = item.getAttribute('data-priority-id');
+            const priorityIndex = priorityOrder.indexOf(priorityId);
+            const state = item.querySelector('.priority-state');
+            const moveButtons = item.querySelectorAll('.priority-move');
+
+            if (priorityId === AUTO_BIOME_PRIORITY_IDS.weightedExperience) {
+                item.setAttribute('data-enabled', 'boundary');
+                state.textContent = '分界线';
+            } else if (priorityIndex < weightedExperienceIndex) {
+                item.setAttribute('data-enabled', 'true');
+                state.textContent = '已启用';
+            } else {
+                item.setAttribute('data-enabled', 'false');
+                state.textContent = '未启用';
+            }
+
+            moveButtons[0].disabled = priorityIndex === 0;
+            moveButtons[1].disabled =
+                priorityIndex === priorityOrder.length - 1;
+        }
 
         for (const input of ui.autoBiomeWeightInputs) {
             input.checked =

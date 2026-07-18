@@ -86,35 +86,101 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         assert.ok(host.shadowRoot);
         assert.match(host.shadowRoot.textContent, /自动抛竿/);
         assert.ok(host.shadowRoot.querySelector('#auto-biome-toggle'));
-        assert.equal(
-            host.shadowRoot.querySelector('#auto-biome-competition-toggle')
-                .checked,
-            true,
+        const autoBiomePriorityList = host.shadowRoot.querySelector(
+            '#auto-biome-priority-list',
         );
-        assert.equal(
-            host.shadowRoot.querySelector('#auto-biome-gold-breeze-toggle')
-                .checked,
-            false,
-        );
-        assert.equal(
-            host.shadowRoot.querySelector('#auto-biome-daily-quest-toggle')
-                .checked,
-            false,
-        );
-        const autoBiomeDailyQuestToggle = host.shadowRoot.querySelector(
-            '#auto-biome-daily-quest-toggle',
-        );
+        const getAutoBiomePriorityOrder = () =>
+            Array.from(autoBiomePriorityList.children, (item) =>
+                item.getAttribute('data-priority-id'),
+            );
 
-        autoBiomeDailyQuestToggle.click();
-        assert.equal(
+        assert.deepEqual(getAutoBiomePriorityOrder(), [
+            'guildCompetition',
+            'personalCompetition',
+            'arcaneSurge',
+            'goldBreeze',
+            'dailyQuest',
+            'weightedExperience',
+        ]);
+        assert.ok(
+            Array.from(autoBiomePriorityList.children).every(
+                (item) => item.getAttribute('draggable') === 'true',
+            ),
+        );
+        const goldBreezePriorityItem = autoBiomePriorityList.querySelector(
+            '[data-priority-id="goldBreeze"]',
+        );
+        const arcaneSurgePriorityItem = autoBiomePriorityList.querySelector(
+            '[data-priority-id="arcaneSurge"]',
+        );
+        const dragOverEvent = new window.Event('dragover', {
+            bubbles: true,
+            cancelable: true,
+        });
+
+        Object.defineProperty(dragOverEvent, 'clientY', { value: -1 });
+        goldBreezePriorityItem.dispatchEvent(
+            new window.Event('dragstart', { bubbles: true }),
+        );
+        arcaneSurgePriorityItem.dispatchEvent(dragOverEvent);
+        goldBreezePriorityItem.dispatchEvent(
+            new window.Event('dragend', { bubbles: true }),
+        );
+        assert.deepEqual(getAutoBiomePriorityOrder(), [
+            'guildCompetition',
+            'personalCompetition',
+            'goldBreeze',
+            'arcaneSurge',
+            'dailyQuest',
+            'weightedExperience',
+        ]);
+        goldBreezePriorityItem.querySelector('[data-direction="1"]').click();
+        autoBiomePriorityList
+            .querySelector(
+                '[data-priority-id="dailyQuest"] [data-direction="-1"]',
+            )
+            .click();
+        assert.deepEqual(
             JSON.parse(
                 window.localStorage.getItem(
                     'arcane-angler-auto-biome-settings-v1',
                 ),
-            ).preferDailyQuests,
-            true,
+            ).priorityOrder,
+            [
+                'guildCompetition',
+                'personalCompetition',
+                'arcaneSurge',
+                'dailyQuest',
+                'goldBreeze',
+                'weightedExperience',
+            ],
         );
-        autoBiomeDailyQuestToggle.click();
+        autoBiomePriorityList
+            .querySelector(
+                '[data-priority-id="weightedExperience"] [data-direction="-1"]',
+            )
+            .click();
+        assert.equal(
+            autoBiomePriorityList
+                .querySelector('[data-priority-id="goldBreeze"]')
+                .getAttribute('data-enabled'),
+            'false',
+        );
+        assert.deepEqual(
+            JSON.parse(
+                window.localStorage.getItem(
+                    'arcane-angler-auto-biome-settings-v1',
+                ),
+            ).priorityOrder,
+            [
+                'guildCompetition',
+                'personalCompetition',
+                'arcaneSurge',
+                'dailyQuest',
+                'weightedExperience',
+                'goldBreeze',
+            ],
+        );
         assert.ok(host.shadowRoot.querySelector('#auto-bait-toggle'));
         assert.ok(host.shadowRoot.querySelector('#auto-boss-toggle'));
         assert.ok(host.shadowRoot.querySelector('#game-auto-fishing-toggle'));
