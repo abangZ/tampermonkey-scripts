@@ -150,6 +150,135 @@ export function solveStaffQuestion(question) {
     return String(Object.is(normalizedResult, -0) ? 0 : normalizedResult);
 }
 
+/**
+ * 新版验证码会把缺口绘制成位于画面垂直中央的纯色矩形。
+ * 在拼图高度范围内统计重复颜色，再从连续列中还原缺口左边界。
+ */
+export function findCaptchaGapFromPixels(imageData, pieceDimensions) {
+    const canvasWidth = Number(imageData?.width);
+    const canvasHeight = Number(imageData?.height);
+    const pixels = imageData?.data;
+    const gapWidth = Math.round(Number(pieceDimensions?.width));
+    const gapHeight = Math.round(Number(pieceDimensions?.height));
+
+    if (
+        !Number.isInteger(canvasWidth) ||
+        !Number.isInteger(canvasHeight) ||
+        canvasWidth <= 0 ||
+        canvasHeight <= 0 ||
+        pixels?.length !== canvasWidth * canvasHeight * 4
+    ) {
+        throw new Error('验证码背景像素数据无效');
+    }
+
+    if (
+        !Number.isInteger(gapWidth) ||
+        !Number.isInteger(gapHeight) ||
+        gapWidth <= 2 ||
+        gapHeight <= 2 ||
+        gapWidth >= canvasWidth ||
+        gapHeight > canvasHeight
+    ) {
+        throw new Error('验证码拼图尺寸无效');
+    }
+
+    const gapTop = Math.round((canvasHeight - gapHeight) / 2);
+    const sampleTop = Math.max(0, gapTop + 1);
+    const sampleBottom = Math.min(canvasHeight, gapTop + gapHeight - 1);
+    const sampleHeight = sampleBottom - sampleTop;
+    const colorCounts = new Map();
+
+    for (let y = sampleTop; y < sampleBottom; y += 1) {
+        for (let x = 0; x < canvasWidth; x += 1) {
+            const offset = (y * canvasWidth + x) * 4;
+            const color =
+                pixels[offset] * 0x1000000 +
+                pixels[offset + 1] * 0x10000 +
+                pixels[offset + 2] * 0x100 +
+                pixels[offset + 3];
+
+            colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1);
+        }
+    }
+
+    let repeatedColor = null;
+    let repeatedColorCount = 0;
+
+    for (const [color, count] of colorCounts) {
+        if (count > repeatedColorCount) {
+            repeatedColor = color;
+            repeatedColorCount = count;
+        }
+    }
+
+    const columnMatches = new Uint16Array(canvasWidth);
+
+    for (let x = 0; x < canvasWidth; x += 1) {
+        for (let y = sampleTop; y < sampleBottom; y += 1) {
+            const offset = (y * canvasWidth + x) * 4;
+            const color =
+                pixels[offset] * 0x1000000 +
+                pixels[offset + 1] * 0x10000 +
+                pixels[offset + 2] * 0x100 +
+                pixels[offset + 3];
+
+            if (color === repeatedColor) {
+                columnMatches[x] += 1;
+            }
+        }
+    }
+
+    const minimumColumnMatches = Math.floor(sampleHeight * 0.8);
+    const minimumRunWidth = Math.floor(gapWidth * 0.6);
+    const maximumRunWidth = Math.ceil(gapWidth * 1.2);
+    const candidates = [];
+    let runStart = null;
+
+    for (let x = 0; x <= canvasWidth; x += 1) {
+        const isMatchingColumn =
+            x < canvasWidth && columnMatches[x] >= minimumColumnMatches;
+
+        if (isMatchingColumn && runStart == null) {
+            runStart = x;
+        } else if (!isMatchingColumn && runStart != null) {
+            const runWidth = x - runStart;
+
+            if (runWidth >= minimumRunWidth && runWidth <= maximumRunWidth) {
+                candidates.push({
+                    end: x,
+                    start: runStart,
+                    width: runWidth,
+                });
+            }
+
+            runStart = null;
+        }
+    }
+
+    const gap = candidates.sort(
+        (left, right) =>
+            Math.abs(left.width - gapWidth) - Math.abs(right.width - gapWidth),
+    )[0];
+
+    if (!gap) {
+        throw new Error('未找到验证码图片中的缺口');
+    }
+
+    const gapX = Math.round((gap.start + gap.end - gapWidth) / 2);
+    const travelWidth = canvasWidth - gapWidth;
+
+    if (gapX < 0 || gapX > travelWidth) {
+        throw new Error('验证码缺口坐标超出可移动范围');
+    }
+
+    return {
+        canvasWidth,
+        gapX,
+        gapWidth,
+        ratio: gapX / travelWidth,
+    };
+}
+
 export function createCaptchaController({
     getState,
     notify,
@@ -374,6 +503,42 @@ export function createCaptchaController({
         return number;
     }
 
+    function readSvgDimensions(source, fieldName) {
+        if (typeof source !== 'string' || !source.includes('<svg')) {
+            throw new Error(`服务端未返回有效的${fieldName} SVG`);
+        }
+
+        const svg = new DOMParser().parseFromString(source, 'image/svg+xml');
+        const parserError = svg.querySelector('parsererror');
+
+        if (parserError) {
+            throw new Error(`${fieldName} SVG 解析失败`);
+        }
+
+        const root = svg.documentElement;
+        const viewBox = root
+            .getAttribute('viewBox')
+            ?.trim()
+            .split(/\s+/)
+            .map(Number);
+        const width = root.hasAttribute('width')
+            ? parseSvgNumber(root.getAttribute('width'), `${fieldName}宽度`)
+            : viewBox?.[2];
+        const height = root.hasAttribute('height')
+            ? parseSvgNumber(root.getAttribute('height'), `${fieldName}高度`)
+            : viewBox?.[3];
+
+        if (!(width > 0) || !(height > 0)) {
+            throw new Error(`无法读取${fieldName}尺寸`);
+        }
+
+        return {
+            height,
+            svg,
+            width,
+        };
+    }
+
     /**
      * 从背景 SVG 中提取直接暴露的缺口坐标。
      *
@@ -381,17 +546,7 @@ export function createCaptchaController({
      * 滑块答案一起下发到了浏览器，因此无需图像识别即可还原答案。
      */
     function readExposedCaptchaAnswer(source) {
-        if (typeof source !== 'string' || !source.includes('<svg')) {
-            throw new Error('服务端未返回有效的验证码 SVG');
-        }
-
-        const svg = new DOMParser().parseFromString(source, 'image/svg+xml');
-        const parserError = svg.querySelector('parsererror');
-
-        if (parserError) {
-            throw new Error('验证码背景 SVG 解析失败');
-        }
-
+        const { svg } = readSvgDimensions(source, '验证码背景');
         const root = svg.documentElement;
         const gap = Array.from(svg.querySelectorAll('rect')).find((rect) =>
             rect.hasAttribute('stroke-dasharray'),
@@ -426,6 +581,55 @@ export function createCaptchaController({
         };
     }
 
+    async function readImageCaptchaAnswer(challenge) {
+        const piece = readSvgDimensions(challenge.pieceSvg, '验证码拼图');
+        const image = await new Promise((resolve, reject) => {
+            const element = new Image();
+
+            element.addEventListener('load', () => resolve(element), {
+                once: true,
+            });
+            element.addEventListener(
+                'error',
+                () => reject(new Error('验证码背景图片加载失败')),
+                { once: true },
+            );
+            element.src = challenge.bgImage;
+        });
+        const canvas = document.createElement('canvas');
+
+        canvas.width = image.naturalWidth;
+        canvas.height = image.naturalHeight;
+
+        const context = canvas.getContext('2d', { willReadFrequently: true });
+
+        if (!context) {
+            throw new Error('浏览器不支持读取验证码背景图片');
+        }
+
+        context.drawImage(image, 0, 0);
+
+        return findCaptchaGapFromPixels(
+            context.getImageData(0, 0, canvas.width, canvas.height),
+            piece,
+        );
+    }
+
+    async function readCaptchaAnswer(challenge) {
+        if (typeof challenge?.bgSvg === 'string') {
+            return readExposedCaptchaAnswer(challenge.bgSvg);
+        }
+
+        if (
+            typeof challenge?.bgImage === 'string' &&
+            typeof challenge?.pieceSvg === 'string'
+        ) {
+            return readImageCaptchaAnswer(challenge);
+        }
+
+        throw new Error('验证码 challenge 数据不完整');
+    }
+
     async function runCaptchaBypass(challenge, isAttemptActive) {
         const api = window.ApiService;
 
@@ -437,11 +641,11 @@ export function createCaptchaController({
             return false;
         }
 
-        if (!challenge?.token || typeof challenge.bgSvg !== 'string') {
+        if (!challenge?.token) {
             throw new Error('验证码 challenge 数据不完整');
         }
 
-        const answer = readExposedCaptchaAnswer(challenge.bgSvg);
+        const answer = await readCaptchaAnswer(challenge);
         const rangeValue = Math.round(answer.ratio * 100);
 
         console.warn('[自动过验证] 客户端已暴露验证码答案：', {

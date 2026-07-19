@@ -5,9 +5,55 @@ import { Window } from 'happy-dom';
 
 import {
     createCaptchaController,
+    findCaptchaGapFromPixels,
     solveStaffQuestion,
 } from '../arcaneangler/src/captcha.js';
 import { CONFIG } from '../arcaneangler/src/config.js';
+
+test('新版图片验证码会从纯色矩形中还原滑块位置', () => {
+    const width = 320;
+    const height = 130;
+    const gapX = 109;
+    const gapY = 18;
+    const gapWidth = 55;
+    const gapHeight = 95;
+    const data = new Uint8ClampedArray(width * height * 4);
+
+    for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+            const offset = (y * width + x) * 4;
+
+            data[offset] = 10;
+            data[offset + 1] = 90 + y;
+            data[offset + 2] = 140 + Math.floor(y / 2);
+            data[offset + 3] = 255;
+        }
+    }
+
+    for (let y = gapY + 1; y < gapY + gapHeight - 1; y += 1) {
+        for (let x = gapX + 1; x < gapX + gapWidth - 1; x += 1) {
+            const offset = (y * width + x) * 4;
+
+            data[offset] = 4;
+            data[offset + 1] = 40;
+            data[offset + 2] = 66;
+            data[offset + 3] = 255;
+        }
+    }
+
+    assert.deepEqual(
+        findCaptchaGapFromPixels(
+            { data, height, width },
+            { height: gapHeight, width: gapWidth },
+        ),
+        {
+            canvasWidth: width,
+            gapWidth,
+            gapX,
+            ratio: gapX / (width - gapWidth),
+        },
+    );
+});
 
 test('Staff Question 只解析明确的基础算术题', () => {
     assert.equal(solveStaffQuestion('How much is 3x7?'), '21');

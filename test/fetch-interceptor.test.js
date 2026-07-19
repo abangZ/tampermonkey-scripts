@@ -34,6 +34,42 @@ test('请求体归一化支持 JSON 和 URLSearchParams', async () => {
     );
 });
 
+test('fetch hook 会捕获新版图片验证码 challenge', async () => {
+    const previousWindow = globalThis.window;
+    const challenge = {
+        bgImage: 'data:image/png;base64,example',
+        pieceSvg: '<svg width="55" height="95"></svg>',
+        token: 'captcha-token',
+    };
+    const captured = [];
+
+    globalThis.window = {
+        async fetch() {
+            return new Response(JSON.stringify(challenge));
+        },
+        location: {
+            href: 'https://arcaneangler.com/',
+        },
+    };
+
+    try {
+        installFetchInterceptor({
+            onCaptchaChallenge(payload) {
+                captured.push(payload);
+            },
+        });
+
+        await window.fetch(
+            'https://arcaneangler.com/api/game/captcha-challenge',
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.deepEqual(captured, [challenge]);
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
 test('只 hook 游戏已有的比赛与公会轮询接口', () => {
     assert.equal(
         isCompetitionResponsePath('/api/guild/tournaments/current'),

@@ -374,7 +374,12 @@ async function collectCaptchaChallengeResponse(response, onCaptchaChallenge) {
         const payload = await response.json();
         const challenge = payload?.result ?? payload;
 
-        if (!challenge?.token || typeof challenge.bgSvg !== 'string') {
+        const hasLegacySvg = typeof challenge?.bgSvg === 'string';
+        const hasImagePuzzle =
+            typeof challenge?.bgImage === 'string' &&
+            typeof challenge?.pieceSvg === 'string';
+
+        if (!challenge?.token || (!hasLegacySvg && !hasImagePuzzle)) {
             return;
         }
 

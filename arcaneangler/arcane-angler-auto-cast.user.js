@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.12.1
+// @version      2.12.2
 // @author       Codex
 // @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -1309,6 +1309,65 @@
 		const normalizedResult = Math.round(result * 1e10) / 1e10;
 		return String(Object.is(normalizedResult, -0) ? 0 : normalizedResult);
 	}
+	function findCaptchaGapFromPixels(imageData, pieceDimensions) {
+		const canvasWidth = Number(imageData?.width);
+		const canvasHeight = Number(imageData?.height);
+		const pixels = imageData?.data;
+		const gapWidth = Math.round(Number(pieceDimensions?.width));
+		const gapHeight = Math.round(Number(pieceDimensions?.height));
+		if (!Number.isInteger(canvasWidth) || !Number.isInteger(canvasHeight) || canvasWidth <= 0 || canvasHeight <= 0 || pixels?.length !== canvasWidth * canvasHeight * 4) throw new Error("验证码背景像素数据无效");
+		if (!Number.isInteger(gapWidth) || !Number.isInteger(gapHeight) || gapWidth <= 2 || gapHeight <= 2 || gapWidth >= canvasWidth || gapHeight > canvasHeight) throw new Error("验证码拼图尺寸无效");
+		const gapTop = Math.round((canvasHeight - gapHeight) / 2);
+		const sampleTop = Math.max(0, gapTop + 1);
+		const sampleBottom = Math.min(canvasHeight, gapTop + gapHeight - 1);
+		const sampleHeight = sampleBottom - sampleTop;
+		const colorCounts = new Map();
+		for (let y = sampleTop; y < sampleBottom; y += 1) for (let x = 0; x < canvasWidth; x += 1) {
+			const offset = (y * canvasWidth + x) * 4;
+			const color = pixels[offset] * 16777216 + pixels[offset + 1] * 65536 + pixels[offset + 2] * 256 + pixels[offset + 3];
+			colorCounts.set(color, (colorCounts.get(color) ?? 0) + 1);
+		}
+		let repeatedColor = null;
+		let repeatedColorCount = 0;
+		for (const [color, count] of colorCounts) if (count > repeatedColorCount) {
+			repeatedColor = color;
+			repeatedColorCount = count;
+		}
+		const columnMatches = new Uint16Array(canvasWidth);
+		for (let x = 0; x < canvasWidth; x += 1) for (let y = sampleTop; y < sampleBottom; y += 1) {
+			const offset = (y * canvasWidth + x) * 4;
+			if (pixels[offset] * 16777216 + pixels[offset + 1] * 65536 + pixels[offset + 2] * 256 + pixels[offset + 3] === repeatedColor) columnMatches[x] += 1;
+		}
+		const minimumColumnMatches = Math.floor(sampleHeight * .8);
+		const minimumRunWidth = Math.floor(gapWidth * .6);
+		const maximumRunWidth = Math.ceil(gapWidth * 1.2);
+		const candidates = [];
+		let runStart = null;
+		for (let x = 0; x <= canvasWidth; x += 1) {
+			const isMatchingColumn = x < canvasWidth && columnMatches[x] >= minimumColumnMatches;
+			if (isMatchingColumn && runStart == null) runStart = x;
+			else if (!isMatchingColumn && runStart != null) {
+				const runWidth = x - runStart;
+				if (runWidth >= minimumRunWidth && runWidth <= maximumRunWidth) candidates.push({
+					end: x,
+					start: runStart,
+					width: runWidth
+				});
+				runStart = null;
+			}
+		}
+		const gap = candidates.sort((left, right) => Math.abs(left.width - gapWidth) - Math.abs(right.width - gapWidth))[0];
+		if (!gap) throw new Error("未找到验证码图片中的缺口");
+		const gapX = Math.round((gap.start + gap.end - gapWidth) / 2);
+		const travelWidth = canvasWidth - gapWidth;
+		if (gapX < 0 || gapX > travelWidth) throw new Error("验证码缺口坐标超出可移动范围");
+		return {
+			canvasWidth,
+			gapX,
+			gapWidth,
+			ratio: gapX / travelWidth
+		};
+	}
 	function createCaptchaController({ getState, notify, setEnabled, setNextDelay, setStatus }) {
 		let activeCaptchaChallenge = null;
 		let activeStaffQuestion = null;
@@ -1414,10 +1473,23 @@
 			if (!Number.isFinite(number)) throw new Error(`无法读取验证码的 ${fieldName}`);
 			return number;
 		}
-		function readExposedCaptchaAnswer(source) {
-			if (typeof source !== "string" || !source.includes("<svg")) throw new Error("服务端未返回有效的验证码 SVG");
+		function readSvgDimensions(source, fieldName) {
+			if (typeof source !== "string" || !source.includes("<svg")) throw new Error(`服务端未返回有效的${fieldName} SVG`);
 			const svg = new DOMParser().parseFromString(source, "image/svg+xml");
-			if (svg.querySelector("parsererror")) throw new Error("验证码背景 SVG 解析失败");
+			if (svg.querySelector("parsererror")) throw new Error(`${fieldName} SVG 解析失败`);
+			const root = svg.documentElement;
+			const viewBox = root.getAttribute("viewBox")?.trim().split(/\s+/).map(Number);
+			const width = root.hasAttribute("width") ? parseSvgNumber(root.getAttribute("width"), `${fieldName}宽度`) : viewBox?.[2];
+			const height = root.hasAttribute("height") ? parseSvgNumber(root.getAttribute("height"), `${fieldName}高度`) : viewBox?.[3];
+			if (!(width > 0) || !(height > 0)) throw new Error(`无法读取${fieldName}尺寸`);
+			return {
+				height,
+				svg,
+				width
+			};
+		}
+		function readExposedCaptchaAnswer(source) {
+			const { svg } = readSvgDimensions(source, "验证码背景");
 			const root = svg.documentElement;
 			const gap = Array.from(svg.querySelectorAll("rect")).find((rect) => rect.hasAttribute("stroke-dasharray"));
 			if (!gap) throw new Error("未找到验证码缺口标记");
@@ -1434,12 +1506,33 @@
 				ratio: gapX / travelWidth
 			};
 		}
+		async function readImageCaptchaAnswer(challenge) {
+			const piece = readSvgDimensions(challenge.pieceSvg, "验证码拼图");
+			const image = await new Promise((resolve, reject) => {
+				const element = new Image();
+				element.addEventListener("load", () => resolve(element), { once: true });
+				element.addEventListener("error", () => reject(new Error("验证码背景图片加载失败")), { once: true });
+				element.src = challenge.bgImage;
+			});
+			const canvas = document.createElement("canvas");
+			canvas.width = image.naturalWidth;
+			canvas.height = image.naturalHeight;
+			const context = canvas.getContext("2d", { willReadFrequently: true });
+			if (!context) throw new Error("浏览器不支持读取验证码背景图片");
+			context.drawImage(image, 0, 0);
+			return findCaptchaGapFromPixels(context.getImageData(0, 0, canvas.width, canvas.height), piece);
+		}
+		async function readCaptchaAnswer(challenge) {
+			if (typeof challenge?.bgSvg === "string") return readExposedCaptchaAnswer(challenge.bgSvg);
+			if (typeof challenge?.bgImage === "string" && typeof challenge?.pieceSvg === "string") return readImageCaptchaAnswer(challenge);
+			throw new Error("验证码 challenge 数据不完整");
+		}
 		async function runCaptchaBypass(challenge, isAttemptActive) {
 			const api = window.ApiService;
 			if (typeof api?.notifyCaptchaVerified !== "function") throw new Error("页面验证码 API 不可用");
 			if (!isAttemptActive()) return false;
-			if (!challenge?.token || typeof challenge.bgSvg !== "string") throw new Error("验证码 challenge 数据不完整");
-			const answer = readExposedCaptchaAnswer(challenge.bgSvg);
+			if (!challenge?.token) throw new Error("验证码 challenge 数据不完整");
+			const answer = await readCaptchaAnswer(challenge);
 			const rangeValue = Math.round(answer.ratio * 100);
 			console.warn("[自动过验证] 客户端已暴露验证码答案：", {
 				...answer,
@@ -2420,7 +2513,9 @@
 		try {
 			const payload = await response.json();
 			const challenge = payload?.result ?? payload;
-			if (!challenge?.token || typeof challenge.bgSvg !== "string") return;
+			const hasLegacySvg = typeof challenge?.bgSvg === "string";
+			const hasImagePuzzle = typeof challenge?.bgImage === "string" && typeof challenge?.pieceSvg === "string";
+			if (!challenge?.token || !hasLegacySvg && !hasImagePuzzle) return;
 			onCaptchaChallenge(challenge);
 		} catch (error) {
 			console.warn("[自动过验证] 无法读取验证码 challenge 响应：", error);
