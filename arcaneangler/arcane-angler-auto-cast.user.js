@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.12.0
+// @version      2.12.1
 // @author       Codex
 // @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -1220,14 +1220,64 @@
 			setTimeout(resolve, milliseconds);
 		});
 	}
+	var ENGLISH_SMALL_NUMBERS = {
+		eight: 8,
+		eighteen: 18,
+		eleven: 11,
+		fifteen: 15,
+		five: 5,
+		four: 4,
+		fourteen: 14,
+		nine: 9,
+		nineteen: 19,
+		one: 1,
+		seven: 7,
+		seventeen: 17,
+		six: 6,
+		sixteen: 16,
+		ten: 10,
+		thirteen: 13,
+		three: 3,
+		twelve: 12,
+		two: 2,
+		zero: 0
+	};
+	var ENGLISH_TENS = {
+		eighty: 80,
+		fifty: 50,
+		forty: 40,
+		ninety: 90,
+		seventy: 70,
+		sixty: 60,
+		thirty: 30,
+		twenty: 20
+	};
+	function parseEnglishNumber(value) {
+		const tokens = String(value ?? "").toLowerCase().replace(/-/g, " ").split(/\s+/).filter((token) => token && token !== "and");
+		function parseUnderOneHundred(parts) {
+			if (parts.length === 1) return ENGLISH_SMALL_NUMBERS[parts[0]] ?? ENGLISH_TENS[parts[0]];
+			if (parts.length === 2 && ENGLISH_TENS[parts[0]] != null && ENGLISH_SMALL_NUMBERS[parts[1]] > 0 && ENGLISH_SMALL_NUMBERS[parts[1]] < 10) return ENGLISH_TENS[parts[0]] + ENGLISH_SMALL_NUMBERS[parts[1]];
+		}
+		const hundredIndex = tokens.indexOf("hundred");
+		if (hundredIndex === -1) return parseUnderOneHundred(tokens);
+		if (hundredIndex !== 1 || ENGLISH_SMALL_NUMBERS[tokens[0]] == null || ENGLISH_SMALL_NUMBERS[tokens[0]] < 1 || ENGLISH_SMALL_NUMBERS[tokens[0]] > 9) return;
+		const remainder = tokens.slice(2);
+		const remainderValue = remainder.length === 0 ? 0 : parseUnderOneHundred(remainder);
+		return remainderValue == null ? void 0 : ENGLISH_SMALL_NUMBERS[tokens[0]] * 100 + remainderValue;
+	}
+	function parseStaffQuestionNumber(value) {
+		const number = Number(value);
+		return Number.isFinite(number) ? number : parseEnglishNumber(value);
+	}
 	function solveStaffQuestion(question) {
 		const normalizedQuestion = normalizeText(question);
-		const match = normalizedQuestion.match(/^(?:how much is|what is|calculate)\s+([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(x|×|\*|\+|-|−|÷|\/|plus|minus|times|multiplied by|divided by)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\?$/i) ?? normalizedQuestion.match(/^(?:请?计算\s*)?([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(x|×|\*|\+|-|−|÷|\/|加|减|乘|乘以|除以)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(?:等于多少|是多少|结果是多少)?\s*[?？]?$/i);
+		const match = normalizedQuestion.match(/^(?:how much is|what is|calculate)\s+([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(x|×|\*|\+|-|−|÷|\/|plus|minus|times|multiplied by|divided by)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\??$/i) ?? normalizedQuestion.match(/^(?:how much is|what is|calculate)\s+(.+?)\s+(plus|minus|times|multiplied by|divided by)\s+(.+?)\s*\??$/i) ?? normalizedQuestion.match(/^(?:请?计算\s*)?([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(x|×|\*|\+|-|−|÷|\/|加|减|乘|乘以|除以)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(?:等于多少|是多少|结果是多少)?\s*[?？]?$/i);
 		if (!match) return null;
-		const left = Number(match[1]);
-		const right = Number(match[3]);
+		const left = parseStaffQuestionNumber(match[1]);
+		const right = parseStaffQuestionNumber(match[3]);
 		const operator = match[2].toLowerCase();
 		let result;
+		if (!Number.isFinite(left) || !Number.isFinite(right)) return null;
 		if ([
 			"x",
 			"×",

@@ -11,7 +11,13 @@ import { CONFIG } from '../arcaneangler/src/config.js';
 
 test('Staff Question 只解析明确的基础算术题', () => {
     assert.equal(solveStaffQuestion('How much is 3x7?'), '21');
+    assert.equal(solveStaffQuestion('how much is three plus one'), '4');
     assert.equal(solveStaffQuestion('What is 18 divided by 4?'), '4.5');
+    assert.equal(solveStaffQuestion('What is twenty-one minus nine'), '12');
+    assert.equal(
+        solveStaffQuestion('What is two hundred and five divided by five?'),
+        '41',
+    );
     assert.equal(solveStaffQuestion('Calculate 8 minus 11?'), '-3');
     assert.equal(solveStaffQuestion('3乘以7等于多少？'), '21');
     assert.equal(solveStaffQuestion('请计算 18 除以 4'), '4.5');
@@ -45,7 +51,7 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
 
     popup.innerHTML = `
         <div><div>❓ 员工提问</div><div>0:35</div></div>
-        <div>3乘以7等于多少？</div>
+        <div>三加一等于多少？</div>
         <input type="text" maxlength="500" placeholder="请输入答案……" />
         <div><button>回答</button><button>忽略</button></div>
     `;
@@ -61,7 +67,7 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
                 onDismiss() {
                     popup.remove();
                 },
-                question: 'How much is 3x7?',
+                question: 'how much is three plus one',
                 questionId: 42,
             },
             return: null,
@@ -104,11 +110,11 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
 
         controller.handleStaffQuestion({
             id: 42,
-            question: 'How much is 3x7?',
+            question: 'how much is three plus one',
         });
 
         await resumed;
-        assert.deepEqual(answerCalls, [[42, '21', 5]]);
+        assert.deepEqual(answerCalls, [[42, '4', 5]]);
         assert.equal(controller.hasActiveVerification(), false);
         assert.equal(popup.isConnected, false);
     } finally {
