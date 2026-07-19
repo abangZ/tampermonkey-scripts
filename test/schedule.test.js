@@ -20,9 +20,9 @@ test('休息结束后等待内置自动钓鱼停止，再恢复工作阶段', as
     const schedule = createScheduleController({
         getCaptcha() {
             return {
-                hasActiveChallenge: () => false,
+                hasActiveVerification: () => false,
                 isBypassInProgress: () => false,
-                stopIfChallengeFound: () => false,
+                stopIfVerificationFound: () => false,
             };
         },
         getState: () => state,

@@ -98,6 +98,7 @@ let autoBait = null;
 let autoBoss = null;
 let forceNextAutoBaitCheck = false;
 let pendingCaptchaChallenge = null;
+let pendingStaffQuestion = null;
 const pendingCompetitionResponses = new Map();
 let pendingQuestResponse = null;
 const pendingWeatherResponses = new Map();
@@ -187,6 +188,17 @@ installFetchInterceptor({
         } else {
             pendingQuestResponse = response;
         }
+    },
+    onStaffQuestion(question) {
+        if (captcha) {
+            captcha.handleStaffQuestion(question);
+        } else {
+            pendingStaffQuestion = question;
+        }
+    },
+    onStaffQuestionResolved() {
+        pendingStaffQuestion = null;
+        captcha?.clearStaffQuestion();
     },
     onWeatherResponse(response) {
         handleWeatherResponse(response);
@@ -427,7 +439,7 @@ async function simulateClick(button, currentLoopId) {
         return false;
     }
 
-    if (captcha.stopIfChallengeFound()) {
+    if (captcha.stopIfVerificationFound()) {
         return false;
     }
 
@@ -542,7 +554,7 @@ async function waitForButton(currentLoopId) {
     const cooldownWatchdog = createCooldownWatchdog(CONFIG.cooldownReloadDelay);
 
     while (enabled && currentLoopId === loopId) {
-        if (captcha.stopIfChallengeFound()) {
+        if (captcha.stopIfVerificationFound()) {
             return null;
         }
 
@@ -591,7 +603,7 @@ async function waitWithCountdown(milliseconds, isLongDelay, currentLoopId) {
     const endTime = Date.now() + milliseconds;
 
     while (enabled && currentLoopId === loopId) {
-        if (captcha.stopIfChallengeFound()) {
+        if (captcha.stopIfVerificationFound()) {
             return false;
         }
 
@@ -648,7 +660,7 @@ async function waitForGameAutoFishingWork(currentLoopId) {
             return;
         }
 
-        if (captcha.stopIfChallengeFound()) {
+        if (captcha.stopIfVerificationFound()) {
             return;
         }
 
@@ -765,7 +777,7 @@ async function runLoop(currentLoopId) {
             // 如果验证码导致未点击，按当前过验证设置处理后退出。
             if (
                 captcha.isBypassInProgress() ||
-                captcha.stopIfChallengeFound()
+                captcha.stopIfVerificationFound()
             ) {
                 return;
             }
@@ -1261,6 +1273,11 @@ function initialize() {
     if (pendingCaptchaChallenge) {
         captcha.handleChallenge(pendingCaptchaChallenge);
         pendingCaptchaChallenge = null;
+    }
+
+    if (pendingStaffQuestion) {
+        captcha.handleStaffQuestion(pendingStaffQuestion);
+        pendingStaffQuestion = null;
     }
 
     // 第一次安装默认关闭；之后恢复上次保存的状态

@@ -8,6 +8,8 @@ export function installFetchInterceptor({
     onCompetitionResponse,
     onGameStateResponse,
     onQuestResponse,
+    onStaffQuestion,
+    onStaffQuestionResolved,
     onWeatherResponse,
 }) {
     const originalFetch = window.fetch;
@@ -87,6 +89,26 @@ export function installFetchInterceptor({
             response.ok
         ) {
             onCaptchaVerified();
+        } else if (
+            method === 'GET' &&
+            url?.pathname === '/api/moderation/pending-toast-question'
+        ) {
+            try {
+                void collectStaffQuestionResponse(
+                    response.clone(),
+                    onStaffQuestion,
+                );
+            } catch (error) {
+                console.warn(
+                    '[自动过验证] 无法复制 Staff Question 响应：',
+                    error,
+                );
+            }
+        } else if (
+            isStaffQuestionResolutionPath(method, url?.pathname) &&
+            response.ok
+        ) {
+            onStaffQuestionResolved?.();
         } else if (
             method === 'GET' &&
             isCompetitionResponsePath(url?.pathname)
@@ -182,6 +204,15 @@ export function isWeatherResponsePath(pathname) {
 
 export function isQuestResponsePath(pathname) {
     return pathname === '/api/quests';
+}
+
+export function isStaffQuestionResolutionPath(method, pathname) {
+    return (
+        method === 'POST' &&
+        /^\/api\/moderation\/(?:answer|dismiss)-toast-question\/[^/]+$/.test(
+            pathname ?? '',
+        )
+    );
 }
 
 export function isCompetitionResponsePath(pathname) {
@@ -282,6 +313,25 @@ async function readRequestPayload(request, init) {
     }
 
     return normalizeRequestBody(body);
+}
+
+async function collectStaffQuestionResponse(response, onStaffQuestion) {
+    if (!response.ok || typeof onStaffQuestion !== 'function') {
+        return;
+    }
+
+    try {
+        const payload = await response.json();
+        const pending = payload?.pending;
+
+        onStaffQuestion(
+            pending?.id != null && typeof pending.question === 'string'
+                ? pending
+                : null,
+        );
+    } catch (error) {
+        console.warn('[自动过验证] 无法读取 Staff Question 响应：', error);
+    }
 }
 
 async function collectCastResponse(

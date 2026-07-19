@@ -17,7 +17,7 @@ async function sendServerHumanVerificationNotification(pushKey) {
 
     if (!currentPushKey) {
         console.info(
-            '[自动抛竿] 未设置消息推送 Key，跳过验证码通知。' +
+            '[自动抛竿] 未设置消息推送 Key，跳过验证通知。' +
                 '可前往 https://sct.ftqq.com/ 获取 SendKey。',
         );
         return;
@@ -34,9 +34,9 @@ async function sendServerHumanVerificationNotification(pushKey) {
             throw new Error(`HTTP ${response.status}`);
         }
 
-        console.info('[自动抛竿] 验证码通知已发送。');
+        console.info('[自动抛竿] 验证通知已发送。');
     } catch (error) {
-        console.warn('[自动抛竿] 验证码通知发送失败：', error);
+        console.warn('[自动抛竿] 验证通知发送失败：', error);
     }
 }
 
@@ -47,12 +47,12 @@ function sendBrowserHumanVerificationNotification() {
     }
 
     if (window.Notification.permission !== 'granted') {
-        console.warn('[自动抛竿] 浏览器通知尚未授权，跳过验证码通知。');
+        console.warn('[自动抛竿] 浏览器通知尚未授权，跳过验证通知。');
         return;
     }
 
     try {
-        const notification = new window.Notification('Arcane Angler 人机验证', {
+        const notification = new window.Notification('Arcane Angler 验证提醒', {
             body: HUMAN_VERIFICATION_MESSAGE,
             tag: 'arcane-angler-human-verification',
         });
@@ -62,9 +62,9 @@ function sendBrowserHumanVerificationNotification() {
             notification.close();
         };
 
-        console.info('[自动抛竿] 浏览器验证码通知已发送。');
+        console.info('[自动抛竿] 浏览器验证通知已发送。');
     } catch (error) {
-        console.warn('[自动抛竿] 浏览器验证码通知发送失败：', error);
+        console.warn('[自动抛竿] 浏览器验证通知发送失败：', error);
     }
 }
 

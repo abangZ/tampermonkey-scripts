@@ -92,7 +92,7 @@ export function createScheduleController({
             enabled &&
             currentLoopId === loopId &&
             !captcha.isBypassInProgress() &&
-            !captcha.hasActiveChallenge() &&
+            !captcha.hasActiveVerification() &&
             isWorkExpired()
         );
     }
@@ -127,7 +127,7 @@ export function createScheduleController({
             }
 
             // 休息阶段仍处理运行周期末尾遗留的验证码。
-            if (getCaptcha().stopIfChallengeFound()) {
+            if (getCaptcha().stopIfVerificationFound()) {
                 return false;
             }
 

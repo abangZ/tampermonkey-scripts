@@ -1,0 +1,173 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+
+import { Window } from 'happy-dom';
+
+import {
+    createCaptchaController,
+    solveStaffQuestion,
+} from '../arcaneangler/src/captcha.js';
+import { CONFIG } from '../arcaneangler/src/config.js';
+
+test('Staff Question 只解析明确的基础算术题', () => {
+    assert.equal(solveStaffQuestion('How much is 3x7?'), '21');
+    assert.equal(solveStaffQuestion('What is 18 divided by 4?'), '4.5');
+    assert.equal(solveStaffQuestion('Calculate 8 minus 11?'), '-3');
+    assert.equal(solveStaffQuestion('3乘以7等于多少？'), '21');
+    assert.equal(solveStaffQuestion('请计算 18 除以 4'), '4.5');
+    assert.equal(
+        solveStaffQuestion('Please describe your current activity.'),
+        null,
+    );
+    assert.equal(solveStaffQuestion('What is 5 divided by 0?'), null);
+});
+
+test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行', async () => {
+    const previousDocument = globalThis.document;
+    const previousHTMLElement = globalThis.HTMLElement;
+    const previousWindow = globalThis.window;
+    const previousDelays = {
+        captchaConfirmDelayMax: CONFIG.captchaConfirmDelayMax,
+        captchaConfirmDelayMin: CONFIG.captchaConfirmDelayMin,
+        captchaObserveDelayMax: CONFIG.captchaObserveDelayMax,
+        captchaObserveDelayMin: CONFIG.captchaObserveDelayMin,
+    };
+    const answerCalls = [];
+    let enabled = true;
+    let resume;
+    const resumed = new Promise((resolve) => {
+        resume = resolve;
+    });
+    const window = new Window({
+        url: 'https://arcaneangler.com/',
+    });
+    const popup = window.document.createElement('div');
+
+    popup.innerHTML = `
+        <div><div>❓ 员工提问</div><div>0:35</div></div>
+        <div>3乘以7等于多少？</div>
+        <input type="text" maxlength="500" placeholder="请输入答案……" />
+        <div><button>回答</button><button>忽略</button></div>
+    `;
+    popup.querySelector('input').getBoundingClientRect = () => ({
+        height: 40,
+        width: 300,
+    });
+    popup.__reactFiber$test = {
+        memoizedProps: {},
+        return: {
+            memoizedProps: {
+                castCountRef: { current: 5 },
+                onDismiss() {
+                    popup.remove();
+                },
+                question: 'How much is 3x7?',
+                questionId: 42,
+            },
+            return: null,
+        },
+    };
+    window.document.body.appendChild(popup);
+
+    CONFIG.captchaConfirmDelayMax = 0;
+    CONFIG.captchaConfirmDelayMin = 0;
+    CONFIG.captchaObserveDelayMax = 0;
+    CONFIG.captchaObserveDelayMin = 0;
+    window.ApiService = {
+        async answerToastQuestion(...args) {
+            answerCalls.push(args);
+        },
+    };
+    globalThis.document = window.document;
+    globalThis.HTMLElement = window.HTMLElement;
+    globalThis.window = window;
+
+    try {
+        const controller = createCaptchaController({
+            getState() {
+                return {
+                    captchaBypassEnabled: true,
+                    enabled,
+                };
+            },
+            notify() {},
+            setEnabled(nextEnabled) {
+                enabled = nextEnabled;
+
+                if (nextEnabled) {
+                    resume();
+                }
+            },
+            setNextDelay() {},
+            setStatus() {},
+        });
+
+        controller.handleStaffQuestion({
+            id: 42,
+            question: 'How much is 3x7?',
+        });
+
+        await resumed;
+        assert.deepEqual(answerCalls, [[42, '21', 5]]);
+        assert.equal(controller.hasActiveVerification(), false);
+        assert.equal(popup.isConnected, false);
+    } finally {
+        Object.assign(CONFIG, previousDelays);
+        globalThis.document = previousDocument;
+        globalThis.HTMLElement = previousHTMLElement;
+        globalThis.window = previousWindow;
+    }
+});
+
+test('无法可靠回答 Staff Question 时停止并通知用户', async () => {
+    const previousWindow = globalThis.window;
+    let enabled = true;
+    let notificationCount = 0;
+    let stop;
+    const stopped = new Promise((resolve) => {
+        stop = resolve;
+    });
+
+    globalThis.window = {
+        ApiService: {
+            async answerToastQuestion() {
+                assert.fail('开放问题不应自动提交答案');
+            },
+        },
+    };
+
+    try {
+        const controller = createCaptchaController({
+            getState() {
+                return {
+                    captchaBypassEnabled: true,
+                    enabled,
+                };
+            },
+            notify() {
+                notificationCount += 1;
+            },
+            setEnabled(nextEnabled) {
+                enabled = nextEnabled;
+
+                if (!nextEnabled) {
+                    stop();
+                }
+            },
+            setNextDelay() {},
+            setStatus() {},
+        });
+
+        controller.handleStaffQuestion({
+            id: 43,
+            question: 'Please describe your current activity.',
+        });
+
+        await stopped;
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(notificationCount, 1);
+        assert.equal(enabled, false);
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});

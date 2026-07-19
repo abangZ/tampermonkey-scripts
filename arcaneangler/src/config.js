@@ -61,8 +61,9 @@ export const PANEL_COLLAPSED_STORAGE_KEY = 'arcane-angler-panel-collapsed-v1';
 export const EARNINGS_STORAGE_KEY = 'arcane-angler-earnings-v1';
 export const PANEL_ID = 'arcane-angler-auto-cast-panel-host';
 export const HUMAN_VERIFICATION_TEXT = '人机验证';
+export const STAFF_QUESTION_TEXT = 'Staff Question';
 export const HUMAN_VERIFICATION_MESSAGE =
-    'Arcane Angler 出现验证码了，自动抛竿已停止';
+    'Arcane Angler 出现需要处理的验证，自动抛竿已停止';
 export const EARNINGS_CATEGORY_DISPLAY = {
     unknown: {
         label: '未知',

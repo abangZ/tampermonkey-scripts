@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.11.0
+// @version      2.12.0
 // @author       Codex
 // @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -964,7 +964,8 @@
 	var PANEL_COLLAPSED_STORAGE_KEY = "arcane-angler-panel-collapsed-v1";
 	var EARNINGS_STORAGE_KEY = "arcane-angler-earnings-v1";
 	var PANEL_ID = "arcane-angler-auto-cast-panel-host";
-	var HUMAN_VERIFICATION_MESSAGE = "Arcane Angler 出现验证码了，自动抛竿已停止";
+	var STAFF_QUESTION_TEXT = "Staff Question";
+	var HUMAN_VERIFICATION_MESSAGE = "Arcane Angler 出现需要处理的验证，自动抛竿已停止";
 	var EARNINGS_CATEGORY_DISPLAY = {
 		unknown: {
 			label: "未知",
@@ -1219,8 +1220,48 @@
 			setTimeout(resolve, milliseconds);
 		});
 	}
+	function solveStaffQuestion(question) {
+		const normalizedQuestion = normalizeText(question);
+		const match = normalizedQuestion.match(/^(?:how much is|what is|calculate)\s+([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(x|×|\*|\+|-|−|÷|\/|plus|minus|times|multiplied by|divided by)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\?$/i) ?? normalizedQuestion.match(/^(?:请?计算\s*)?([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(x|×|\*|\+|-|−|÷|\/|加|减|乘|乘以|除以)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(?:等于多少|是多少|结果是多少)?\s*[?？]?$/i);
+		if (!match) return null;
+		const left = Number(match[1]);
+		const right = Number(match[3]);
+		const operator = match[2].toLowerCase();
+		let result;
+		if ([
+			"x",
+			"×",
+			"*",
+			"times",
+			"multiplied by",
+			"乘",
+			"乘以"
+		].includes(operator)) result = left * right;
+		else if ([
+			"+",
+			"plus",
+			"加"
+		].includes(operator)) result = left + right;
+		else if ([
+			"-",
+			"−",
+			"minus",
+			"减"
+		].includes(operator)) result = left - right;
+		else if ([
+			"/",
+			"÷",
+			"divided by",
+			"除以"
+		].includes(operator) && right !== 0) result = left / right;
+		else return null;
+		if (!Number.isFinite(result)) return null;
+		const normalizedResult = Math.round(result * 1e10) / 1e10;
+		return String(Object.is(normalizedResult, -0) ? 0 : normalizedResult);
+	}
 	function createCaptchaController({ getState, notify, setEnabled, setNextDelay, setStatus }) {
 		let activeCaptchaChallenge = null;
+		let activeStaffQuestion = null;
 		let captchaBypassAttemptId = 0;
 		let captchaBypassInProgress = false;
 		function findHumanVerification() {
@@ -1228,9 +1269,28 @@
 			for (const heading of headings) if (normalizeText(heading.textContent).includes("人机验证") && isVisible(heading)) return heading;
 			return null;
 		}
+		function findStaffQuestion() {
+			const inputs = document.querySelectorAll("input[type=\"text\"][maxlength=\"500\"]");
+			for (const input of inputs) {
+				if (!isVisible(input)) continue;
+				const verification = {
+					container: input.parentElement,
+					input
+				};
+				const props = readStaffQuestionProps(verification);
+				if (props && (activeStaffQuestion?.id == null || String(props.questionId) === String(activeStaffQuestion.id))) return {
+					...verification,
+					question: normalizeText(props.question)
+				};
+			}
+			return null;
+		}
+		function getReactFiber(element) {
+			const fiberKey = Object.keys(element ?? {}).find((key) => key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$"));
+			return fiberKey ? element[fiberKey] : null;
+		}
 		function closeHumanVerification(verification) {
-			const fiberKey = Object.keys(verification).find((key) => key.startsWith("__reactFiber$") || key.startsWith("__reactInternalInstance$"));
-			let fiber = fiberKey ? verification[fiberKey] : null;
+			let fiber = getReactFiber(verification);
 			while (fiber) {
 				const props = fiber.memoizedProps;
 				if (props?.isOpen === true && typeof props.onClose === "function") {
@@ -1240,6 +1300,35 @@
 				fiber = fiber.return;
 			}
 			return false;
+		}
+		function readStaffQuestionProps(verification) {
+			for (const element of [verification?.container, verification?.input]) {
+				let fiber = getReactFiber(element);
+				while (fiber) {
+					const props = fiber.memoizedProps;
+					if (props?.questionId != null && typeof props.question === "string" && typeof props.onDismiss === "function") return props;
+					fiber = fiber.return;
+				}
+			}
+			return null;
+		}
+		function closeStaffQuestion(verification) {
+			const props = readStaffQuestionProps(verification);
+			if (!props) return false;
+			props.onDismiss();
+			return true;
+		}
+		function syncVisibleStaffQuestion() {
+			const verification = findStaffQuestion();
+			if (!verification) return null;
+			const props = readStaffQuestionProps(verification);
+			activeStaffQuestion = {
+				...activeStaffQuestion,
+				castCountRef: props?.castCountRef ?? activeStaffQuestion?.castCountRef,
+				id: props?.questionId ?? activeStaffQuestion?.id ?? null,
+				question: props?.question ?? verification.question ?? activeStaffQuestion?.question ?? ""
+			};
+			return verification;
 		}
 		async function waitForCaptchaStep(minDelay, maxDelay, status, nextAction, isAttemptActive) {
 			const endTime = Date.now() + randomInt(minDelay, maxDelay);
@@ -1257,6 +1346,15 @@
 			while (findHumanVerification()) {
 				if (!isAttemptActive()) return false;
 				if (Date.now() >= deadline) throw new Error("人机验证弹窗关闭超时");
+				await sleep(50);
+			}
+			return true;
+		}
+		async function waitForStaffQuestionToClose(isAttemptActive) {
+			const deadline = Date.now() + 1500;
+			while (findStaffQuestion()) {
+				if (!isAttemptActive()) return false;
+				if (Date.now() >= deadline) throw new Error("Staff Question 弹窗关闭超时");
 				await sleep(50);
 			}
 			return true;
@@ -1315,15 +1413,40 @@
 			setNextDelay("—");
 			return true;
 		}
+		async function runStaffQuestionBypass(question, isAttemptActive) {
+			const api = window.ApiService;
+			if (typeof api?.answerToastQuestion !== "function") throw new Error("页面 Staff Question API 不可用");
+			const answer = solveStaffQuestion(question?.question);
+			if (answer == null) throw new Error(`无法可靠回答 Staff Question：${question?.question || "未知题目"}`);
+			if (!await waitForCaptchaStep(CONFIG.captchaObserveDelayMin, CONFIG.captchaObserveDelayMax, "正在识别 Staff Question", "提交答案", isAttemptActive)) return false;
+			const verification = syncVisibleStaffQuestion();
+			const latestQuestion = activeStaffQuestion ?? question;
+			if (latestQuestion?.id == null) throw new Error("Staff Question 缺少题目 ID");
+			const castCount = Number(latestQuestion.castCountRef?.current);
+			await api.answerToastQuestion(latestQuestion.id, answer, Number.isFinite(castCount) && castCount >= 0 ? castCount : 0);
+			if (String(activeStaffQuestion?.id) === String(latestQuestion.id)) activeStaffQuestion = null;
+			console.warn("[自动过验证] Staff Question 已自动回答：", {
+				answer,
+				question: latestQuestion.question
+			});
+			if (!await waitForCaptchaStep(CONFIG.captchaConfirmDelayMin, CONFIG.captchaConfirmDelayMax, "答案已提交，等待页面确认", "关闭验证弹窗", isAttemptActive)) return false;
+			const visibleQuestion = verification?.container?.isConnected ? verification : findStaffQuestion();
+			if (visibleQuestion && !closeStaffQuestion(visibleQuestion)) throw new Error("无法关闭 Staff Question 弹窗");
+			if (!await waitForStaffQuestionToClose(isAttemptActive)) return false;
+			setStatus("Staff Question 已完成，正在恢复自动抛竿");
+			setNextDelay("—");
+			return true;
+		}
 		function cancelCaptchaBypass() {
 			captchaBypassAttemptId += 1;
 			captchaBypassInProgress = false;
 		}
 		function stopForHumanVerification() {
+			const verificationName = activeStaffQuestion ? STAFF_QUESTION_TEXT : "人机验证";
 			setEnabled(false);
-			setStatus("检测到人机验证，已停止");
+			setStatus(`检测到 ${verificationName}，已停止`);
 			setNextDelay("请手动完成验证");
-			console.warn("[自动抛竿] 检测到人机验证，自动操作已停止。");
+			console.warn(`[自动抛竿] 检测到 ${verificationName}，自动操作已停止。`);
 			notify();
 		}
 		async function autoBypassCaptcha(challenge) {
@@ -1354,7 +1477,41 @@
 			const state = getState();
 			if (bypassSucceeded && state.enabled && state.captchaBypassEnabled && attemptId === captchaBypassAttemptId) setEnabled(true);
 		}
-		function stopIfCaptchaChallengeFound() {
+		async function autoBypassStaffQuestion(question) {
+			const { captchaBypassEnabled } = getState();
+			if (!captchaBypassEnabled || captchaBypassInProgress) return;
+			const attemptId = captchaBypassAttemptId + 1;
+			captchaBypassAttemptId = attemptId;
+			captchaBypassInProgress = true;
+			let bypassSucceeded = false;
+			console.warn("[自动抛竿] 捕获到 Staff Question，尝试自动回答。");
+			try {
+				bypassSucceeded = await runStaffQuestionBypass(question, () => {
+					const state = getState();
+					return state.enabled && state.captchaBypassEnabled && attemptId === captchaBypassAttemptId;
+				});
+			} catch (error) {
+				const state = getState();
+				if (!state.enabled || !state.captchaBypassEnabled || attemptId !== captchaBypassAttemptId) return;
+				if (String(activeStaffQuestion?.id) === String(question?.id)) activeStaffQuestion = null;
+				setEnabled(false);
+				setStatus("Staff Question 自动处理失败，已停止");
+				setNextDelay("请手动完成验证");
+				console.warn("[自动抛竿] Staff Question 自动处理失败：", error);
+				notify();
+			} finally {
+				if (attemptId === captchaBypassAttemptId) captchaBypassInProgress = false;
+			}
+			const state = getState();
+			if (bypassSucceeded && state.enabled && state.captchaBypassEnabled && attemptId === captchaBypassAttemptId) setEnabled(true);
+		}
+		function stopIfVerificationFound() {
+			syncVisibleStaffQuestion();
+			if (activeStaffQuestion) {
+				if (getState().captchaBypassEnabled) autoBypassStaffQuestion(activeStaffQuestion);
+				else stopForHumanVerification();
+				return true;
+			}
 			if (!activeCaptchaChallenge) return false;
 			if (getState().captchaBypassEnabled) autoBypassCaptcha(activeCaptchaChallenge);
 			else stopForHumanVerification();
@@ -1367,10 +1524,28 @@
 			if (state.captchaBypassEnabled) autoBypassCaptcha(challenge);
 			else stopForHumanVerification();
 		}
+		function handleStaffQuestion(question) {
+			if (!question) {
+				activeStaffQuestion = null;
+				return;
+			}
+			activeStaffQuestion = question;
+			const state = getState();
+			if (!state.enabled) return;
+			if (state.captchaBypassEnabled) autoBypassStaffQuestion(question);
+			else stopForHumanVerification();
+		}
 		function handleBypassSettingChanged() {
 			const state = getState();
 			if (!state.captchaBypassEnabled) cancelCaptchaBypass();
-			if (!state.enabled || !activeCaptchaChallenge) return;
+			if (!state.enabled) return;
+			syncVisibleStaffQuestion();
+			if (activeStaffQuestion) {
+				if (state.captchaBypassEnabled) autoBypassStaffQuestion(activeStaffQuestion);
+				else stopForHumanVerification();
+				return;
+			}
+			if (!activeCaptchaChallenge) return;
 			if (state.captchaBypassEnabled) autoBypassCaptcha(activeCaptchaChallenge);
 			else stopForHumanVerification();
 		}
@@ -1379,15 +1554,19 @@
 			clearChallenge() {
 				activeCaptchaChallenge = null;
 			},
+			clearStaffQuestion() {
+				activeStaffQuestion = null;
+			},
 			handleBypassSettingChanged,
 			handleChallenge,
-			hasActiveChallenge() {
-				return Boolean(activeCaptchaChallenge);
+			handleStaffQuestion,
+			hasActiveVerification() {
+				return Boolean(activeCaptchaChallenge || activeStaffQuestion);
 			},
 			isBypassInProgress() {
 				return captchaBypassInProgress;
 			},
-			stopIfChallengeFound: stopIfCaptchaChallengeFound
+			stopIfVerificationFound
 		};
 	}
 	var DEFAULT_CLICK_DELAY_SETTINGS = Object.freeze({
@@ -2027,7 +2206,7 @@
 		} });
 		return true;
 	}
-	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult, onCompetitionResponse, onGameStateResponse, onQuestResponse, onWeatherResponse }) {
+	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult, onCompetitionResponse, onGameStateResponse, onQuestResponse, onStaffQuestion, onStaffQuestionResolved, onWeatherResponse }) {
 		const originalFetch = window.fetch;
 		window.fetch = async function(input, init) {
 			const request = input instanceof Request ? input : null;
@@ -2056,6 +2235,12 @@
 				console.warn("[自动过验证] 无法复制验证码 challenge 响应：", error);
 			}
 			else if (method === "POST" && url?.pathname === "/api/game/captcha-verified" && response.ok) onCaptchaVerified();
+			else if (method === "GET" && url?.pathname === "/api/moderation/pending-toast-question") try {
+				collectStaffQuestionResponse(response.clone(), onStaffQuestion);
+			} catch (error) {
+				console.warn("[自动过验证] 无法复制 Staff Question 响应：", error);
+			}
+			else if (isStaffQuestionResolutionPath(method, url?.pathname) && response.ok) onStaffQuestionResolved?.();
 			else if (method === "GET" && isCompetitionResponsePath(url?.pathname)) try {
 				collectCompetitionResponse(response.clone(), url.pathname, onCompetitionResponse);
 			} catch (error) {
@@ -2105,6 +2290,9 @@
 	function isQuestResponsePath(pathname) {
 		return pathname === "/api/quests";
 	}
+	function isStaffQuestionResolutionPath(method, pathname) {
+		return method === "POST" && /^\/api\/moderation\/(?:answer|dismiss)-toast-question\/[^/]+$/.test(pathname ?? "");
+	}
 	function isCompetitionResponsePath(pathname) {
 		return pathname === "/api/guild/tournaments/current" || pathname === "/api/derby/current" || pathname === "/api/guild/my-guild" || /^\/api\/guild\/tournaments\/[^/]+\/standings$/.test(pathname ?? "");
 	}
@@ -2152,6 +2340,15 @@
 		let body = init?.body;
 		if (body === void 0 && request) body = await request.clone().text();
 		return normalizeRequestBody(body);
+	}
+	async function collectStaffQuestionResponse(response, onStaffQuestion) {
+		if (!response.ok || typeof onStaffQuestion !== "function") return;
+		try {
+			const pending = (await response.json())?.pending;
+			onStaffQuestion(pending?.id != null && typeof pending.question === "string" ? pending : null);
+		} catch (error) {
+			console.warn("[自动过验证] 无法读取 Staff Question 响应：", error);
+		}
 	}
 	async function collectCastResponse(response, onCastResult, onGameStateResponse) {
 		if (!response.ok) return;
@@ -2226,16 +2423,16 @@
 	async function sendServerHumanVerificationNotification(pushKey) {
 		const currentPushKey = pushKey.trim();
 		if (!currentPushKey) {
-			console.info("[自动抛竿] 未设置消息推送 Key，跳过验证码通知。可前往 https://sct.ftqq.com/ 获取 SendKey。");
+			console.info("[自动抛竿] 未设置消息推送 Key，跳过验证通知。可前往 https://sct.ftqq.com/ 获取 SendKey。");
 			return;
 		}
 		const url = `https://sctapi.ftqq.com/${encodeURIComponent(currentPushKey)}.send?title=${encodeURIComponent(HUMAN_VERIFICATION_MESSAGE)}`;
 		try {
 			const response = await window.fetch(url);
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			console.info("[自动抛竿] 验证码通知已发送。");
+			console.info("[自动抛竿] 验证通知已发送。");
 		} catch (error) {
-			console.warn("[自动抛竿] 验证码通知发送失败：", error);
+			console.warn("[自动抛竿] 验证通知发送失败：", error);
 		}
 	}
 	function sendBrowserHumanVerificationNotification() {
@@ -2244,11 +2441,11 @@
 			return;
 		}
 		if (window.Notification.permission !== "granted") {
-			console.warn("[自动抛竿] 浏览器通知尚未授权，跳过验证码通知。");
+			console.warn("[自动抛竿] 浏览器通知尚未授权，跳过验证通知。");
 			return;
 		}
 		try {
-			const notification = new window.Notification("Arcane Angler 人机验证", {
+			const notification = new window.Notification("Arcane Angler 验证提醒", {
 				body: HUMAN_VERIFICATION_MESSAGE,
 				tag: "arcane-angler-human-verification"
 			});
@@ -2256,9 +2453,9 @@
 				window.focus();
 				notification.close();
 			};
-			console.info("[自动抛竿] 浏览器验证码通知已发送。");
+			console.info("[自动抛竿] 浏览器验证通知已发送。");
 		} catch (error) {
-			console.warn("[自动抛竿] 浏览器验证码通知发送失败：", error);
+			console.warn("[自动抛竿] 浏览器验证通知发送失败：", error);
 		}
 	}
 	async function requestBrowserNotificationPermission$1() {
@@ -2310,7 +2507,7 @@
 		function shouldEnterRest(currentLoopId) {
 			const { enabled, loopId } = getState();
 			const captcha = getCaptcha();
-			return enabled && currentLoopId === loopId && !captcha.isBypassInProgress() && !captcha.hasActiveChallenge() && isWorkExpired();
+			return enabled && currentLoopId === loopId && !captcha.isBypassInProgress() && !captcha.hasActiveVerification() && isWorkExpired();
 		}
 		async function waitForWork(currentLoopId) {
 			if (!getState().scheduleSettings.enabled) return true;
@@ -2326,7 +2523,7 @@
 					if (!isWorkExpired()) return true;
 					startPhase("rest");
 				}
-				if (getCaptcha().stopIfChallengeFound()) return false;
+				if (getCaptcha().stopIfVerificationFound()) return false;
 				const remaining = endsAt - now();
 				if (remaining <= 0) {
 					if (await prepareForWork?.() === false) {
@@ -4043,6 +4240,7 @@
 	var autoBoss = null;
 	var forceNextAutoBaitCheck = false;
 	var pendingCaptchaChallenge = null;
+	var pendingStaffQuestion = null;
 	var pendingCompetitionResponses = new Map();
 	var pendingQuestResponse = null;
 	var pendingWeatherResponses = new Map();
@@ -4101,6 +4299,14 @@
 		onQuestResponse(response) {
 			if (autoBiome) autoBiome.handleQuestResponse(response);
 			else pendingQuestResponse = response;
+		},
+		onStaffQuestion(question) {
+			if (captcha) captcha.handleStaffQuestion(question);
+			else pendingStaffQuestion = question;
+		},
+		onStaffQuestionResolved() {
+			pendingStaffQuestion = null;
+			captcha?.clearStaffQuestion();
 		},
 		onWeatherResponse(response) {
 			handleWeatherResponse(response);
@@ -4245,7 +4451,7 @@
 		});
 		await sleep(60);
 		if (!enabled || currentLoopId !== loopId || !button.isConnected || schedule.isWorkExpired()) return false;
-		if (captcha.stopIfChallengeFound()) return false;
+		if (captcha.stopIfVerificationFound()) return false;
 		const rect = button.getBoundingClientRect();
 		const clientX = rect.left + rect.width * (.42 + Math.random() * .16);
 		const clientY = rect.top + rect.height * (.38 + Math.random() * .24);
@@ -4315,7 +4521,7 @@
 	async function waitForButton(currentLoopId) {
 		const cooldownWatchdog = createCooldownWatchdog(CONFIG.cooldownReloadDelay);
 		while (enabled && currentLoopId === loopId) {
-			if (captcha.stopIfChallengeFound()) return null;
+			if (captcha.stopIfVerificationFound()) return null;
 			if (schedule.isWorkExpired()) return null;
 			if (reloadIfFishingIdle()) return null;
 			const button = findCastButton();
@@ -4337,7 +4543,7 @@
 	async function waitWithCountdown(milliseconds, isLongDelay, currentLoopId) {
 		const endTime = Date.now() + milliseconds;
 		while (enabled && currentLoopId === loopId) {
-			if (captcha.stopIfChallengeFound()) return false;
+			if (captcha.stopIfVerificationFound()) return false;
 			if (schedule.isWorkExpired()) return false;
 			if (reloadIfFishingIdle()) return false;
 			const remaining = endTime - Date.now();
@@ -4364,7 +4570,7 @@
 	async function waitForGameAutoFishingWork(currentLoopId) {
 		while (enabled && currentLoopId === loopId && gameAutoFishingSettings.enabled) {
 			if (schedule.isWorkExpired()) return;
-			if (captcha.stopIfChallengeFound()) return;
+			if (captcha.stopIfVerificationFound()) return;
 			const state = await gameAutoFishing.ensureActive();
 			panel.setStatus(state.active ? "游戏内置自动钓鱼运行中" : state.available ? "等待游戏内置自动钓鱼可用" : "等待进入钓鱼页面");
 			panel.setNextDelay(state.active ? "本轮结束后自动续期" : "自动重试启动");
@@ -4408,7 +4614,7 @@
 				console.info(`[自动抛竿] 第 ${clickCount} 次点击`, latestButton);
 				await sleep(150);
 			} else {
-				if (captcha.isBypassInProgress() || captcha.stopIfChallengeFound()) return;
+				if (captcha.isBypassInProgress() || captcha.stopIfVerificationFound()) return;
 				if (schedule.isWorkExpired()) continue;
 				panel.setStatus("本次未点击，重新等待");
 				await sleep(500);
@@ -4734,6 +4940,10 @@
 		if (pendingCaptchaChallenge) {
 			captcha.handleChallenge(pendingCaptchaChallenge);
 			pendingCaptchaChallenge = null;
+		}
+		if (pendingStaffQuestion) {
+			captcha.handleStaffQuestion(pendingStaffQuestion);
+			pendingStaffQuestion = null;
 		}
 		setEnabled(enabled);
 		autoBiome.start();

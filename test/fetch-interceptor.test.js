@@ -6,6 +6,7 @@ import {
     isCompetitionResponsePath,
     isGameStateResponsePath,
     isQuestResponsePath,
+    isStaffQuestionResolutionPath,
     isWeatherResponsePath,
     modifyCastRequest,
     normalizeRequestBody,
@@ -58,6 +59,85 @@ test('会识别角色状态和天气响应路径', () => {
     assert.equal(isWeatherResponsePath('/api/game/weather/stream'), false);
     assert.equal(isQuestResponsePath('/api/quests'), true);
     assert.equal(isQuestResponsePath('/api/quests/daily'), false);
+    assert.equal(
+        isStaffQuestionResolutionPath(
+            'POST',
+            '/api/moderation/answer-toast-question/42',
+        ),
+        true,
+    );
+    assert.equal(
+        isStaffQuestionResolutionPath(
+            'POST',
+            '/api/moderation/dismiss-toast-question/42',
+        ),
+        true,
+    );
+    assert.equal(
+        isStaffQuestionResolutionPath(
+            'GET',
+            '/api/moderation/answer-toast-question/42',
+        ),
+        false,
+    );
+});
+
+test('fetch hook 会捕获和清理 Staff Question', async () => {
+    const previousWindow = globalThis.window;
+    const questions = [];
+    let resolvedCount = 0;
+
+    globalThis.window = {
+        async fetch(input, init) {
+            const method = init?.method ?? 'GET';
+
+            return method === 'GET'
+                ? new Response(
+                      JSON.stringify({
+                          pending: {
+                              expires_at: '2026-07-19T12:00:00.000Z',
+                              id: 42,
+                              question: 'How much is 3x7?',
+                          },
+                      }),
+                  )
+                : new Response(JSON.stringify({ success: true }));
+        },
+        location: {
+            href: 'https://arcaneangler.com/',
+        },
+    };
+
+    try {
+        installFetchInterceptor({
+            onStaffQuestion(question) {
+                questions.push(question);
+            },
+            onStaffQuestionResolved() {
+                resolvedCount += 1;
+            },
+        });
+
+        await window.fetch(
+            'https://arcaneangler.com/api/moderation/pending-toast-question',
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(questions, [
+            {
+                expires_at: '2026-07-19T12:00:00.000Z',
+                id: 42,
+                question: 'How much is 3x7?',
+            },
+        ]);
+
+        await window.fetch(
+            'https://arcaneangler.com/api/moderation/answer-toast-question/42',
+            { method: 'POST' },
+        );
+        assert.equal(resolvedCount, 1);
+    } finally {
+        globalThis.window = previousWindow;
+    }
 });
 
 test('fetch hook 会读取比赛轮询响应且不改变原响应', async () => {
