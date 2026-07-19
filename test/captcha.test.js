@@ -85,6 +85,7 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
         captchaObserveDelayMin: CONFIG.captchaObserveDelayMin,
     };
     const answerCalls = [];
+    const verificationResults = [];
     let enabled = true;
     let resume;
     const resumed = new Promise((resolve) => {
@@ -143,6 +144,9 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
                 };
             },
             notify() {},
+            onVerificationResult(result) {
+                verificationResults.push(result);
+            },
             setEnabled(nextEnabled) {
                 enabled = nextEnabled;
 
@@ -163,6 +167,9 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
         assert.deepEqual(answerCalls, [[42, '4', 5]]);
         assert.equal(controller.hasActiveVerification(), false);
         assert.equal(popup.isConnected, false);
+        assert.equal(verificationResults.length, 1);
+        assert.equal(verificationResults[0].success, true);
+        assert.equal(Number.isFinite(verificationResults[0].timestamp), true);
     } finally {
         Object.assign(CONFIG, previousDelays);
         globalThis.document = previousDocument;
@@ -175,6 +182,7 @@ test('无法可靠回答 Staff Question 时停止并通知用户', async () => {
     const previousWindow = globalThis.window;
     let enabled = true;
     let notificationCount = 0;
+    const verificationResults = [];
     let stop;
     const stopped = new Promise((resolve) => {
         stop = resolve;
@@ -199,6 +207,9 @@ test('无法可靠回答 Staff Question 时停止并通知用户', async () => {
             notify() {
                 notificationCount += 1;
             },
+            onVerificationResult(result) {
+                verificationResults.push(result);
+            },
             setEnabled(nextEnabled) {
                 enabled = nextEnabled;
 
@@ -219,6 +230,8 @@ test('无法可靠回答 Staff Question 时停止并通知用户', async () => {
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.equal(notificationCount, 1);
         assert.equal(enabled, false);
+        assert.equal(verificationResults.length, 1);
+        assert.equal(verificationResults[0].success, false);
     } finally {
         globalThis.window = previousWindow;
     }

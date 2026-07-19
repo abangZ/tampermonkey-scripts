@@ -282,6 +282,7 @@ export function findCaptchaGapFromPixels(imageData, pieceDimensions) {
 export function createCaptchaController({
     getState,
     notify,
+    onVerificationResult,
     setEnabled,
     setNextDelay,
     setStatus,
@@ -290,6 +291,17 @@ export function createCaptchaController({
     let activeStaffQuestion = null;
     let captchaBypassAttemptId = 0;
     let captchaBypassInProgress = false;
+
+    function reportVerificationResult(success) {
+        try {
+            onVerificationResult?.({
+                success: Boolean(success),
+                timestamp: Date.now(),
+            });
+        } catch (error) {
+            console.warn('[自动过验证] 无法记录验证结果：', error);
+        }
+    }
 
     /**
      * 通过可见标题文字判断页面是否出现人机验证。
@@ -853,6 +865,10 @@ export function createCaptchaController({
                     attemptId === captchaBypassAttemptId
                 );
             });
+
+            if (bypassSucceeded) {
+                reportVerificationResult(true);
+            }
         } catch (error) {
             const state = getState();
 
@@ -868,6 +884,7 @@ export function createCaptchaController({
                 activeCaptchaChallenge = null;
             }
 
+            reportVerificationResult(false);
             setEnabled(false);
             setStatus('人机验证绕过失败，已停止');
             setNextDelay('请手动完成验证');
@@ -916,6 +933,10 @@ export function createCaptchaController({
                     attemptId === captchaBypassAttemptId
                 );
             });
+
+            if (bypassSucceeded) {
+                reportVerificationResult(true);
+            }
         } catch (error) {
             const state = getState();
 
@@ -931,6 +952,7 @@ export function createCaptchaController({
                 activeStaffQuestion = null;
             }
 
+            reportVerificationResult(false);
             setEnabled(false);
             setStatus('Staff Question 自动处理失败，已停止');
             setNextDelay('请手动完成验证');

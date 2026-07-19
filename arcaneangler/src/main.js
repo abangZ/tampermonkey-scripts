@@ -42,6 +42,7 @@ import {
     formatScheduleDuration,
 } from './schedule.js';
 import {
+    addVerificationHistoryEntry,
     loadAutoBaitSettings,
     loadAutoBiomeSettings,
     loadAutoBossSettings,
@@ -53,6 +54,7 @@ import {
     loadNotificationMode,
     loadPushKey,
     loadScheduleSettings,
+    loadVerificationHistory,
     normalizeAutoBaitGrade,
     normalizeAutoBaitMinimumQuantity,
     normalizeAutoBaitPurchaseQuantity,
@@ -70,6 +72,7 @@ import {
     saveNotificationMode,
     savePushKey,
     saveScheduleSettings,
+    saveVerificationHistory,
 } from './storage.js';
 import { createPanelController } from './ui/panel.js';
 import { isDisplayed, isVisible, normalizeText } from './utils/dom.js';
@@ -77,6 +80,7 @@ import { randomInt, sleep } from './utils/time.js';
 
 let enabled = loadEnabled();
 let captchaBypassEnabled = loadCaptchaBypassEnabled();
+let verificationHistory = loadVerificationHistory();
 let pushKey = loadPushKey();
 let notificationMode = loadNotificationMode();
 let clickDelaySettings = loadClickDelaySettings();
@@ -210,6 +214,15 @@ function setPushKey(nextPushKey) {
     savePushKey(pushKey);
 }
 
+function recordVerificationResult(entry) {
+    verificationHistory = addVerificationHistoryEntry(
+        verificationHistory,
+        entry,
+    );
+    saveVerificationHistory(verificationHistory);
+    panel?.renderVerificationHistory();
+}
+
 async function requestBrowserNotificationPermission() {
     await requestNotificationPermission();
     panel.renderNotificationSettings();
@@ -228,6 +241,7 @@ function resetEarningsStats() {
 function getPanelState() {
     return {
         captchaBypassEnabled,
+        verificationHistory,
         clickDelaySettings,
         clickCount,
         earningsStats,
@@ -1218,6 +1232,7 @@ function initialize() {
                 pushKey,
             });
         },
+        onVerificationResult: recordVerificationResult,
         setEnabled,
         setNextDelay: panel.setNextDelay,
         setStatus: panel.setStatus,

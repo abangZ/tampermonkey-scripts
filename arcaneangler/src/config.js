@@ -42,6 +42,8 @@ export const CLICK_DELAY_SETTINGS_STORAGE_KEY =
     'arcane-angler-click-delay-settings-v1';
 export const CAPTCHA_BYPASS_STORAGE_KEY =
     'arcane-angler-captcha-bypass-enabled-v1';
+export const VERIFICATION_HISTORY_STORAGE_KEY =
+    'arcane-angler-verification-history-v1';
 export const PUSH_KEY_STORAGE_KEY = 'arcane-angler-push-key-v1';
 export const NOTIFICATION_MODE_STORAGE_KEY =
     'arcane-angler-notification-mode-v1';

@@ -540,6 +540,20 @@ export function createPanelController({
         </details>
 
         <details class="settings-section">
+          <summary class="settings-title">过验证记录</summary>
+
+          <div
+            id="verification-history"
+            class="verification-history"
+            aria-live="polite"
+          ></div>
+
+          <div class="field-help">
+            记录最近 5 次自动验证完成时间和结果，刷新页面后仍会保留。
+          </div>
+        </details>
+
+        <details class="settings-section">
           <summary class="settings-title">自动换地图</summary>
 
           <div class="field-label priority-heading">选图优先级</div>
@@ -927,6 +941,9 @@ export function createPanelController({
             captchaBypassToggle: shadowRoot.querySelector(
                 '#captcha-bypass-toggle',
             ),
+            verificationHistory: shadowRoot.querySelector(
+                '#verification-history',
+            ),
             controlTab: shadowRoot.querySelector('#control-tab'),
             earningsTab: shadowRoot.querySelector('#earnings-tab'),
             settingsTab: shadowRoot.querySelector('#settings-tab'),
@@ -1210,6 +1227,7 @@ export function createPanelController({
         renderAutoBiomeSettings();
         renderAutoBossSettings();
         renderCaptchaBypassToggle();
+        renderVerificationHistory();
         renderClickDelaySettings();
         renderGameAutoFishingSettings();
         renderIdleReloadSettings();
@@ -1281,6 +1299,7 @@ export function createPanelController({
             renderIdleReloadSettings();
             renderNotificationSettings();
             renderScheduleSettings();
+            renderVerificationHistory();
         }
     }
 
@@ -1958,6 +1977,52 @@ export function createPanelController({
         );
     }
 
+    function renderVerificationHistory() {
+        if (!ui?.verificationHistory) {
+            return;
+        }
+
+        const { verificationHistory = [] } = getState();
+
+        ui.verificationHistory.replaceChildren();
+
+        if (verificationHistory.length === 0) {
+            const empty = document.createElement('div');
+
+            empty.className = 'verification-history-empty';
+            empty.textContent = '暂无验证记录';
+            ui.verificationHistory.appendChild(empty);
+            return;
+        }
+
+        const formatter = new Intl.DateTimeFormat('zh-CN', {
+            day: '2-digit',
+            hour: '2-digit',
+            hour12: false,
+            minute: '2-digit',
+            month: '2-digit',
+            second: '2-digit',
+            year: 'numeric',
+        });
+
+        for (const entry of verificationHistory) {
+            const item = document.createElement('div');
+            const time = document.createElement('time');
+            const status = document.createElement('span');
+            const date = new Date(entry.timestamp);
+
+            item.className = 'verification-history-item';
+            time.className = 'verification-history-time';
+            time.dateTime = date.toISOString();
+            time.textContent = formatter.format(date);
+            status.className = 'verification-history-status';
+            status.dataset.success = entry.success ? 'true' : 'false';
+            status.textContent = entry.success ? '成功' : '失败';
+            item.append(time, status);
+            ui.verificationHistory.appendChild(item);
+        }
+    }
+
     createPanel();
 
     return {
@@ -1973,6 +2038,7 @@ export function createPanelController({
         renderScheduleSettings,
         renderScheduleStatus,
         renderToggle,
+        renderVerificationHistory,
         setNextDelay,
         setStatus,
         updateClickCount,

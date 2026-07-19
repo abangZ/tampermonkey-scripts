@@ -11,6 +11,7 @@ import {
     PUSH_KEY_STORAGE_KEY,
     SCHEDULE_SETTINGS_STORAGE_KEY,
     STORAGE_KEY,
+    VERIFICATION_HISTORY_STORAGE_KEY,
 } from './config.js';
 import {
     DEFAULT_CLICK_DELAY_SETTINGS,
@@ -25,6 +26,7 @@ import {
 export const AUTO_BIOME_WEIGHTS = [0, 5, 10];
 export const AUTO_BAIT_GRADES = ['default', 'low', 'medium', 'high', 'super'];
 export const AUTO_BAIT_PURCHASE_QUANTITIES = [100, 1000];
+export const VERIFICATION_HISTORY_LIMIT = 5;
 
 export function loadClickDelaySettings() {
     try {
@@ -123,6 +125,62 @@ export function saveCaptchaBypassEnabled(value) {
         localStorage.setItem(CAPTCHA_BYPASS_STORAGE_KEY, value ? '1' : '0');
     } catch (error) {
         console.warn('[自动抛竿] 无法保存自动过验证设置：', error);
+    }
+}
+
+export function normalizeVerificationHistory(history) {
+    if (!Array.isArray(history)) {
+        return [];
+    }
+
+    return history
+        .map((entry) => {
+            const timestamp = Number(entry?.timestamp);
+
+            if (
+                !Number.isFinite(timestamp) ||
+                timestamp <= 0 ||
+                typeof entry?.success !== 'boolean'
+            ) {
+                return null;
+            }
+
+            return {
+                success: entry.success,
+                timestamp: Math.floor(timestamp),
+            };
+        })
+        .filter(Boolean)
+        .sort((left, right) => right.timestamp - left.timestamp)
+        .slice(0, VERIFICATION_HISTORY_LIMIT);
+}
+
+export function addVerificationHistoryEntry(history, entry) {
+    return normalizeVerificationHistory([
+        entry,
+        ...normalizeVerificationHistory(history),
+    ]);
+}
+
+export function loadVerificationHistory() {
+    try {
+        return normalizeVerificationHistory(
+            JSON.parse(localStorage.getItem(VERIFICATION_HISTORY_STORAGE_KEY)),
+        );
+    } catch (error) {
+        console.warn('[自动过验证] 无法读取验证记录：', error);
+        return [];
+    }
+}
+
+export function saveVerificationHistory(history) {
+    try {
+        localStorage.setItem(
+            VERIFICATION_HISTORY_STORAGE_KEY,
+            JSON.stringify(normalizeVerificationHistory(history)),
+        );
+    } catch (error) {
+        console.warn('[自动过验证] 无法保存验证记录：', error);
     }
 }
 

@@ -232,6 +232,49 @@
     transform: rotate(90deg);
 }
 
+.verification-history {
+    display: grid;
+    gap: 6px;
+    margin-top: 10px;
+}
+
+.verification-history-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    min-height: 32px;
+    padding: 6px 8px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 7px;
+    background: rgba(255, 255, 255, 0.04);
+}
+
+.verification-history-time,
+.verification-history-empty {
+    color: rgba(255, 255, 255, 0.62);
+    font-size: 11px;
+}
+
+.verification-history-empty {
+    padding: 8px 0;
+    text-align: center;
+}
+
+.verification-history-status {
+    flex: 0 0 auto;
+    font-size: 11px;
+    font-weight: 700;
+}
+
+.verification-history-status[data-success='true'] {
+    color: #6ee7a2;
+}
+
+.verification-history-status[data-success='false'] {
+    color: #ff9a9a;
+}
+
 .priority-heading {
     margin-top: 12px;
 }

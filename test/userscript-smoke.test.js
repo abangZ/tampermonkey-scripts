@@ -62,6 +62,16 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
             'utf8',
         );
 
+        window.localStorage.setItem(
+            'arcane-angler-verification-history-v1',
+            JSON.stringify([
+                { success: true, timestamp: Date.UTC(2026, 6, 19, 12, 0, 0) },
+                {
+                    success: false,
+                    timestamp: Date.UTC(2026, 6, 19, 11, 30, 0),
+                },
+            ]),
+        );
         window.document.body.remove();
         Function(userscript)();
 
@@ -270,7 +280,24 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         );
         assert.equal(
             host.shadowRoot.querySelectorAll('details.settings-section').length,
-            7,
+            8,
+        );
+        const verificationHistoryItems = host.shadowRoot.querySelectorAll(
+            '.verification-history-item',
+        );
+
+        assert.equal(verificationHistoryItems.length, 2);
+        assert.equal(
+            verificationHistoryItems[0].querySelector(
+                '.verification-history-status',
+            ).textContent,
+            '成功',
+        );
+        assert.equal(
+            verificationHistoryItems[1].querySelector(
+                '.verification-history-status',
+            ).textContent,
+            '失败',
         );
         assert.equal(
             host.shadowRoot.querySelector('details.settings-section').open,
