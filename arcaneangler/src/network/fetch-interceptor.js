@@ -31,7 +31,7 @@ export function installFetchInterceptor({
         const requestPayloadPromise =
             method === 'POST' &&
             isGameStateResponsePath(method, url?.pathname) &&
-            url?.pathname !== '/api/game/cast'
+            !isCastResultResponsePath(method, url?.pathname)
                 ? readRequestPayload(request, init).catch((error) => {
                       console.warn('[游戏状态] 无法读取请求参数：', error);
                       return undefined;
@@ -56,11 +56,29 @@ export function installFetchInterceptor({
             try {
                 void collectCastResponse(
                     response.clone(),
+                    url.pathname,
                     onCastResult,
                     onGameStateResponse,
                 );
             } catch (error) {
                 console.warn('[收益统计] 无法复制抛竿响应：', error);
+            }
+
+            return response;
+        }
+
+        if (method === 'POST' && url?.pathname === '/api/game/auto-cast') {
+            const response = await originalFetch.apply(this, arguments);
+
+            try {
+                void collectCastResponse(
+                    response.clone(),
+                    url.pathname,
+                    onCastResult,
+                    onGameStateResponse,
+                );
+            } catch (error) {
+                console.warn('[收益统计] 无法复制内置自动钓鱼响应：', error);
             }
 
             return response;
@@ -187,11 +205,19 @@ export function isGameStateResponsePath(method, pathname) {
         method === 'POST' &&
         [
             '/api/game/cast',
+            '/api/game/auto-cast',
             '/api/game/buy-bait',
             '/api/game/change-biome',
             '/api/game/equip-bait',
             '/api/game/equip-rod',
         ].includes(pathname)
+    );
+}
+
+export function isCastResultResponsePath(method, pathname) {
+    return (
+        method === 'POST' &&
+        (pathname === '/api/game/cast' || pathname === '/api/game/auto-cast')
     );
 }
 
@@ -336,6 +362,7 @@ async function collectStaffQuestionResponse(response, onStaffQuestion) {
 
 async function collectCastResponse(
     response,
+    pathname,
     onCastResult,
     onGameStateResponse,
 ) {
@@ -346,20 +373,22 @@ async function collectCastResponse(
     try {
         const payload = await response.json();
 
+        const result = payload?.result ?? payload;
+
         if (
             payload?.success !== true ||
-            !payload.result ||
-            typeof payload.result !== 'object'
+            !result ||
+            typeof result !== 'object'
         ) {
             return;
         }
 
         onGameStateResponse?.({
             method: 'POST',
-            pathname: '/api/game/cast',
+            pathname,
             payload,
         });
-        onCastResult?.(payload.result);
+        onCastResult?.(result);
     } catch (error) {
         console.warn('[收益统计] 无法读取抛竿响应：', error);
     }

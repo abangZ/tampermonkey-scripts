@@ -75,16 +75,46 @@ export function dismissGameAutoFishingSummary(root = document) {
     return false;
 }
 
+export function dismissGameAutoFishingCompletion(root = document) {
+    const overlays = root.querySelectorAll('div.fixed.inset-0');
+
+    for (const overlay of overlays) {
+        const text = normalizeText(overlay.textContent);
+        const isCompletion =
+            /auto-cast complete\s*:\s*all stamina consumed!?/i.test(text) ||
+            /自动(?:抛竿|钓鱼)完成\s*[：:]\s*体力已耗尽[！!]?/.test(text);
+
+        if (!isCompletion) {
+            continue;
+        }
+
+        const buttons = overlay.querySelectorAll('button');
+
+        for (const button of buttons) {
+            const buttonText = normalizeText(button.textContent);
+
+            if (isDisplayed(button) && /^(?:ok|确定)$/i.test(buttonText)) {
+                button.click();
+                return true;
+            }
+        }
+    }
+
+    return false;
+}
+
 export function createGameAutoFishingController({
     now = Date.now,
     onStateChange,
     prepareStart,
     retryInterval = CONFIG.gameAutoFishingRetryInterval,
+    staminaRetryInterval = CONFIG.gameAutoFishingStaminaRetryInterval,
     shouldStart = () => true,
 } = {}) {
     let mayBeActive = false;
     let preparationRequired = true;
     let startPendingUntil = 0;
+    let staminaRetryUntil = 0;
     let status = '未启用';
     let wasActive = false;
 
@@ -118,8 +148,34 @@ export function createGameAutoFishingController({
     }
 
     async function ensureActive() {
+        if (dismissGameAutoFishingCompletion()) {
+            mayBeActive = false;
+            preparationRequired = true;
+            startPendingUntil = 0;
+            staminaRetryUntil = now() + staminaRetryInterval;
+            wasActive = false;
+            setStatus('体力已耗尽，稍后自动续期');
+
+            return {
+                ...getGameAutoFishingState(),
+                active: false,
+                staminaExhausted: true,
+            };
+        }
+
         dismissGameAutoFishingSummary();
         let state = observe();
+
+        if (now() < staminaRetryUntil) {
+            setStatus('体力已耗尽，稍后自动续期');
+            return {
+                ...state,
+                active: false,
+                staminaExhausted: true,
+            };
+        }
+
+        staminaRetryUntil = 0;
 
         if (state.active) {
             setStatus('运行中，次数结束后自动续期');
@@ -201,8 +257,10 @@ export function createGameAutoFishingController({
             // 无论是主动停止还是次数自然耗尽，都可能留下汇总遮罩。
             // 恢复脚本点击前先关闭，避免遮挡抛竿按钮。
             dismissGameAutoFishingSummary();
+            dismissGameAutoFishingCompletion();
 
             mayBeActive = false;
+            staminaRetryUntil = 0;
             setStatus('已停止');
             return true;
         }

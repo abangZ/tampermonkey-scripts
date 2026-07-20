@@ -134,9 +134,12 @@ export function createGameStateStore() {
             return { changed: false, shouldEvaluate: false };
         }
 
-        if (pathname === '/api/game/cast') {
+        if (
+            pathname === '/api/game/cast' ||
+            pathname === '/api/game/auto-cast'
+        ) {
             return {
-                changed: handleCastResult(payload?.result),
+                changed: handleCastResult(payload?.result ?? payload),
                 shouldEvaluate: false,
             };
         }

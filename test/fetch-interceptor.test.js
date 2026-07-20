@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
     installFetchInterceptor,
+    isCastResultResponsePath,
     isCompetitionResponsePath,
     isGameStateResponsePath,
     isQuestResponsePath,
@@ -89,7 +90,10 @@ test('会识别角色状态和天气响应路径', () => {
     assert.equal(isGameStateResponsePath('GET', '/api/player/data'), true);
     assert.equal(isGameStateResponsePath('GET', '/api/boats/my-boat'), true);
     assert.equal(isGameStateResponsePath('POST', '/api/game/buy-bait'), true);
+    assert.equal(isGameStateResponsePath('POST', '/api/game/auto-cast'), true);
     assert.equal(isGameStateResponsePath('GET', '/api/game/buy-bait'), false);
+    assert.equal(isCastResultResponsePath('POST', '/api/game/auto-cast'), true);
+    assert.equal(isCastResultResponsePath('GET', '/api/game/auto-cast'), false);
     assert.equal(isWeatherResponsePath('/api/game/weather'), true);
     assert.equal(isWeatherResponsePath('/api/game/weather/4'), true);
     assert.equal(isWeatherResponsePath('/api/game/weather/stream'), false);
@@ -116,6 +120,60 @@ test('会识别角色状态和天气响应路径', () => {
         ),
         false,
     );
+});
+
+test('fetch hook 会读取内置自动钓鱼的顶层鱼获响应', async () => {
+    const previousWindow = globalThis.window;
+    const castResults = [];
+    const stateResponses = [];
+    const payload = {
+        baitQuantity: 19,
+        currentBiome: 4,
+        equippedBait: 'bait_4_high',
+        newStamina: 57,
+        success: true,
+    };
+
+    globalThis.window = {
+        async fetch() {
+            return new Response(JSON.stringify(payload));
+        },
+        location: {
+            href: 'https://arcaneangler.com/',
+        },
+    };
+
+    try {
+        installFetchInterceptor({
+            onCastResult(result) {
+                castResults.push(result);
+            },
+            onGameStateResponse(response) {
+                stateResponses.push(response);
+            },
+        });
+
+        const response = await window.fetch(
+            'https://arcaneangler.com/api/game/auto-cast',
+            {
+                body: JSON.stringify({ sessionId: 'test-session' }),
+                method: 'POST',
+            },
+        );
+
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.deepEqual(await response.json(), payload);
+        assert.deepEqual(castResults, [payload]);
+        assert.deepEqual(stateResponses, [
+            {
+                method: 'POST',
+                pathname: '/api/game/auto-cast',
+                payload,
+            },
+        ]);
+    } finally {
+        globalThis.window = previousWindow;
+    }
 });
 
 test('fetch hook 会捕获和清理 Staff Question', async () => {

@@ -245,6 +245,11 @@ test('游戏内置自动钓鱼使用独立鱼饵并在启动前补足库存', as
             },
         },
         BAITS: [{ id: 'bait_4_high', name: 'Test Bait', price: 100 }],
+        GameHelpers: {
+            getTotalStats() {
+                return { stamina: 58 };
+            },
+        },
     };
 
     try {
@@ -254,7 +259,7 @@ test('游戏内置自动钓鱼使用独立鱼饵并在启动前补足库存', as
                 return {
                     autoBaitSettings: {
                         enabled: true,
-                        minimumQuantity: 100,
+                        minimumQuantity: 20,
                         purchaseQuantity: 100,
                     },
                     autoBiomeCompetitionBiomes: {},

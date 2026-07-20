@@ -46,6 +46,38 @@ test('角色数据响应会建立完整状态，抛竿响应会增量更新', ()
     });
 });
 
+test('内置自动钓鱼的顶层响应会同步鱼饵库存和装备状态', () => {
+    const store = createGameStateStore();
+
+    store.handleResponse({
+        method: 'GET',
+        pathname: '/api/player/data',
+        payload: {
+            baitInventory: { bait_2_high: 20 },
+            currentBiome: 2,
+            equippedBait: 'bait_2_high',
+        },
+    });
+    store.handleResponse({
+        method: 'POST',
+        pathname: '/api/game/auto-cast',
+        payload: {
+            baitQuantity: 19,
+            currentBiome: 2,
+            equippedBait: 'bait_2_high',
+            newStamina: 57,
+            success: true,
+        },
+    });
+
+    assert.deepEqual(store.getPlayerSnapshot(), {
+        baitInventory: { bait_2_high: 19 },
+        currentBiome: 2,
+        equippedBait: 'bait_2_high',
+        stamina: 57,
+    });
+});
+
 test('切图、装备和买饵响应会同步本地角色状态', () => {
     const store = createGameStateStore();
 

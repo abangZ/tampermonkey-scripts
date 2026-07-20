@@ -35,6 +35,7 @@ export const CONFIG = {
     // 游戏内置自动钓鱼状态检查与启动失败后的重试间隔
     gameAutoFishingPollInterval: 500,
     gameAutoFishingRetryInterval: 5000,
+    gameAutoFishingStaminaRetryInterval: 60000,
 };
 
 export const STORAGE_KEY = 'arcane-angler-auto-cast-enabled-v1';

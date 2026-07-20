@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.13.0
+// @version      2.13.1
 // @author       Codex
 // @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -68,6 +68,15 @@
 	function shouldPurchaseBait(quantity, minimumQuantity, baitGrade) {
 		return baitGrade !== "default" && normalizeQuantity$1(quantity) < normalizeQuantity$1(minimumQuantity);
 	}
+	function getGameAutoFishingBaitMinimumQuantity(player) {
+		let totalStats = null;
+		try {
+			totalStats = window.GameHelpers?.getTotalStats?.(player, null) ?? null;
+		} catch (error) {
+			console.warn("[自动买鱼饵] 无法计算内置自动钓鱼所需体力：", error);
+		}
+		return Math.max(1, normalizeQuantity$1(totalStats?.stamina ?? player?.stats?.stamina ?? player?.stamina));
+	}
 	function getBaitById$1(baitId) {
 		if (typeof window.getBaitById === "function") try {
 			const bait = window.getBaitById(baitId);
@@ -118,7 +127,7 @@
 			const result = await api.equipBait(baitId);
 			if (result?.success !== true) throw new Error(result?.message ?? `无法装备${baitLabel}`);
 		}
-		async function evaluate({ baitGrade: requestedBaitGrade = null, biomeId: requestedBiomeId = null, contextLabel: requestedContextLabel = null, force = false }) {
+		async function evaluate({ baitGrade: requestedBaitGrade = null, biomeId: requestedBiomeId = null, contextLabel: requestedContextLabel = null, force = false, minimumQuantity: requestedMinimumQuantity = null }) {
 			const state = getState();
 			const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = state;
 			if (!autoBaitSettings.enabled) {
@@ -164,6 +173,7 @@
 				}
 				const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
 				const contextLabel = requestedContextLabel ?? (state.autoBiomeWeatherByBiome?.[biomeId]?.weather === GOLD_BREEZE_WEATHER$1 ? "金风" : AUTO_BAIT_CONTEXT_LABELS[baitContext]);
+				const minimumQuantity = Math.max(normalizeQuantity$1(autoBaitSettings.minimumQuantity), normalizeQuantity$1(requestedMinimumQuantity));
 				lastCheckedAt = Date.now();
 				if (baitGrade === "default") {
 					await equipBait(api, player, baitId, baitLabel);
@@ -178,11 +188,10 @@
 				}
 				let quantity = normalizeQuantity$1(player?.baitInventory?.[baitId]);
 				const pendingPurchaseQuantity = pendingPurchaseQuantities.get(baitId);
-				const purchaseResultPending = pendingPurchaseQuantity !== void 0 && quantity < pendingPurchaseQuantity;
-				if (purchaseResultPending) quantity = pendingPurchaseQuantity;
+				if (pendingPurchaseQuantity !== void 0 && quantity < pendingPurchaseQuantity) quantity = pendingPurchaseQuantity;
 				else if (pendingPurchaseQuantity !== void 0) pendingPurchaseQuantities.delete(baitId);
 				let purchased = false;
-				if (!purchaseResultPending && shouldPurchaseBait(quantity, autoBaitSettings.minimumQuantity, baitGrade)) {
+				if (shouldPurchaseBait(quantity, minimumQuantity, baitGrade)) {
 					const bait = getBaitById$1(baitId);
 					const totalCost = Number(bait?.price) * autoBaitSettings.purchaseQuantity;
 					if (Number.isFinite(totalCost) && totalCost > Number(player?.gold ?? 0)) {
@@ -207,6 +216,14 @@
 					pendingPurchaseQuantities.set(baitId, quantity);
 					lastPurchasedAt = Date.now();
 					purchased = true;
+				}
+				if (shouldPurchaseBait(quantity, minimumQuantity, baitGrade)) {
+					updateSnapshot({
+						baitId,
+						quantity,
+						nextStatus: `已补充${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个，继续补足本轮所需 ${minimumQuantity.toLocaleString()} 个`
+					});
+					return false;
 				}
 				await equipBait(api, player, baitId, baitLabel);
 				retryAfter = 0;
@@ -278,7 +295,8 @@
 				if (getState().autoBaitSettings.enabled !== true) return Promise.resolve(true);
 				return checkNow({
 					baitGrade,
-					contextLabel: "内置自动钓鱼"
+					contextLabel: "内置自动钓鱼",
+					minimumQuantity: getGameAutoFishingBaitMinimumQuantity(getPlayer?.())
 				});
 			}
 		};
@@ -948,7 +966,8 @@
 		scheduleRandomExtraRatioMin: -.05,
 		scheduleRandomExtraRatioMax: .1,
 		gameAutoFishingPollInterval: 500,
-		gameAutoFishingRetryInterval: 5e3
+		gameAutoFishingRetryInterval: 5e3,
+		gameAutoFishingStaminaRetryInterval: 6e4
 	};
 	var STORAGE_KEY = "arcane-angler-auto-cast-enabled-v1";
 	var CLICK_DELAY_SETTINGS_STORAGE_KEY = "arcane-angler-click-delay-settings-v1";
@@ -2106,10 +2125,27 @@
 		}
 		return false;
 	}
-	function createGameAutoFishingController({ now = Date.now, onStateChange, prepareStart, retryInterval = CONFIG.gameAutoFishingRetryInterval, shouldStart = () => true } = {}) {
+	function dismissGameAutoFishingCompletion(root = document) {
+		const overlays = root.querySelectorAll("div.fixed.inset-0");
+		for (const overlay of overlays) {
+			const text = normalizeText(overlay.textContent);
+			if (!(/auto-cast complete\s*:\s*all stamina consumed!?/i.test(text) || /自动(?:抛竿|钓鱼)完成\s*[：:]\s*体力已耗尽[！!]?/.test(text))) continue;
+			const buttons = overlay.querySelectorAll("button");
+			for (const button of buttons) {
+				const buttonText = normalizeText(button.textContent);
+				if (isDisplayed(button) && /^(?:ok|确定)$/i.test(buttonText)) {
+					button.click();
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+	function createGameAutoFishingController({ now = Date.now, onStateChange, prepareStart, retryInterval = CONFIG.gameAutoFishingRetryInterval, staminaRetryInterval = CONFIG.gameAutoFishingStaminaRetryInterval, shouldStart = () => true } = {}) {
 		let mayBeActive = false;
 		let preparationRequired = true;
 		let startPendingUntil = 0;
+		let staminaRetryUntil = 0;
 		let status = "未启用";
 		let wasActive = false;
 		function setStatus(nextStatus) {
@@ -2132,8 +2168,30 @@
 			return state;
 		}
 		async function ensureActive() {
+			if (dismissGameAutoFishingCompletion()) {
+				mayBeActive = false;
+				preparationRequired = true;
+				startPendingUntil = 0;
+				staminaRetryUntil = now() + staminaRetryInterval;
+				wasActive = false;
+				setStatus("体力已耗尽，稍后自动续期");
+				return {
+					...getGameAutoFishingState(),
+					active: false,
+					staminaExhausted: true
+				};
+			}
 			dismissGameAutoFishingSummary();
 			let state = observe();
+			if (now() < staminaRetryUntil) {
+				setStatus("体力已耗尽，稍后自动续期");
+				return {
+					...state,
+					active: false,
+					staminaExhausted: true
+				};
+			}
+			staminaRetryUntil = 0;
 			if (state.active) {
 				setStatus("运行中，次数结束后自动续期");
 				return state;
@@ -2190,7 +2248,9 @@
 					return false;
 				}
 				dismissGameAutoFishingSummary();
+				dismissGameAutoFishingCompletion();
 				mayBeActive = false;
+				staminaRetryUntil = 0;
 				setStatus("已停止");
 				return true;
 			}
@@ -2294,8 +2354,8 @@
 				changed: false,
 				shouldEvaluate: false
 			};
-			if (pathname === "/api/game/cast") return {
-				changed: handleCastResult(payload?.result),
+			if (pathname === "/api/game/cast" || pathname === "/api/game/auto-cast") return {
+				changed: handleCastResult(payload?.result ?? payload),
 				shouldEvaluate: false
 			};
 			if (pathname === "/api/game/change-biome") {
@@ -2373,16 +2433,25 @@
 			try {
 				url = new URL(request?.url ?? String(input), window.location.href);
 			} catch {}
-			const requestPayloadPromise = method === "POST" && isGameStateResponsePath(method, url?.pathname) && url?.pathname !== "/api/game/cast" ? readRequestPayload(request, init).catch((error) => {
+			const requestPayloadPromise = method === "POST" && isGameStateResponsePath(method, url?.pathname) && !isCastResultResponsePath(method, url?.pathname) ? readRequestPayload(request, init).catch((error) => {
 				console.warn("[游戏状态] 无法读取请求参数：", error);
 			}) : Promise.resolve(void 0);
 			if (method === "POST" && url?.pathname === "/api/game/cast") {
 				const modifiedRequest = await modifyCastRequest(input, request, init);
 				const response = modifiedRequest ? await originalFetch.call(this, modifiedRequest.input, modifiedRequest.init) : await originalFetch.apply(this, arguments);
 				try {
-					collectCastResponse(response.clone(), onCastResult, onGameStateResponse);
+					collectCastResponse(response.clone(), url.pathname, onCastResult, onGameStateResponse);
 				} catch (error) {
 					console.warn("[收益统计] 无法复制抛竿响应：", error);
+				}
+				return response;
+			}
+			if (method === "POST" && url?.pathname === "/api/game/auto-cast") {
+				const response = await originalFetch.apply(this, arguments);
+				try {
+					collectCastResponse(response.clone(), url.pathname, onCastResult, onGameStateResponse);
+				} catch (error) {
+					console.warn("[收益统计] 无法复制内置自动钓鱼响应：", error);
 				}
 				return response;
 			}
@@ -2436,11 +2505,15 @@
 		if (method === "GET") return pathname === "/api/player/data" || pathname === "/api/boats/my-boat";
 		return method === "POST" && [
 			"/api/game/cast",
+			"/api/game/auto-cast",
 			"/api/game/buy-bait",
 			"/api/game/change-biome",
 			"/api/game/equip-bait",
 			"/api/game/equip-rod"
 		].includes(pathname);
+	}
+	function isCastResultResponsePath(method, pathname) {
+		return method === "POST" && (pathname === "/api/game/cast" || pathname === "/api/game/auto-cast");
 	}
 	function isWeatherResponsePath(pathname) {
 		return pathname === "/api/game/weather" || /^\/api\/game\/weather\/\d+$/.test(pathname ?? "");
@@ -2508,17 +2581,18 @@
 			console.warn("[自动过验证] 无法读取 Staff Question 响应：", error);
 		}
 	}
-	async function collectCastResponse(response, onCastResult, onGameStateResponse) {
+	async function collectCastResponse(response, pathname, onCastResult, onGameStateResponse) {
 		if (!response.ok) return;
 		try {
 			const payload = await response.json();
-			if (payload?.success !== true || !payload.result || typeof payload.result !== "object") return;
+			const result = payload?.result ?? payload;
+			if (payload?.success !== true || !result || typeof result !== "object") return;
 			onGameStateResponse?.({
 				method: "POST",
-				pathname: "/api/game/cast",
+				pathname,
 				payload
 			});
-			onCastResult?.(payload.result);
+			onCastResult?.(result);
 		} catch (error) {
 			console.warn("[收益统计] 无法读取抛竿响应：", error);
 		}

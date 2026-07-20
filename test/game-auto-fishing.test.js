@@ -5,6 +5,7 @@ import { Window } from 'happy-dom';
 
 import {
     createGameAutoFishingController,
+    dismissGameAutoFishingCompletion,
     dismissGameAutoFishingSummary,
     findGameAutoFishingButton,
     getGameAutoFishingState,
@@ -158,6 +159,79 @@ test('按汇总遮罩结构和图标关闭弹层，不依赖关闭按钮文案',
     try {
         assert.equal(dismissGameAutoFishingSummary(), true);
         assert.equal(closed, true);
+    } finally {
+        restore();
+    }
+});
+
+test('识别并关闭汉化后的体力耗尽完成弹窗', () => {
+    const window = new Window({ url: 'https://arcaneangler.com/' });
+    const restore = installDomGlobals(window);
+    const overlay = window.document.createElement('div');
+    const message = window.document.createElement('p');
+    const confirmButton = createVisibleButton(window, { icon: '确定' });
+    let closed = false;
+
+    overlay.className = 'fixed inset-0 z-50';
+    message.textContent = '自动抛竿完成：体力已耗尽！';
+    confirmButton.addEventListener('click', () => {
+        closed = true;
+        overlay.remove();
+    });
+    overlay.append(message, confirmButton);
+    window.document.body.appendChild(overlay);
+
+    try {
+        assert.equal(dismissGameAutoFishingCompletion(), true);
+        assert.equal(closed, true);
+    } finally {
+        restore();
+    }
+});
+
+test('体力耗尽弹窗关闭后延迟重试续期', async () => {
+    const window = new Window({ url: 'https://arcaneangler.com/' });
+    const restore = installDomGlobals(window);
+    const autoButton = createVisibleButton(window, {
+        className: 'flex-[15]',
+        icon: '🤖',
+    });
+    const overlay = window.document.createElement('div');
+    const message = window.document.createElement('p');
+    const confirmButton = createVisibleButton(window, { icon: '确定' });
+    let autoButtonClicks = 0;
+    let currentTime = 1000;
+
+    overlay.className = 'fixed inset-0 z-50';
+    message.textContent = 'Auto-Cast complete: All stamina consumed!';
+    confirmButton.addEventListener('click', () => overlay.remove());
+    autoButton.addEventListener('click', () => {
+        autoButtonClicks += 1;
+        autoButton.textContent = '🛑';
+    });
+    overlay.append(message, confirmButton);
+    window.document.body.appendChild(overlay);
+
+    try {
+        const controller = createGameAutoFishingController({
+            now: () => currentTime,
+            staminaRetryInterval: 60000,
+        });
+
+        assert.equal((await controller.ensureActive()).active, false);
+        assert.equal(autoButtonClicks, 0);
+        assert.match(
+            controller.getSnapshot().gameAutoFishingStatus,
+            /稍后自动续期/,
+        );
+
+        currentTime += 59999;
+        assert.equal((await controller.ensureActive()).active, false);
+        assert.equal(autoButtonClicks, 0);
+
+        currentTime += 1;
+        assert.equal((await controller.ensureActive()).active, true);
+        assert.equal(autoButtonClicks, 1);
     } finally {
         restore();
     }
