@@ -102,23 +102,6 @@ export function shouldPurchaseBait(quantity, minimumQuantity, baitGrade) {
     );
 }
 
-export function getGameAutoFishingBaitMinimumQuantity(player) {
-    let totalStats = null;
-
-    try {
-        totalStats = window.GameHelpers?.getTotalStats?.(player, null) ?? null;
-    } catch (error) {
-        console.warn('[自动买鱼饵] 无法计算内置自动钓鱼所需体力：', error);
-    }
-
-    return Math.max(
-        1,
-        normalizeQuantity(
-            totalStats?.stamina ?? player?.stats?.stamina ?? player?.stamina,
-        ),
-    );
-}
-
 function getBaitById(baitId) {
     if (typeof window.getBaitById === 'function') {
         try {
@@ -215,7 +198,6 @@ export function createAutoBaitController({
         biomeId: requestedBiomeId = null,
         contextLabel: requestedContextLabel = null,
         force = false,
-        minimumQuantity: requestedMinimumQuantity = null,
     }) {
         const state = getState();
         const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = state;
@@ -299,9 +281,8 @@ export function createAutoBaitController({
                 GOLD_BREEZE_WEATHER
                     ? '金风'
                     : AUTO_BAIT_CONTEXT_LABELS[baitContext]);
-            const minimumQuantity = Math.max(
-                normalizeQuantity(autoBaitSettings.minimumQuantity),
-                normalizeQuantity(requestedMinimumQuantity),
+            const minimumQuantity = normalizeQuantity(
+                autoBaitSettings.minimumQuantity,
             );
 
             lastCheckedAt = Date.now();
@@ -392,7 +373,7 @@ export function createAutoBaitController({
                 updateSnapshot({
                     baitId,
                     quantity,
-                    nextStatus: `已补充${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个，继续补足本轮所需 ${minimumQuantity.toLocaleString()} 个`,
+                    nextStatus: `已补充${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个，继续补足设定阈值 ${minimumQuantity.toLocaleString()} 个`,
                 });
                 return false;
             }
@@ -513,14 +494,9 @@ export function createAutoBaitController({
                 return Promise.resolve(true);
             }
 
-            const minimumQuantity = getGameAutoFishingBaitMinimumQuantity(
-                getPlayer?.(),
-            );
-
             return checkNow({
                 baitGrade,
                 contextLabel: '内置自动钓鱼',
-                minimumQuantity,
             });
         },
     };

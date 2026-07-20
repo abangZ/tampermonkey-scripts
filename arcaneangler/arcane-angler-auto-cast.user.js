@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.13.1
+// @version      2.13.2
 // @author       Codex
 // @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -68,15 +68,6 @@
 	function shouldPurchaseBait(quantity, minimumQuantity, baitGrade) {
 		return baitGrade !== "default" && normalizeQuantity$1(quantity) < normalizeQuantity$1(minimumQuantity);
 	}
-	function getGameAutoFishingBaitMinimumQuantity(player) {
-		let totalStats = null;
-		try {
-			totalStats = window.GameHelpers?.getTotalStats?.(player, null) ?? null;
-		} catch (error) {
-			console.warn("[自动买鱼饵] 无法计算内置自动钓鱼所需体力：", error);
-		}
-		return Math.max(1, normalizeQuantity$1(totalStats?.stamina ?? player?.stats?.stamina ?? player?.stamina));
-	}
 	function getBaitById$1(baitId) {
 		if (typeof window.getBaitById === "function") try {
 			const bait = window.getBaitById(baitId);
@@ -127,7 +118,7 @@
 			const result = await api.equipBait(baitId);
 			if (result?.success !== true) throw new Error(result?.message ?? `无法装备${baitLabel}`);
 		}
-		async function evaluate({ baitGrade: requestedBaitGrade = null, biomeId: requestedBiomeId = null, contextLabel: requestedContextLabel = null, force = false, minimumQuantity: requestedMinimumQuantity = null }) {
+		async function evaluate({ baitGrade: requestedBaitGrade = null, biomeId: requestedBiomeId = null, contextLabel: requestedContextLabel = null, force = false }) {
 			const state = getState();
 			const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = state;
 			if (!autoBaitSettings.enabled) {
@@ -173,7 +164,7 @@
 				}
 				const baitLabel = getBaitLabel(baitId, baitGrade, biomeId);
 				const contextLabel = requestedContextLabel ?? (state.autoBiomeWeatherByBiome?.[biomeId]?.weather === GOLD_BREEZE_WEATHER$1 ? "金风" : AUTO_BAIT_CONTEXT_LABELS[baitContext]);
-				const minimumQuantity = Math.max(normalizeQuantity$1(autoBaitSettings.minimumQuantity), normalizeQuantity$1(requestedMinimumQuantity));
+				const minimumQuantity = normalizeQuantity$1(autoBaitSettings.minimumQuantity);
 				lastCheckedAt = Date.now();
 				if (baitGrade === "default") {
 					await equipBait(api, player, baitId, baitLabel);
@@ -221,7 +212,7 @@
 					updateSnapshot({
 						baitId,
 						quantity,
-						nextStatus: `已补充${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个，继续补足本轮所需 ${minimumQuantity.toLocaleString()} 个`
+						nextStatus: `已补充${contextLabel} ${baitLabel}，当前 ${quantity.toLocaleString()} 个，继续补足设定阈值 ${minimumQuantity.toLocaleString()} 个`
 					});
 					return false;
 				}
@@ -295,8 +286,7 @@
 				if (getState().autoBaitSettings.enabled !== true) return Promise.resolve(true);
 				return checkNow({
 					baitGrade,
-					contextLabel: "内置自动钓鱼",
-					minimumQuantity: getGameAutoFishingBaitMinimumQuantity(getPlayer?.())
+					contextLabel: "内置自动钓鱼"
 				});
 			}
 		};

@@ -221,12 +221,12 @@ test('库存低于阈值时购买当前地图所选等级鱼饵并装备', async
     }
 });
 
-test('游戏内置自动钓鱼使用独立鱼饵并在启动前补足库存', async () => {
+test('游戏内置自动钓鱼使用独立鱼饵并只按库存阈值补充一批', async () => {
     const previousWindow = globalThis.window;
     const calls = [];
     const player = {
         baitInventory: {
-            bait_4_high: 20,
+            bait_4_high: 19,
         },
         currentBiome: 4,
         equippedBait: 'bait_4_low',
@@ -237,7 +237,7 @@ test('游戏内置自动钓鱼使用独立鱼饵并在启动前补足库存', as
         ApiService: {
             async buyBait(baitId, quantity) {
                 calls.push(['buyBait', baitId, quantity]);
-                return { newBaitQuantity: 120, success: true };
+                return { newBaitQuantity: 119, success: true };
             },
             async equipBait(baitId) {
                 calls.push(['equipBait', baitId]);
@@ -247,7 +247,7 @@ test('游戏内置自动钓鱼使用独立鱼饵并在启动前补足库存', as
         BAITS: [{ id: 'bait_4_high', name: 'Test Bait', price: 100 }],
         GameHelpers: {
             getTotalStats() {
-                return { stamina: 58 };
+                return { stamina: 5000 };
             },
         },
     };
@@ -273,6 +273,7 @@ test('游戏内置自动钓鱼使用独立鱼饵并在启动前补足库存', as
             ['buyBait', 'bait_4_high', 100],
             ['equipBait', 'bait_4_high'],
         ]);
+        assert.equal(controller.getSnapshot().autoBaitCurrentQuantity, 119);
         assert.match(controller.getSnapshot().autoBaitStatus, /内置自动钓鱼/);
     } finally {
         globalThis.window = previousWindow;
