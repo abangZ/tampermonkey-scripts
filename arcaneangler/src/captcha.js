@@ -93,11 +93,36 @@ function parseStaffQuestionNumber(value) {
     return Number.isFinite(number) ? number : parseEnglishNumber(value);
 }
 
+function readBiomeNumberAnswer(question, currentBiome) {
+    if (
+        !/^what biome number are you in now\s*[?？]?$/i.test(
+            normalizeText(question),
+        )
+    ) {
+        return null;
+    }
+
+    const biomeNumber = Number(currentBiome);
+
+    return Number.isInteger(biomeNumber) && biomeNumber > 0
+        ? String(biomeNumber)
+        : null;
+}
+
 /**
- * 只回答能够明确解析的基础算术题，开放问题交给用户手动处理。
+ * 只回答能够从题面或当前游戏状态明确得出的题目，开放问题交给用户手动处理。
  */
-export function solveStaffQuestion(question) {
+export function solveStaffQuestion(question, { currentBiome = null } = {}) {
     const normalizedQuestion = normalizeText(question);
+    const biomeNumberAnswer = readBiomeNumberAnswer(
+        normalizedQuestion,
+        currentBiome,
+    );
+
+    if (biomeNumberAnswer !== null) {
+        return biomeNumberAnswer;
+    }
+
     const match =
         normalizedQuestion.match(
             /^(?:how much is|what is|calculate)\s+([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(x|×|\*|\+|-|−|÷|\/|plus|minus|times|multiplied by|divided by)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\??$/i,
@@ -280,6 +305,7 @@ export function findCaptchaGapFromPixels(imageData, pieceDimensions) {
 }
 
 export function createCaptchaController({
+    getCurrentBiome,
     getState,
     notify,
     onVerificationResult,
@@ -742,7 +768,11 @@ export function createCaptchaController({
             throw new Error('页面 Staff Question API 不可用');
         }
 
-        const answer = solveStaffQuestion(question?.question);
+        const solveQuestion = (targetQuestion) =>
+            solveStaffQuestion(targetQuestion?.question, {
+                currentBiome: getCurrentBiome?.(),
+            });
+        let answer = solveQuestion(question);
 
         if (answer == null) {
             throw new Error(
@@ -764,6 +794,14 @@ export function createCaptchaController({
 
         const verification = syncVisibleStaffQuestion();
         const latestQuestion = activeStaffQuestion ?? question;
+
+        answer = solveQuestion(latestQuestion);
+
+        if (answer == null) {
+            throw new Error(
+                `无法可靠回答 Staff Question：${latestQuestion?.question || '未知题目'}`,
+            );
+        }
 
         if (latestQuestion?.id == null) {
             throw new Error('Staff Question 缺少题目 ID');

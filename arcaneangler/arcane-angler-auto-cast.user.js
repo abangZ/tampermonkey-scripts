@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.13.2
+// @version      2.13.4
 // @author       Codex
 // @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -966,6 +966,7 @@
 	var PUSH_KEY_STORAGE_KEY = "arcane-angler-push-key-v1";
 	var NOTIFICATION_MODE_STORAGE_KEY = "arcane-angler-notification-mode-v1";
 	var SCHEDULE_SETTINGS_STORAGE_KEY = "arcane-angler-schedule-settings-v1";
+	var SCHEDULE_RUNTIME_STORAGE_KEY = "arcane-angler-schedule-runtime-v1";
 	var GAME_AUTO_FISHING_SETTINGS_STORAGE_KEY = "arcane-angler-game-auto-fishing-settings-v1";
 	var AUTO_BIOME_SETTINGS_STORAGE_KEY = "arcane-angler-auto-biome-settings-v1";
 	var AUTO_BAIT_SETTINGS_STORAGE_KEY = "arcane-angler-auto-bait-settings-v1";
@@ -1279,8 +1280,15 @@
 		const number = Number(value);
 		return Number.isFinite(number) ? number : parseEnglishNumber(value);
 	}
-	function solveStaffQuestion(question) {
+	function readBiomeNumberAnswer(question, currentBiome) {
+		if (!/^what biome number are you in now\s*[?？]?$/i.test(normalizeText(question))) return null;
+		const biomeNumber = Number(currentBiome);
+		return Number.isInteger(biomeNumber) && biomeNumber > 0 ? String(biomeNumber) : null;
+	}
+	function solveStaffQuestion(question, { currentBiome = null } = {}) {
 		const normalizedQuestion = normalizeText(question);
+		const biomeNumberAnswer = readBiomeNumberAnswer(normalizedQuestion, currentBiome);
+		if (biomeNumberAnswer !== null) return biomeNumberAnswer;
 		const match = normalizedQuestion.match(/^(?:how much is|what is|calculate)\s+([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(x|×|\*|\+|-|−|÷|\/|plus|minus|times|multiplied by|divided by)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\??$/i) ?? normalizedQuestion.match(/^(?:how much is|what is|calculate)\s+(.+?)\s+(plus|minus|times|multiplied by|divided by)\s+(.+?)\s*\??$/i) ?? normalizedQuestion.match(/^(?:请?计算\s*)?([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(x|×|\*|\+|-|−|÷|\/|加|减|乘|乘以|除以)\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*(?:等于多少|是多少|结果是多少)?\s*[?？]?$/i);
 		if (!match) return null;
 		const left = parseStaffQuestionNumber(match[1]);
@@ -1378,7 +1386,7 @@
 			ratio: gapX / travelWidth
 		};
 	}
-	function createCaptchaController({ getState, notify, onVerificationResult, setEnabled, setNextDelay, setStatus }) {
+	function createCaptchaController({ getCurrentBiome, getState, notify, onVerificationResult, setEnabled, setNextDelay, setStatus }) {
 		let activeCaptchaChallenge = null;
 		let activeStaffQuestion = null;
 		let captchaBypassAttemptId = 0;
@@ -1579,11 +1587,14 @@
 		async function runStaffQuestionBypass(question, isAttemptActive) {
 			const api = window.ApiService;
 			if (typeof api?.answerToastQuestion !== "function") throw new Error("页面 Staff Question API 不可用");
-			const answer = solveStaffQuestion(question?.question);
+			const solveQuestion = (targetQuestion) => solveStaffQuestion(targetQuestion?.question, { currentBiome: getCurrentBiome?.() });
+			let answer = solveQuestion(question);
 			if (answer == null) throw new Error(`无法可靠回答 Staff Question：${question?.question || "未知题目"}`);
 			if (!await waitForCaptchaStep(CONFIG.captchaObserveDelayMin, CONFIG.captchaObserveDelayMax, "正在识别 Staff Question", "提交答案", isAttemptActive)) return false;
 			const verification = syncVisibleStaffQuestion();
 			const latestQuestion = activeStaffQuestion ?? question;
+			answer = solveQuestion(latestQuestion);
+			if (answer == null) throw new Error(`无法可靠回答 Staff Question：${latestQuestion?.question || "未知题目"}`);
 			if (latestQuestion?.id == null) throw new Error("Staff Question 缺少题目 ID");
 			const castCount = Number(latestQuestion.castCountRef?.current);
 			await api.answerToastQuestion(latestQuestion.id, answer, Number.isFinite(castCount) && castCount >= 0 ? castCount : 0);
@@ -2079,11 +2090,22 @@
 		const buttons = root.querySelectorAll("button");
 		for (const button of buttons) {
 			if (!isDisplayed(button)) continue;
-			const text = normalizeText(button.textContent);
-			const hasKnownIcon = text.includes("🤖") || text.includes("🛑");
-			if (button.classList.contains("flex-[15]") && hasKnownIcon) return button;
+			const hasKnownLayout = button.classList.contains("flex-[15]");
+			const title = normalizeText(button.getAttribute("title"));
+			const hasKnownAction = /(?:start|stop)\s+auto[- ]cast/i.test(title) || /(?:开始|停止).*自动(?:抛竿|钓鱼)/.test(title);
+			if (hasKnownLayout || hasKnownAction) return button;
 		}
 		return null;
+	}
+	function isGameAutoFishingActive(button) {
+		if (!button) return false;
+		const title = normalizeText(button.getAttribute("title"));
+		if (/stop\s+auto[- ]cast/i.test(title) || /停止.*自动(?:抛竿|钓鱼)/.test(title)) return true;
+		const statusPanel = button.parentElement?.nextElementSibling;
+		if (button.classList.contains("bg-red-600") || statusPanel?.classList.contains("border-purple-500")) return true;
+		if (/start\s+auto[- ]cast/i.test(title) || /开始.*自动(?:抛竿|钓鱼)/.test(title) || /cooldown|冷却/i.test(title)) return false;
+		if (button.classList.contains("bg-purple-600") || button.classList.contains("bg-gray-600")) return false;
+		return normalizeText(button.textContent).includes("🛑");
 	}
 	function getGameAutoFishingState(root = document) {
 		const button = findGameAutoFishingButton(root);
@@ -2094,7 +2116,7 @@
 			enabled: false
 		};
 		return {
-			active: normalizeText(button.textContent).includes("🛑"),
+			active: isGameAutoFishingActive(button),
 			available: true,
 			button,
 			enabled: !button.disabled && button.getAttribute("aria-disabled") !== "true"
@@ -2103,7 +2125,8 @@
 	function dismissGameAutoFishingSummary(root = document) {
 		const headings = root.querySelectorAll("h1, h2, h3");
 		for (const heading of headings) {
-			if (!normalizeText(heading.textContent).includes("🤖")) continue;
+			const text = normalizeText(heading.textContent);
+			if (!/auto[- ]cast\s+summary/i.test(text) && !/自动(?:抛竿|钓鱼)(?:汇总|摘要)/.test(text)) continue;
 			let overlay = heading.parentElement;
 			while (overlay && !overlay.classList.contains("fixed")) overlay = overlay.parentElement;
 			if (!overlay) continue;
@@ -2697,10 +2720,25 @@
 		if (minutes === 0) return `${seconds} 秒`;
 		return seconds > 0 ? `${minutes} 分 ${seconds} 秒` : `${minutes} 分钟`;
 	}
-	function createScheduleController({ getCaptcha, getState, now = Date.now, onRestTick, onWorkStarted, prepareForWork, renderSettings, renderStatus, setNextDelay, setStatus, sleepFor = sleep }) {
-		let phase = "work";
-		let endsAt = 0;
-		let duration = 0;
+	function createScheduleController({ getCaptcha, getState, initialRuntime, now = Date.now, onRestTick, onRuntimeChange, onWorkStarted, prepareForWork, renderSettings, renderStatus, setNextDelay, setStatus, sleepFor = sleep }) {
+		let phase = initialRuntime?.schedulePhase === "rest" ? "rest" : "work";
+		let endsAt = Number(initialRuntime?.scheduleEndsAt) || 0;
+		let duration = Number(initialRuntime?.scheduleDuration) || 0;
+		if (endsAt <= 0 || duration <= 0) {
+			phase = "work";
+			endsAt = 0;
+			duration = 0;
+		}
+		function getSnapshot() {
+			return {
+				scheduleDuration: duration,
+				scheduleEndsAt: endsAt,
+				schedulePhase: phase
+			};
+		}
+		function persistRuntime() {
+			onRuntimeChange?.(getSnapshot());
+		}
 		function getRandomizedDuration(baseMinutes) {
 			const extraRatio = CONFIG.scheduleRandomExtraRatioMin + Math.random() * (CONFIG.scheduleRandomExtraRatioMax - CONFIG.scheduleRandomExtraRatioMin);
 			return Math.round(baseMinutes * (1 + extraRatio) * 6e4);
@@ -2709,6 +2747,7 @@
 			phase = "work";
 			endsAt = 0;
 			duration = 0;
+			persistRuntime();
 			renderSettings();
 		}
 		function startPhase(nextPhase) {
@@ -2717,6 +2756,7 @@
 			phase = nextPhase;
 			duration = getRandomizedDuration(baseMinutes);
 			endsAt = now() + duration;
+			persistRuntime();
 			renderSettings();
 			if (nextPhase === "work") onWorkStarted?.();
 			console.info(`[自动抛竿] 本轮${nextPhase === "rest" ? "休息" : "运行"}时长：` + formatScheduleDuration(duration));
@@ -2764,13 +2804,7 @@
 			}
 		}
 		return {
-			getSnapshot() {
-				return {
-					scheduleDuration: duration,
-					scheduleEndsAt: endsAt,
-					schedulePhase: phase
-				};
-			},
+			getSnapshot,
 			isRestActive,
 			isWorkExpired,
 			reset,
@@ -3079,6 +3113,36 @@
 			localStorage.setItem(SCHEDULE_SETTINGS_STORAGE_KEY, JSON.stringify(scheduleSettings));
 		} catch (error) {
 			console.warn("[自动抛竿] 无法保存定时休息设置：", error);
+		}
+	}
+	function normalizeScheduleRuntime(runtime) {
+		const schedulePhase = runtime?.schedulePhase;
+		const scheduleDuration = Number(runtime?.scheduleDuration);
+		const scheduleEndsAt = Number(runtime?.scheduleEndsAt);
+		if (schedulePhase !== "work" && schedulePhase !== "rest" || !Number.isFinite(scheduleDuration) || scheduleDuration <= 0 || !Number.isFinite(scheduleEndsAt) || scheduleEndsAt <= 0) return {
+			scheduleDuration: 0,
+			scheduleEndsAt: 0,
+			schedulePhase: "work"
+		};
+		return {
+			scheduleDuration,
+			scheduleEndsAt,
+			schedulePhase
+		};
+	}
+	function loadScheduleRuntime() {
+		try {
+			return normalizeScheduleRuntime(JSON.parse(localStorage.getItem(SCHEDULE_RUNTIME_STORAGE_KEY)));
+		} catch (error) {
+			console.warn("[自动抛竿] 无法读取定时休息进度：", error);
+			return normalizeScheduleRuntime(null);
+		}
+	}
+	function saveScheduleRuntime(runtime) {
+		try {
+			localStorage.setItem(SCHEDULE_RUNTIME_STORAGE_KEY, JSON.stringify(normalizeScheduleRuntime(runtime)));
+		} catch (error) {
+			console.warn("[自动抛竿] 无法保存定时休息进度：", error);
 		}
 	}
 	function loadPanelCollapsed() {
@@ -4942,10 +5006,10 @@
 			if (currentLoopId === loopId) panel.setStatus(`运行异常：${error.message}`);
 		});
 	}
-	function setEnabled(nextEnabled) {
+	function setEnabled(nextEnabled, { preserveSchedule = false } = {}) {
 		enabled = Boolean(nextEnabled);
 		saveEnabled(enabled);
-		schedule.reset();
+		if (!preserveSchedule) schedule.reset();
 		fishingActivityWatchdog.markFishing();
 		if (!enabled) captcha.cancel();
 		loopId += 1;
@@ -5128,6 +5192,7 @@
 					scheduleSettings
 				};
 			},
+			initialRuntime: loadScheduleRuntime(),
 			async onRestTick() {
 				if (scheduleSettings.gameAutoFishingDuringRest) return (await gameAutoFishing.ensureActive()).active ? "定时休息中（游戏内置自动钓鱼运行中）" : "定时休息中（等待游戏内置自动钓鱼）";
 				return gameAutoFishing.ensureStopped() ? "定时休息中" : "定时休息中（正在停止游戏内置自动钓鱼）";
@@ -5135,6 +5200,7 @@
 			onWorkStarted() {
 				fishingActivityWatchdog.markFishing();
 			},
+			onRuntimeChange: saveScheduleRuntime,
 			prepareForWork() {
 				if (gameAutoFishingSettings.enabled) return true;
 				const stopped = gameAutoFishing.ensureStopped();
@@ -5198,6 +5264,9 @@
 			getState: getPanelState
 		});
 		captcha = createCaptchaController({
+			getCurrentBiome() {
+				return gameState.getPlayerSnapshot()?.currentBiome;
+			},
 			getState() {
 				return {
 					captchaBypassEnabled,
@@ -5260,7 +5329,7 @@
 			captcha.handleStaffQuestion(pendingStaffQuestion);
 			pendingStaffQuestion = null;
 		}
-		setEnabled(enabled);
+		setEnabled(enabled, { preserveSchedule: enabled && scheduleSettings.enabled });
 		autoBiome.start();
 		autoBoss.start();
 		console.info("[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。");

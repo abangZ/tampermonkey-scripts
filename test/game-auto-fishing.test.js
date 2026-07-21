@@ -9,6 +9,7 @@ import {
     dismissGameAutoFishingSummary,
     findGameAutoFishingButton,
     getGameAutoFishingState,
+    isGameAutoFishingActive,
 } from '../arcaneangler/src/game-auto-fishing.js';
 import {
     loadGameAutoFishingSettings,
@@ -50,7 +51,7 @@ function installDomGlobals(window) {
     };
 }
 
-test('通过按钮结构和图标识别内置自动钓鱼，不依赖页面语言', () => {
+test('通过按钮结构和状态识别内置自动钓鱼，不依赖固定图标', () => {
     const window = new Window({ url: 'https://arcaneangler.com/' });
     const restore = installDomGlobals(window);
 
@@ -58,10 +59,11 @@ test('通过按钮结构和图标识别内置自动钓鱼，不依赖页面语�
         createVisibleButton(window, { className: 'other-button', icon: '🤖' });
         const button = createVisibleButton(window, {
             className: 'flex-[15] translated-auto-cast',
-            icon: '🤖',
+            icon: '用户自定义挂机图标',
         });
 
-        button.title = '开始自动钓鱼（汉化）';
+        button.title = 'Start Auto-Cast';
+        button.classList.add('bg-purple-600');
 
         assert.equal(findGameAutoFishingButton(), button);
         assert.deepEqual(
@@ -73,9 +75,32 @@ test('通过按钮结构和图标识别内置自动钓鱼，不依赖页面语�
             { active: false, available: true, enabled: true },
         );
 
-        button.textContent = '🛑';
-        button.title = '停止自动钓鱼（汉化）';
+        button.title = 'Stop Auto-Cast';
+        button.classList.replace('bg-purple-600', 'bg-red-600');
         assert.equal(getGameAutoFishingState().active, true);
+        assert.equal(isGameAutoFishingActive(button), true);
+    } finally {
+        restore();
+    }
+});
+
+test('按钮冷却期间通过相邻状态区识别运行中，不依赖停止图标', () => {
+    const window = new Window({ url: 'https://arcaneangler.com/' });
+    const restore = installDomGlobals(window);
+    const controls = window.document.createElement('div');
+    const statusPanel = window.document.createElement('div');
+    const button = createVisibleButton(window, {
+        className: 'flex-[15] bg-gray-600',
+        icon: '用户自定义挂机图标',
+    });
+
+    button.title = 'Cooldown: 3s';
+    controls.appendChild(button);
+    statusPanel.className = 'border border-purple-500';
+    window.document.body.append(controls, statusPanel);
+
+    try {
+        assert.equal(isGameAutoFishingActive(button), true);
     } finally {
         restore();
     }
@@ -127,7 +152,7 @@ test('内置自动钓鱼每次启动前准备鱼饵，结束后续期并可安�
     }
 });
 
-test('按汇总遮罩结构和图标关闭弹层，不依赖关闭按钮文案', () => {
+test('按汇总遮罩结构和标题关闭弹层，不依赖图标和关闭按钮文案', () => {
     const window = new Window({ url: 'https://arcaneangler.com/' });
     const restore = installDomGlobals(window);
     const overlay = window.document.createElement('div');
@@ -137,7 +162,7 @@ test('按汇总遮罩结构和图标关闭弹层，不依赖关闭按钮文案',
     let closed = false;
 
     overlay.className = 'fixed inset-0';
-    heading.textContent = '🤖 自动钓鱼汇总（汉化）';
+    heading.textContent = '自动钓鱼汇总（汉化）';
     closeButton.textContent = '关掉';
     closeButton.getBoundingClientRect = () => ({
         bottom: 40,

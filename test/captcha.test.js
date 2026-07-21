@@ -74,7 +74,19 @@ test('Staff Question 只解析明确的基础算术题', () => {
     assert.equal(solveStaffQuestion('What is 5 divided by 0?'), null);
 });
 
-test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行', async () => {
+test('地图编号 Staff Question 只返回当前地图的纯数字编号', () => {
+    const question = 'What biome number are you in now';
+
+    assert.equal(solveStaffQuestion(question, { currentBiome: 6 }), '6');
+    assert.match(solveStaffQuestion(question, { currentBiome: 6 }), /^\d+$/);
+    assert.equal(solveStaffQuestion(question), null);
+    assert.equal(
+        solveStaffQuestion(question, { currentBiome: 'unknown' }),
+        null,
+    );
+});
+
+test('捕获到地图编号 Staff Question 后通过页面 API 提交纯数字并恢复运行', async () => {
     const previousDocument = globalThis.document;
     const previousHTMLElement = globalThis.HTMLElement;
     const previousWindow = globalThis.window;
@@ -98,7 +110,7 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
 
     popup.innerHTML = `
         <div><div>❓ 员工提问</div><div>0:35</div></div>
-        <div>三加一等于多少？</div>
+        <div>What biome number are you in now</div>
         <input type="text" maxlength="500" placeholder="请输入答案……" />
         <div><button>回答</button><button>忽略</button></div>
     `;
@@ -114,7 +126,7 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
                 onDismiss() {
                     popup.remove();
                 },
-                question: 'how much is three plus one',
+                question: 'What biome number are you in now',
                 questionId: 42,
             },
             return: null,
@@ -137,6 +149,9 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
 
     try {
         const controller = createCaptchaController({
+            getCurrentBiome() {
+                return 6;
+            },
             getState() {
                 return {
                     captchaBypassEnabled: true,
@@ -160,11 +175,11 @@ test('捕获到算术 Staff Question 后通过页面 API 回答并恢复运行',
 
         controller.handleStaffQuestion({
             id: 42,
-            question: 'how much is three plus one',
+            question: 'What biome number are you in now',
         });
 
         await resumed;
-        assert.deepEqual(answerCalls, [[42, '4', 5]]);
+        assert.deepEqual(answerCalls, [[42, '6', 5]]);
         assert.equal(controller.hasActiveVerification(), false);
         assert.equal(popup.isConnected, false);
         assert.equal(verificationResults.length, 1);

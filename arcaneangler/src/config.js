@@ -50,6 +50,7 @@ export const NOTIFICATION_MODE_STORAGE_KEY =
     'arcane-angler-notification-mode-v1';
 export const SCHEDULE_SETTINGS_STORAGE_KEY =
     'arcane-angler-schedule-settings-v1';
+export const SCHEDULE_RUNTIME_STORAGE_KEY = 'arcane-angler-schedule-runtime-v1';
 export const GAME_AUTO_FISHING_SETTINGS_STORAGE_KEY =
     'arcane-angler-game-auto-fishing-settings-v1';
 export const AUTO_BIOME_SETTINGS_STORAGE_KEY =

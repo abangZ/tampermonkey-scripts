@@ -9,16 +9,60 @@ export function findGameAutoFishingButton(root = document) {
             continue;
         }
 
-        const text = normalizeText(button.textContent);
-        const hasKnownIcon = text.includes('🤖') || text.includes('🛑');
         const hasKnownLayout = button.classList.contains('flex-[15]');
+        const title = normalizeText(button.getAttribute('title'));
+        const hasKnownAction =
+            /(?:start|stop)\s+auto[- ]cast/i.test(title) ||
+            /(?:开始|停止).*自动(?:抛竿|钓鱼)/.test(title);
 
-        if (hasKnownLayout && hasKnownIcon) {
+        if (hasKnownLayout || hasKnownAction) {
             return button;
         }
     }
 
     return null;
+}
+
+export function isGameAutoFishingActive(button) {
+    if (!button) {
+        return false;
+    }
+
+    const title = normalizeText(button.getAttribute('title'));
+
+    if (
+        /stop\s+auto[- ]cast/i.test(title) ||
+        /停止.*自动(?:抛竿|钓鱼)/.test(title)
+    ) {
+        return true;
+    }
+
+    const statusPanel = button.parentElement?.nextElementSibling;
+
+    if (
+        button.classList.contains('bg-red-600') ||
+        statusPanel?.classList.contains('border-purple-500')
+    ) {
+        return true;
+    }
+
+    if (
+        /start\s+auto[- ]cast/i.test(title) ||
+        /开始.*自动(?:抛竿|钓鱼)/.test(title) ||
+        /cooldown|冷却/i.test(title)
+    ) {
+        return false;
+    }
+
+    if (
+        button.classList.contains('bg-purple-600') ||
+        button.classList.contains('bg-gray-600')
+    ) {
+        return false;
+    }
+
+    // 兼容旧版页面；新版识别不再依赖这里的固定图标。
+    return normalizeText(button.textContent).includes('🛑');
 }
 
 export function getGameAutoFishingState(root = document) {
@@ -33,10 +77,8 @@ export function getGameAutoFishingState(root = document) {
         };
     }
 
-    const text = normalizeText(button.textContent);
-
     return {
-        active: text.includes('🛑'),
+        active: isGameAutoFishingActive(button),
         available: true,
         button,
         enabled:
@@ -48,7 +90,12 @@ export function dismissGameAutoFishingSummary(root = document) {
     const headings = root.querySelectorAll('h1, h2, h3');
 
     for (const heading of headings) {
-        if (!normalizeText(heading.textContent).includes('🤖')) {
+        const text = normalizeText(heading.textContent);
+
+        if (
+            !/auto[- ]cast\s+summary/i.test(text) &&
+            !/自动(?:抛竿|钓鱼)(?:汇总|摘要)/.test(text)
+        ) {
             continue;
         }
 

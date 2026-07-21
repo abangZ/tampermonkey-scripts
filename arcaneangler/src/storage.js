@@ -9,6 +9,7 @@ import {
     NOTIFICATION_MODE_STORAGE_KEY,
     PANEL_COLLAPSED_STORAGE_KEY,
     PUSH_KEY_STORAGE_KEY,
+    SCHEDULE_RUNTIME_STORAGE_KEY,
     SCHEDULE_SETTINGS_STORAGE_KEY,
     STORAGE_KEY,
     VERIFICATION_HISTORY_STORAGE_KEY,
@@ -524,6 +525,54 @@ export function saveScheduleSettings(scheduleSettings) {
         );
     } catch (error) {
         console.warn('[自动抛竿] 无法保存定时休息设置：', error);
+    }
+}
+
+export function normalizeScheduleRuntime(runtime) {
+    const schedulePhase = runtime?.schedulePhase;
+    const scheduleDuration = Number(runtime?.scheduleDuration);
+    const scheduleEndsAt = Number(runtime?.scheduleEndsAt);
+
+    if (
+        (schedulePhase !== 'work' && schedulePhase !== 'rest') ||
+        !Number.isFinite(scheduleDuration) ||
+        scheduleDuration <= 0 ||
+        !Number.isFinite(scheduleEndsAt) ||
+        scheduleEndsAt <= 0
+    ) {
+        return {
+            scheduleDuration: 0,
+            scheduleEndsAt: 0,
+            schedulePhase: 'work',
+        };
+    }
+
+    return {
+        scheduleDuration,
+        scheduleEndsAt,
+        schedulePhase,
+    };
+}
+
+export function loadScheduleRuntime() {
+    try {
+        return normalizeScheduleRuntime(
+            JSON.parse(localStorage.getItem(SCHEDULE_RUNTIME_STORAGE_KEY)),
+        );
+    } catch (error) {
+        console.warn('[自动抛竿] 无法读取定时休息进度：', error);
+        return normalizeScheduleRuntime(null);
+    }
+}
+
+export function saveScheduleRuntime(runtime) {
+    try {
+        localStorage.setItem(
+            SCHEDULE_RUNTIME_STORAGE_KEY,
+            JSON.stringify(normalizeScheduleRuntime(runtime)),
+        );
+    } catch (error) {
+        console.warn('[自动抛竿] 无法保存定时休息进度：', error);
     }
 }
 

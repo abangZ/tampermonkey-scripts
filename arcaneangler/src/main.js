@@ -53,6 +53,7 @@ import {
     loadIdleReloadSettings,
     loadNotificationMode,
     loadPushKey,
+    loadScheduleRuntime,
     loadScheduleSettings,
     loadVerificationHistory,
     normalizeAutoBaitGrade,
@@ -71,6 +72,7 @@ import {
     saveIdleReloadSettings,
     saveNotificationMode,
     savePushKey,
+    saveScheduleRuntime,
     saveScheduleSettings,
     saveVerificationHistory,
 } from './storage.js';
@@ -821,10 +823,13 @@ function startRunLoop() {
 /**
  * 开关控制。
  */
-function setEnabled(nextEnabled) {
+function setEnabled(nextEnabled, { preserveSchedule = false } = {}) {
     enabled = Boolean(nextEnabled);
     saveEnabled(enabled);
-    schedule.reset();
+
+    if (!preserveSchedule) {
+        schedule.reset();
+    }
     fishingActivityWatchdog.markFishing();
 
     if (!enabled) {
@@ -1116,6 +1121,7 @@ function initialize() {
                 scheduleSettings,
             };
         },
+        initialRuntime: loadScheduleRuntime(),
         async onRestTick() {
             if (scheduleSettings.gameAutoFishingDuringRest) {
                 const state = await gameAutoFishing.ensureActive();
@@ -1132,6 +1138,7 @@ function initialize() {
         onWorkStarted() {
             fishingActivityWatchdog.markFishing();
         },
+        onRuntimeChange: saveScheduleRuntime,
         prepareForWork() {
             if (gameAutoFishingSettings.enabled) {
                 return true;
@@ -1220,6 +1227,9 @@ function initialize() {
     });
 
     captcha = createCaptchaController({
+        getCurrentBiome() {
+            return gameState.getPlayerSnapshot()?.currentBiome;
+        },
         getState() {
             return {
                 captchaBypassEnabled,
@@ -1296,7 +1306,9 @@ function initialize() {
     }
 
     // 第一次安装默认关闭；之后恢复上次保存的状态
-    setEnabled(enabled);
+    setEnabled(enabled, {
+        preserveSchedule: enabled && scheduleSettings.enabled,
+    });
     autoBiome.start();
     autoBoss.start();
 

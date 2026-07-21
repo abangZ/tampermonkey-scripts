@@ -16,8 +16,10 @@ export function formatScheduleDuration(milliseconds) {
 export function createScheduleController({
     getCaptcha,
     getState,
+    initialRuntime,
     now = Date.now,
     onRestTick,
+    onRuntimeChange,
     onWorkStarted,
     prepareForWork,
     renderSettings,
@@ -26,9 +28,27 @@ export function createScheduleController({
     setStatus,
     sleepFor = sleep,
 }) {
-    let phase = 'work';
-    let endsAt = 0;
-    let duration = 0;
+    let phase = initialRuntime?.schedulePhase === 'rest' ? 'rest' : 'work';
+    let endsAt = Number(initialRuntime?.scheduleEndsAt) || 0;
+    let duration = Number(initialRuntime?.scheduleDuration) || 0;
+
+    if (endsAt <= 0 || duration <= 0) {
+        phase = 'work';
+        endsAt = 0;
+        duration = 0;
+    }
+
+    function getSnapshot() {
+        return {
+            scheduleDuration: duration,
+            scheduleEndsAt: endsAt,
+            schedulePhase: phase,
+        };
+    }
+
+    function persistRuntime() {
+        onRuntimeChange?.(getSnapshot());
+    }
 
     function getRandomizedDuration(baseMinutes) {
         const extraRatio =
@@ -44,6 +64,7 @@ export function createScheduleController({
         phase = 'work';
         endsAt = 0;
         duration = 0;
+        persistRuntime();
         renderSettings();
     }
 
@@ -57,6 +78,7 @@ export function createScheduleController({
         phase = nextPhase;
         duration = getRandomizedDuration(baseMinutes);
         endsAt = now() + duration;
+        persistRuntime();
         renderSettings();
 
         if (nextPhase === 'work') {
@@ -154,13 +176,7 @@ export function createScheduleController({
     }
 
     return {
-        getSnapshot() {
-            return {
-                scheduleDuration: duration,
-                scheduleEndsAt: endsAt,
-                schedulePhase: phase,
-            };
-        },
+        getSnapshot,
         isRestActive,
         isWorkExpired,
         reset,
