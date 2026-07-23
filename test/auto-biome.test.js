@@ -1054,11 +1054,11 @@ test('游戏天气 hook 更新后会切到评分最高的地图并同步装备',
     }
 });
 
-test('组队期间收到天气更新也不会自动切图', async () => {
+test('组队普通队员收到天气更新也不会自动切图', async () => {
     const previousWindow = globalThis.window;
     const calls = [];
     const player = {
-        boat: { boat_id: 7, isActive: true },
+        boat: { boat_id: 7, isActive: true, role: 'member' },
         currentBiome: 1,
         unlockedBiomes: [1, 2],
     };
@@ -1067,6 +1067,10 @@ test('组队期间收到天气更新也不会自动切图', async () => {
         ApiService: {
             async changeBiome(biomeId) {
                 calls.push(['changeBiome', biomeId]);
+                return { success: true };
+            },
+            async changeBoatBiome(biomeId) {
+                calls.push(['changeBoatBiome', biomeId]);
                 return { success: true };
             },
         },
@@ -1107,7 +1111,72 @@ test('组队期间收到天气更新也不会自动切图', async () => {
         assert.deepEqual(calls, []);
         assert.equal(
             controller.getSnapshot().autoBiomeStatus,
-            '组队中暂不自动换图',
+            '组队中，等待队长换图',
+        );
+        controller.destroy();
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('组队队长会通过组队接口自动切换整队地图', async () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+    const player = {
+        boat: { boat_id: 7, isActive: true, role: 'leader' },
+        currentBiome: 1,
+        unlockedBiomes: [1, 2],
+    };
+
+    globalThis.window = {
+        ApiService: {
+            async changeBiome(biomeId) {
+                calls.push(['changeBiome', biomeId]);
+                return { success: true };
+            },
+            async changeBoatBiome(biomeId) {
+                calls.push(['changeBoatBiome', biomeId]);
+                return { success: true };
+            },
+        },
+        clearTimeout() {},
+        setTimeout() {
+            return 1;
+        },
+    };
+
+    try {
+        const controller = createAutoBiomeController({
+            getPlayer() {
+                return player;
+            },
+            getState() {
+                return {
+                    autoBiomeSettings: {
+                        biomeWeight: 0,
+                        enabled: true,
+                        priorityOrder: createPriorityOrder(),
+                    },
+                    enabled: true,
+                };
+            },
+        });
+
+        controller.handleWeatherResponse({
+            pathname: '/api/game/weather',
+            payload: {
+                weather: {
+                    1: { weather: 'clear', xpBonus: 0 },
+                    2: { weather: 'arcane_surge', xpBonus: 75 },
+                },
+            },
+        });
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.deepEqual(calls, [['changeBoatBiome', 2]]);
+        assert.match(
+            controller.getSnapshot().autoBiomeStatus,
+            /已切换整队到 \[B2\]/,
         );
         controller.destroy();
     } finally {

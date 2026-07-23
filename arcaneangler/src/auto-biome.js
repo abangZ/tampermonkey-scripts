@@ -1049,13 +1049,6 @@ export function createAutoBiomeController({
             return;
         }
 
-        const api = window.ApiService;
-
-        if (typeof api?.changeBiome !== 'function') {
-            setStatus('等待游戏切图接口');
-            return;
-        }
-
         const player = getPlayer?.();
 
         if (!player) {
@@ -1073,10 +1066,30 @@ export function createAutoBiomeController({
             return;
         }
 
-        if (player?.boat) {
+        if (player?.boat && typeof player.boat.role !== 'string') {
             target = null;
-            setStatus('组队中暂不自动换图');
+            setStatus('等待游戏队长状态');
+            return;
+        }
+
+        const isBoatLeader = player?.boat?.role === 'leader';
+
+        if (player?.boat && !isBoatLeader) {
+            target = null;
+            setStatus('组队中，等待队长换图');
             await notifyBiomeReady(normalizeBiomeId(player.currentBiome));
+            return;
+        }
+
+        const api = window.ApiService;
+        const changeBiome = isBoatLeader
+            ? api?.changeBoatBiome
+            : api?.changeBiome;
+
+        if (typeof changeBiome !== 'function') {
+            setStatus(
+                isBoatLeader ? '等待游戏组队切图接口' : '等待游戏切图接口',
+            );
             return;
         }
 
@@ -1119,10 +1132,23 @@ export function createAutoBiomeController({
         }
 
         switching = true;
-        setStatus(`正在切换到 ${summary}`);
+        setStatus(
+            isBoatLeader
+                ? `正在切换整队到 ${summary}`
+                : `正在切换到 ${summary}`,
+        );
 
         try {
-            const result = await api.changeBiome(target.biomeId);
+            const result = await changeBiome.call(api, target.biomeId);
+
+            if (
+                Array.isArray(result?.blockedBy) &&
+                result.blockedBy.length > 0
+            ) {
+                throw new Error(
+                    `队员未解锁目标地图：${result.blockedBy.join('、')}`,
+                );
+            }
 
             if (result?.success !== true) {
                 throw new Error(result?.message ?? '游戏未确认切图成功');
@@ -1131,7 +1157,11 @@ export function createAutoBiomeController({
             await autoEquipForBiome(player, target, {
                 skipBait: autoBaitSettings?.enabled === true,
             });
-            setStatus(`已切换到 ${summary}，等待下一竿同步页面`);
+            setStatus(
+                isBoatLeader
+                    ? `已切换整队到 ${summary}，等待下一竿同步页面`
+                    : `已切换到 ${summary}，等待下一竿同步页面`,
+            );
             await notifyBiomeReady(target.biomeId);
         } catch (error) {
             console.error('[自动换图] 切换地图失败：', error);

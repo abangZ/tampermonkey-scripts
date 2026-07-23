@@ -144,13 +144,26 @@ export function createGameStateStore() {
             };
         }
 
-        if (pathname === '/api/game/change-biome') {
+        if (
+            pathname === '/api/game/change-biome' ||
+            pathname === '/api/boats/change-biome'
+        ) {
             const biomeId = normalizeBiomeId(requestPayload?.biomeId);
+            const patch = biomeId ? { currentBiome: biomeId } : null;
+
+            if (
+                patch &&
+                pathname === '/api/boats/change-biome' &&
+                player?.boat
+            ) {
+                patch.boat = {
+                    ...player.boat,
+                    biome: biomeId,
+                };
+            }
 
             return {
-                changed: biomeId
-                    ? mergePlayer({ currentBiome: biomeId })
-                    : false,
+                changed: patch ? mergePlayer(patch) : false,
                 shouldEvaluate: false,
             };
         }

@@ -228,6 +228,7 @@ export function isGameStateResponsePath(method, pathname) {
             '/api/game/change-biome',
             '/api/game/equip-bait',
             '/api/game/equip-rod',
+            '/api/boats/change-biome',
         ].includes(pathname)
     );
 }

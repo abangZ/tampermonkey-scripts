@@ -97,6 +97,10 @@ test('会识别角色状态和天气响应路径', () => {
     assert.equal(isGameStateResponsePath('GET', '/api/boats/my-boat'), true);
     assert.equal(isGameStateResponsePath('POST', '/api/game/buy-bait'), true);
     assert.equal(isGameStateResponsePath('POST', '/api/game/auto-cast'), true);
+    assert.equal(
+        isGameStateResponsePath('POST', '/api/boats/change-biome'),
+        true,
+    );
     assert.equal(isGameStateResponsePath('GET', '/api/game/buy-bait'), false);
     assert.equal(isCastResultResponsePath('POST', '/api/game/auto-cast'), true);
     assert.equal(isCastResultResponsePath('GET', '/api/game/auto-cast'), false);

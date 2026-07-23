@@ -191,3 +191,36 @@ test('角色数据刷新不会覆盖单独获取的组队状态', () => {
 
     assert.equal(store.getPlayerSnapshot().boat, null);
 });
+
+test('组队切图响应会同步角色和船只的当前地图', () => {
+    const store = createGameStateStore();
+
+    store.handleResponse({
+        method: 'GET',
+        pathname: '/api/player/data',
+        payload: { currentBiome: 1 },
+    });
+    store.handleResponse({
+        method: 'GET',
+        pathname: '/api/boats/my-boat',
+        payload: {
+            boat: { biome: 1, boat_id: 7, role: 'leader' },
+        },
+    });
+
+    const update = store.handleResponse({
+        method: 'POST',
+        pathname: '/api/boats/change-biome',
+        payload: { success: true },
+        requestPayload: { biomeId: 2 },
+    });
+
+    assert.deepEqual(update, {
+        changed: true,
+        shouldEvaluate: false,
+    });
+    assert.deepEqual(store.getPlayerSnapshot(), {
+        boat: { biome: 2, boat_id: 7, role: 'leader' },
+        currentBiome: 2,
+    });
+});
