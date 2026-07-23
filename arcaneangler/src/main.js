@@ -106,6 +106,7 @@ let forceNextAutoBaitCheck = false;
 let pendingCaptchaChallenge = null;
 let pendingStaffQuestion = null;
 const pendingCompetitionResponses = new Map();
+let pendingGuildBoosterResponse = null;
 let pendingQuestResponse = null;
 const pendingWeatherResponses = new Map();
 const gameState = createGameStateStore();
@@ -186,6 +187,13 @@ installFetchInterceptor({
 
         if (update.shouldEvaluate && autoBiome) {
             handleAutomationStateChanged();
+        }
+    },
+    onGuildBoosterResponse(response) {
+        if (autoBiome) {
+            autoBiome.handleGuildBoosterResponse(response);
+        } else {
+            pendingGuildBoosterResponse = response;
         }
     },
     onQuestResponse(response) {
@@ -1289,6 +1297,11 @@ function initialize() {
         }
     }
     pendingCompetitionResponses.clear();
+
+    if (pendingGuildBoosterResponse) {
+        autoBiome.handleGuildBoosterResponse(pendingGuildBoosterResponse);
+        pendingGuildBoosterResponse = null;
+    }
 
     if (pendingQuestResponse) {
         autoBiome.handleQuestResponse(pendingQuestResponse);

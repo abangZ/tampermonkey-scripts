@@ -213,11 +213,39 @@ export function normalizeWeatherResponse(pathname, payload) {
     };
 }
 
-export function getBiomeScore(biomeId, xpBonus, biomeWeight) {
+export function normalizeGuildBoostersByBiome(payload) {
+    const boosters = Array.isArray(payload?.boosters)
+        ? payload.boosters
+        : Array.isArray(payload)
+          ? payload
+          : [];
+    const guildBoostersByBiome = {};
+
+    for (const booster of boosters) {
+        const biomeId = normalizeBiomeId(booster?.biome_id ?? booster?.biomeId);
+        const guildXpBonus = normalizeXpBonus(
+            booster?.bonus_percent ?? booster?.bonusPercent ?? 50,
+        );
+
+        if (!biomeId || guildXpBonus <= 0) {
+            continue;
+        }
+
+        guildBoostersByBiome[biomeId] = Math.max(
+            guildBoostersByBiome[biomeId] ?? 0,
+            guildXpBonus,
+        );
+    }
+
+    return guildBoostersByBiome;
+}
+
+export function getBiomeScore(biomeId, xpBonus, biomeWeight, guildXpBonus = 0) {
     const normalizedBiomeId = normalizeBiomeId(biomeId) ?? 1;
 
     return (
         normalizeXpBonus(xpBonus) +
+        normalizeXpBonus(guildXpBonus) +
         (normalizedBiomeId - 1) * normalizeXpBonus(biomeWeight)
     );
 }
@@ -290,6 +318,7 @@ export function selectBestBiome({
     biomeWeight,
     competitionBiomes,
     dailyQuests = [],
+    guildBoostersByBiome = {},
     now = Date.now(),
     player,
     priorityOrder,
@@ -321,12 +350,19 @@ export function selectBestBiome({
               }).length
             : 0;
 
-        const score = getBiomeScore(biomeId, weather.xpBonus, biomeWeight);
+        const guildXpBonus = normalizeXpBonus(guildBoostersByBiome?.[biomeId]);
+        const score = getBiomeScore(
+            biomeId,
+            weather.xpBonus,
+            biomeWeight,
+            guildXpBonus,
+        );
 
         candidates.push({
             baitId: findAvailableBaitForBiome(player, biomeId),
             biomeId,
             dailyQuestMatchCount,
+            guildXpBonus,
             priorityValues: {
                 [AUTO_BIOME_PRIORITY_IDS.guildCompetition]:
                     biomeId ===
@@ -370,7 +406,7 @@ export function selectBestBiome({
         return null;
     }
 
-    const { dailyQuestMatchCount, priorityValues, ...bestBiome } =
+    const { dailyQuestMatchCount, guildXpBonus, priorityValues, ...bestBiome } =
         candidates[0];
     const selectionPriority =
         decisionOrder.find(
@@ -381,6 +417,7 @@ export function selectBestBiome({
 
     return {
         ...bestBiome,
+        ...(guildXpBonus > 0 ? { guildXpBonus } : {}),
         selectionPriority,
         ...(selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition
             ? { competitionType: 'guild' }
@@ -412,6 +449,8 @@ function formatTargetSummary(target) {
     const weatherLabel = getWeatherLabel(target.weather);
     const signedXpBonus =
         target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
+    const guildXpBonusLabel =
+        target.guildXpBonus > 0 ? ` · 公会 +${target.guildXpBonus}%` : '';
 
     const priorityLabel =
         target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition
@@ -429,7 +468,7 @@ function formatTargetSummary(target) {
                     ? '每日任务优先 · '
                     : '';
 
-    return `${priorityLabel}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
+    return `${priorityLabel}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}%${guildXpBonusLabel} · 评分 ${target.score}`;
 }
 
 function getErrorMessage(error) {
@@ -528,6 +567,7 @@ export function createAutoBiomeController({
     let competitionHookTimer = null;
     let competitionHookPending = false;
     let derbyResponse;
+    let guildBoostersByBiome = {};
     let guildResponse;
     let tournamentResponse;
     const tournamentStandingsById = new Map();
@@ -570,6 +610,7 @@ export function createAutoBiomeController({
             autoBiomeDailyQuestStatus: dailyQuestState.status,
             autoBiomeDailyQuestUpdatedAt: dailyQuestState.updatedAt,
             autoBiomeDailyQuests: dailyQuestState.quests,
+            autoBiomeGuildBoostersByBiome: guildBoostersByBiome,
             autoBiomeLastUpdatedAt: lastUpdatedAt,
             autoBiomeStatus: status,
             autoBiomeTarget: target,
@@ -698,6 +739,17 @@ export function createAutoBiomeController({
 
         updateCompetitionState();
         scheduleCompetitionEvaluation();
+        return true;
+    }
+
+    function handleGuildBoosterResponse({ pathname, payload }) {
+        if (pathname !== '/api/guild/boosters/active') {
+            return false;
+        }
+
+        guildBoostersByBiome = normalizeGuildBoostersByBiome(payload);
+        notifyStateChanged();
+        void evaluateBestBiome();
         return true;
     }
 
@@ -1032,6 +1084,7 @@ export function createAutoBiomeController({
             biomeWeight: autoBiomeSettings.biomeWeight,
             competitionBiomes,
             dailyQuests: dailyQuestState.quests,
+            guildBoostersByBiome,
             player,
             priorityOrder: normalizedPriorityOrder,
             weatherByBiome,
@@ -1131,6 +1184,7 @@ export function createAutoBiomeController({
         getSnapshot,
         handleCastResult,
         handleCompetitionResponse,
+        handleGuildBoosterResponse,
         handleQuestResponse,
         handleStateChanged,
         handleWeatherResponse,

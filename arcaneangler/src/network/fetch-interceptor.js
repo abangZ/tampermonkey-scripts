@@ -7,6 +7,7 @@ export function installFetchInterceptor({
     onCastResult,
     onCompetitionResponse,
     onGameStateResponse,
+    onGuildBoosterResponse,
     onQuestResponse,
     onStaffQuestion,
     onStaffQuestionResolved,
@@ -140,6 +141,23 @@ export function installFetchInterceptor({
             } catch (error) {
                 console.warn('[自动换图] 无法复制游戏比赛轮询响应：', error);
             }
+        } else if (
+            method === 'GET' &&
+            isGuildBoosterResponsePath(url?.pathname)
+        ) {
+            try {
+                void collectJsonResponse(
+                    response.clone(),
+                    {
+                        method,
+                        pathname: url.pathname,
+                    },
+                    onGuildBoosterResponse,
+                    '[自动换图] 无法读取公会经验加成响应：',
+                );
+            } catch (error) {
+                console.warn('[自动换图] 无法复制公会经验加成响应：', error);
+            }
         }
 
         if (method === 'GET' && isWeatherResponsePath(url?.pathname)) {
@@ -230,6 +248,10 @@ export function isWeatherResponsePath(pathname) {
 
 export function isQuestResponsePath(pathname) {
     return pathname === '/api/quests';
+}
+
+export function isGuildBoosterResponsePath(pathname) {
+    return pathname === '/api/guild/boosters/active';
 }
 
 export function isStaffQuestionResolutionPath(method, pathname) {

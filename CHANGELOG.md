@@ -2,6 +2,10 @@
 
 本文件记录 Arcane Angler 自动抛竿 userscript 的主要用户可感知变更。
 
+## 2.14.0 - 2026-07-23
+
+- 修复加权经验对比漏算指定地图的公会经验加成，自动换图现会同时累加天气、公会 buff 和地图等级权重。
+
 ## 2.13.4 - 2026-07-21
 
 - 支持自动回答 “What biome number are you in now” Staff Question，并以纯数字提交当前地图编号。

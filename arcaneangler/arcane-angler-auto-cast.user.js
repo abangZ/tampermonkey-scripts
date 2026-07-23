@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Arcane Angler 自动抛竿
 // @namespace    arcane-angler-auto-cast
-// @version      2.13.4
+// @version      2.14.0
 // @author       Codex
 // @description  支持脚本和游戏内置自动钓鱼、自动打 Boss 与定时休息
 // @homepageURL  https://github.com/abangZ/tampermonkey-scripts
@@ -443,9 +443,20 @@
 			xpBonus: normalizeXpBonus(weather.xpBonus)
 		} };
 	}
-	function getBiomeScore(biomeId, xpBonus, biomeWeight) {
+	function normalizeGuildBoostersByBiome(payload) {
+		const boosters = Array.isArray(payload?.boosters) ? payload.boosters : Array.isArray(payload) ? payload : [];
+		const guildBoostersByBiome = {};
+		for (const booster of boosters) {
+			const biomeId = normalizeBiomeId$1(booster?.biome_id ?? booster?.biomeId);
+			const guildXpBonus = normalizeXpBonus(booster?.bonus_percent ?? booster?.bonusPercent ?? 50);
+			if (!biomeId || guildXpBonus <= 0) continue;
+			guildBoostersByBiome[biomeId] = Math.max(guildBoostersByBiome[biomeId] ?? 0, guildXpBonus);
+		}
+		return guildBoostersByBiome;
+	}
+	function getBiomeScore(biomeId, xpBonus, biomeWeight, guildXpBonus = 0) {
 		const normalizedBiomeId = normalizeBiomeId$1(biomeId) ?? 1;
-		return normalizeXpBonus(xpBonus) + (normalizedBiomeId - 1) * normalizeXpBonus(biomeWeight);
+		return normalizeXpBonus(xpBonus) + normalizeXpBonus(guildXpBonus) + (normalizedBiomeId - 1) * normalizeXpBonus(biomeWeight);
 	}
 	function findAvailableBaitForBiome(player, biomeId) {
 		const inventory = player?.baitInventory;
@@ -476,7 +487,7 @@
 			personalDerbyBiomeId: activeDerby?.is_registered === true ? normalizeBiomeId$1(activeDerby.biome_id) : null
 		};
 	}
-	function selectBestBiome({ biomeWeight, competitionBiomes, dailyQuests = [], now = Date.now(), player, priorityOrder, weatherByBiome }) {
+	function selectBestBiome({ biomeWeight, competitionBiomes, dailyQuests = [], guildBoostersByBiome = {}, now = Date.now(), player, priorityOrder, weatherByBiome }) {
 		const decisionOrder = getAutoBiomeDecisionOrder(priorityOrder);
 		const usesDailyQuests = decisionOrder.includes(AUTO_BIOME_PRIORITY_IDS.dailyQuest);
 		const unlockedBiomes = Array.isArray(player?.unlockedBiomes) ? player.unlockedBiomes : [player?.currentBiome ?? 1];
@@ -491,11 +502,13 @@
 				now,
 				weather: weather.weather
 			}).length : 0;
-			const score = getBiomeScore(biomeId, weather.xpBonus, biomeWeight);
+			const guildXpBonus = normalizeXpBonus(guildBoostersByBiome?.[biomeId]);
+			const score = getBiomeScore(biomeId, weather.xpBonus, biomeWeight, guildXpBonus);
 			candidates.push({
 				baitId: findAvailableBaitForBiome(player, biomeId),
 				biomeId,
 				dailyQuestMatchCount,
+				guildXpBonus,
 				priorityValues: {
 					[AUTO_BIOME_PRIORITY_IDS.guildCompetition]: biomeId === normalizeBiomeId$1(competitionBiomes?.guildTournamentBiomeId) ? 1 : 0,
 					[AUTO_BIOME_PRIORITY_IDS.personalCompetition]: biomeId === normalizeBiomeId$1(competitionBiomes?.personalDerbyBiomeId) ? 1 : 0,
@@ -517,10 +530,11 @@
 			return right.biomeId - left.biomeId;
 		});
 		if (candidates.length === 0) return null;
-		const { dailyQuestMatchCount, priorityValues, ...bestBiome } = candidates[0];
+		const { dailyQuestMatchCount, guildXpBonus, priorityValues, ...bestBiome } = candidates[0];
 		const selectionPriority = decisionOrder.find((priorityId) => priorityId === AUTO_BIOME_PRIORITY_IDS.weightedExperience || priorityValues[priorityId] > 0) ?? AUTO_BIOME_PRIORITY_IDS.weightedExperience;
 		return {
 			...bestBiome,
+			...guildXpBonus > 0 ? { guildXpBonus } : {},
 			selectionPriority,
 			...selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition ? { competitionType: "guild" } : {},
 			...selectionPriority === AUTO_BIOME_PRIORITY_IDS.personalCompetition ? { competitionType: "personal" } : {},
@@ -539,7 +553,8 @@
 	function formatTargetSummary(target) {
 		const weatherLabel = getWeatherLabel(target.weather);
 		const signedXpBonus = target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
-		return `${target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition ? "公会赛优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.personalCompetition ? "个人赛优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.arcaneSurge ? "奥术涌动优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.goldBreeze ? "金风优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.dailyQuest ? "每日任务优先 · " : ""}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}% · 评分 ${target.score}`;
+		const guildXpBonusLabel = target.guildXpBonus > 0 ? ` · 公会 +${target.guildXpBonus}%` : "";
+		return `${target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition ? "公会赛优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.personalCompetition ? "个人赛优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.arcaneSurge ? "奥术涌动优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.goldBreeze ? "金风优先 · " : target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.dailyQuest ? "每日任务优先 · " : ""}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}%${guildXpBonusLabel} · 评分 ${target.score}`;
 	}
 	function getErrorMessage$1(error) {
 		return String(error?.message ?? error ?? "未知错误");
@@ -590,6 +605,7 @@
 		let competitionHookTimer = null;
 		let competitionHookPending = false;
 		let derbyResponse;
+		let guildBoostersByBiome = {};
 		let guildResponse;
 		let tournamentResponse;
 		const tournamentStandingsById = new Map();
@@ -629,6 +645,7 @@
 				autoBiomeDailyQuestStatus: dailyQuestState.status,
 				autoBiomeDailyQuestUpdatedAt: dailyQuestState.updatedAt,
 				autoBiomeDailyQuests: dailyQuestState.quests,
+				autoBiomeGuildBoostersByBiome: guildBoostersByBiome,
 				autoBiomeLastUpdatedAt: lastUpdatedAt,
 				autoBiomeStatus: status,
 				autoBiomeTarget: target,
@@ -690,6 +707,13 @@
 			if (!matched) return false;
 			updateCompetitionState();
 			scheduleCompetitionEvaluation();
+			return true;
+		}
+		function handleGuildBoosterResponse({ pathname, payload }) {
+			if (pathname !== "/api/guild/boosters/active") return false;
+			guildBoostersByBiome = normalizeGuildBoostersByBiome(payload);
+			notifyStateChanged();
+			evaluateBestBiome();
 			return true;
 		}
 		function applyDailyQuestResponse(payload, source) {
@@ -872,6 +896,7 @@
 				biomeWeight: autoBiomeSettings.biomeWeight,
 				competitionBiomes,
 				dailyQuests: dailyQuestState.quests,
+				guildBoostersByBiome,
 				player,
 				priorityOrder: normalizedPriorityOrder,
 				weatherByBiome
@@ -927,6 +952,7 @@
 			getSnapshot,
 			handleCastResult,
 			handleCompetitionResponse,
+			handleGuildBoosterResponse,
 			handleQuestResponse,
 			handleStateChanged,
 			handleWeatherResponse,
@@ -2437,7 +2463,7 @@
 		} });
 		return true;
 	}
-	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult, onCompetitionResponse, onGameStateResponse, onQuestResponse, onStaffQuestion, onStaffQuestionResolved, onWeatherResponse }) {
+	function installFetchInterceptor({ onCaptchaChallenge, onCaptchaVerified, onCastResult, onCompetitionResponse, onGameStateResponse, onGuildBoosterResponse, onQuestResponse, onStaffQuestion, onStaffQuestionResolved, onWeatherResponse }) {
 		const originalFetch = window.fetch;
 		window.fetch = async function(input, init) {
 			const request = input instanceof Request ? input : null;
@@ -2486,6 +2512,14 @@
 			} catch (error) {
 				console.warn("[自动换图] 无法复制游戏比赛轮询响应：", error);
 			}
+			else if (method === "GET" && isGuildBoosterResponsePath(url?.pathname)) try {
+				collectJsonResponse(response.clone(), {
+					method,
+					pathname: url.pathname
+				}, onGuildBoosterResponse, "[自动换图] 无法读取公会经验加成响应：");
+			} catch (error) {
+				console.warn("[自动换图] 无法复制公会经验加成响应：", error);
+			}
 			if (method === "GET" && isWeatherResponsePath(url?.pathname)) try {
 				collectJsonResponse(response.clone(), {
 					method,
@@ -2533,6 +2567,9 @@
 	}
 	function isQuestResponsePath(pathname) {
 		return pathname === "/api/quests";
+	}
+	function isGuildBoosterResponsePath(pathname) {
+		return pathname === "/api/guild/boosters/active";
 	}
 	function isStaffQuestionResolutionPath(method, pathname) {
 		return method === "POST" && /^\/api\/moderation\/(?:answer|dismiss)-toast-question\/[^/]+$/.test(pathname ?? "");
@@ -4614,6 +4651,7 @@
 	var pendingCaptchaChallenge = null;
 	var pendingStaffQuestion = null;
 	var pendingCompetitionResponses = new Map();
+	var pendingGuildBoosterResponse = null;
 	var pendingQuestResponse = null;
 	var pendingWeatherResponses = new Map();
 	var gameState = createGameStateStore();
@@ -4667,6 +4705,10 @@
 		},
 		onGameStateResponse(response) {
 			if (gameState.handleResponse(response).shouldEvaluate && autoBiome) handleAutomationStateChanged();
+		},
+		onGuildBoosterResponse(response) {
+			if (autoBiome) autoBiome.handleGuildBoosterResponse(response);
+			else pendingGuildBoosterResponse = response;
 		},
 		onQuestResponse(response) {
 			if (autoBiome) autoBiome.handleQuestResponse(response);
@@ -5317,6 +5359,10 @@
 		pendingWeatherResponses.clear();
 		for (const response of pendingCompetitionResponses.values()) if (autoBiome.handleCompetitionResponse(response)) autoBait.handleStateChanged({ force: true });
 		pendingCompetitionResponses.clear();
+		if (pendingGuildBoosterResponse) {
+			autoBiome.handleGuildBoosterResponse(pendingGuildBoosterResponse);
+			pendingGuildBoosterResponse = null;
+		}
 		if (pendingQuestResponse) {
 			autoBiome.handleQuestResponse(pendingQuestResponse);
 			pendingQuestResponse = null;

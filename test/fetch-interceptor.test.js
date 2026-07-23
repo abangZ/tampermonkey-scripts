@@ -6,6 +6,7 @@ import {
     isCastResultResponsePath,
     isCompetitionResponsePath,
     isGameStateResponsePath,
+    isGuildBoosterResponsePath,
     isQuestResponsePath,
     isStaffQuestionResolutionPath,
     isWeatherResponsePath,
@@ -84,6 +85,11 @@ test('只 hook 游戏已有的比赛与公会轮询接口', () => {
     );
     assert.equal(isCompetitionResponsePath('/api/game/weather'), false);
     assert.equal(isCompetitionResponsePath('/api/game/player'), false);
+    assert.equal(
+        isGuildBoosterResponsePath('/api/guild/boosters/active'),
+        true,
+    );
+    assert.equal(isGuildBoosterResponsePath('/api/guild/my-guild'), false);
 });
 
 test('会识别角色状态和天气响应路径', () => {
@@ -269,6 +275,46 @@ test('fetch hook 会读取比赛轮询响应且不改变原响应', async () => 
         assert.deepEqual(captured, [
             {
                 pathname: '/api/guild/tournaments/current',
+                payload,
+            },
+        ]);
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('fetch hook 会读取公会经验加成响应', async () => {
+    const previousWindow = globalThis.window;
+    const payload = {
+        boosters: [{ biome_id: 4, bonus_percent: 50 }],
+    };
+    const captured = [];
+
+    globalThis.window = {
+        async fetch() {
+            return new Response(JSON.stringify(payload));
+        },
+        location: {
+            href: 'https://arcaneangler.com/',
+        },
+    };
+
+    try {
+        installFetchInterceptor({
+            onGuildBoosterResponse(response) {
+                captured.push(response);
+            },
+        });
+
+        await window.fetch(
+            'https://arcaneangler.com/api/guild/boosters/active',
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.deepEqual(captured, [
+            {
+                method: 'GET',
+                pathname: '/api/guild/boosters/active',
                 payload,
             },
         ]);

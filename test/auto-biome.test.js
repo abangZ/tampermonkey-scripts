@@ -7,6 +7,7 @@ import {
     findMatchingDailyQuests,
     getBiomeScore,
     normalizeDailyQuests,
+    normalizeGuildBoostersByBiome,
     normalizeWeatherByBiome,
     normalizeWeatherResponse,
     resolveCompetitionBiomes,
@@ -39,10 +40,27 @@ function createPriorityOrder(...enabledPriorities) {
     ];
 }
 
-test('地图评分会叠加天气经验和地图等级权重', () => {
+test('地图评分会叠加天气经验、公会加成和地图等级权重', () => {
     assert.equal(getBiomeScore(1, 30, 5), 30);
     assert.equal(getBiomeScore(4, 30, 5), 45);
     assert.equal(getBiomeScore(4, 30, 10), 60);
+    assert.equal(getBiomeScore(4, 30, 10, 50), 110);
+});
+
+test('公会经验加成会按地图归一化', () => {
+    assert.deepEqual(
+        normalizeGuildBoostersByBiome({
+            boosters: [
+                { biome_id: 2, bonus_percent: 50 },
+                { biome_id: '4', bonus_percent: '75' },
+                { biome_id: 0, bonus_percent: 100 },
+            ],
+        }),
+        {
+            2: 50,
+            4: 75,
+        },
+    );
 });
 
 test('单地图天气接口响应会归一化到对应地图', () => {
@@ -175,6 +193,36 @@ test('只从已解锁地图选择，鱼饵库存不影响候选地图', () => {
             selectionPriority: arcaneSurge,
             weather: 'arcane_surge',
             xpBonus: 75,
+        },
+    );
+});
+
+test('加权经验对比会把指定地图的公会 buff 算入评分', () => {
+    const player = {
+        currentBiome: 1,
+        unlockedBiomes: [1, 2],
+    };
+    const weatherByBiome = {
+        1: { weather: 'rain', xpBonus: 30 },
+        2: { weather: 'clear', xpBonus: 0 },
+    };
+
+    assert.deepEqual(
+        selectBestBiome({
+            biomeWeight: 0,
+            guildBoostersByBiome: { 2: 50 },
+            player,
+            priorityOrder: createPriorityOrder(),
+            weatherByBiome,
+        }),
+        {
+            baitId: null,
+            biomeId: 2,
+            guildXpBonus: 50,
+            score: 50,
+            selectionPriority: weightedExperience,
+            weather: 'clear',
+            xpBonus: 0,
         },
     );
 });
@@ -565,6 +613,42 @@ test('控制器会聚合游戏 hook 捕获的比赛响应', () => {
         });
         assert.equal(snapshot.autoBiomeCompetitionStatus, '公会 B5 · 个人 B4');
         assert.ok(snapshot.autoBiomeCompetitionUpdatedAt > 0);
+        controller.destroy();
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('控制器会读取 fetch hook 捕获的公会经验加成', () => {
+    const previousWindow = globalThis.window;
+
+    globalThis.window = {
+        clearTimeout() {},
+        setTimeout() {
+            return 1;
+        },
+    };
+
+    try {
+        const controller = createAutoBiomeController({
+            getState() {
+                return {};
+            },
+        });
+
+        assert.equal(
+            controller.handleGuildBoosterResponse({
+                pathname: '/api/guild/boosters/active',
+                payload: {
+                    boosters: [{ biome_id: 6, bonus_percent: 50 }],
+                },
+            }),
+            true,
+        );
+        assert.deepEqual(
+            controller.getSnapshot().autoBiomeGuildBoostersByBiome,
+            { 6: 50 },
+        );
         controller.destroy();
     } finally {
         globalThis.window = previousWindow;
