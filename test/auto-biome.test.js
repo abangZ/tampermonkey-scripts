@@ -48,14 +48,28 @@ test('地图评分会叠加天气经验、公会加成和地图等级权重', ()
 });
 
 test('公会经验加成会按地图归一化', () => {
+    const now = Date.parse('2026-07-24T00:00:00.000Z');
+
     assert.deepEqual(
-        normalizeGuildBoostersByBiome({
-            boosters: [
-                { biome_id: 2, bonus_percent: 50 },
-                { biome_id: '4', bonus_percent: '75' },
-                { biome_id: 0, bonus_percent: 100 },
-            ],
-        }),
+        normalizeGuildBoostersByBiome(
+            {
+                boosters: [
+                    {
+                        biome_id: 2,
+                        bonus_percent: 50,
+                        expires_at: '2026-07-24T00:30:00.000Z',
+                    },
+                    {
+                        biome_id: '3',
+                        bonus_percent: '60',
+                        expires_at: '2026-07-24T00:00:00.000Z',
+                    },
+                    { biome_id: '4', bonus_percent: '75' },
+                    { biome_id: 0, bonus_percent: 100 },
+                ],
+            },
+            now,
+        ),
         {
             2: 50,
             4: 75,
@@ -621,13 +635,18 @@ test('控制器会聚合游戏 hook 捕获的比赛响应', () => {
 
 test('控制器会读取 fetch hook 捕获的公会经验加成', () => {
     const previousWindow = globalThis.window;
+    const previousDateNow = Date.now;
+    const scheduledCallbacks = [];
+    let now = Date.parse('2026-07-24T00:00:00.000Z');
 
     globalThis.window = {
         clearTimeout() {},
-        setTimeout() {
-            return 1;
+        setTimeout(callback) {
+            scheduledCallbacks.push(callback);
+            return scheduledCallbacks.length;
         },
     };
+    Date.now = () => now;
 
     try {
         const controller = createAutoBiomeController({
@@ -640,7 +659,18 @@ test('控制器会读取 fetch hook 捕获的公会经验加成', () => {
             controller.handleGuildBoosterResponse({
                 pathname: '/api/guild/boosters/active',
                 payload: {
-                    boosters: [{ biome_id: 6, bonus_percent: 50 }],
+                    boosters: [
+                        {
+                            biome_id: 5,
+                            bonus_percent: 75,
+                            expires_at: '2026-07-23T23:59:59.000Z',
+                        },
+                        {
+                            biome_id: 6,
+                            bonus_percent: 50,
+                            expires_at: '2026-07-24T00:30:00.000Z',
+                        },
+                    ],
                 },
             }),
             true,
@@ -649,8 +679,16 @@ test('控制器会读取 fetch hook 捕获的公会经验加成', () => {
             controller.getSnapshot().autoBiomeGuildBoostersByBiome,
             { 6: 50 },
         );
+
+        now = Date.parse('2026-07-24T00:30:00.050Z');
+        scheduledCallbacks[0]();
+        assert.deepEqual(
+            controller.getSnapshot().autoBiomeGuildBoostersByBiome,
+            {},
+        );
         controller.destroy();
     } finally {
+        Date.now = previousDateNow;
         globalThis.window = previousWindow;
     }
 });

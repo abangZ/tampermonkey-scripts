@@ -95,6 +95,10 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         assert.ok(host);
         assert.ok(host.shadowRoot);
         assert.match(host.shadowRoot.textContent, /自动抛竿/);
+        assert.equal(
+            host.shadowRoot.querySelector('.hint-version')?.textContent,
+            'v2.16.0',
+        );
         assert.ok(host.shadowRoot.querySelector('#auto-biome-toggle'));
         const autoBiomePriorityList = host.shadowRoot.querySelector(
             '#auto-biome-priority-list',

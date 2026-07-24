@@ -524,10 +524,17 @@
 }
 
 .hint {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
     margin-top: 9px;
-    text-align: center;
     color: rgba(255, 255, 255, 0.42);
     font-size: 11px;
+}
+
+.hint-version {
+    color: rgba(255, 255, 255, 0.58);
 }
 
 .stats-filters {

@@ -213,21 +213,45 @@ export function normalizeWeatherResponse(pathname, payload) {
     };
 }
 
-export function normalizeGuildBoostersByBiome(payload) {
-    const boosters = Array.isArray(payload?.boosters)
+function getGuildBoosters(payload) {
+    return Array.isArray(payload?.boosters)
         ? payload.boosters
         : Array.isArray(payload)
           ? payload
           : [];
+}
+
+function getGuildBoosterExpiresAt(booster) {
+    const expiresAt = Date.parse(
+        String(booster?.expires_at ?? booster?.expiresAt ?? ''),
+    );
+
+    return Number.isFinite(expiresAt) ? expiresAt : null;
+}
+
+function getNextGuildBoosterExpiration(payload, now = Date.now()) {
+    const expirations = getGuildBoosters(payload)
+        .map(getGuildBoosterExpiresAt)
+        .filter((expiresAt) => expiresAt !== null && expiresAt > now);
+
+    return expirations.length > 0 ? Math.min(...expirations) : null;
+}
+
+export function normalizeGuildBoostersByBiome(payload, now = Date.now()) {
     const guildBoostersByBiome = {};
 
-    for (const booster of boosters) {
+    for (const booster of getGuildBoosters(payload)) {
         const biomeId = normalizeBiomeId(booster?.biome_id ?? booster?.biomeId);
         const guildXpBonus = normalizeXpBonus(
             booster?.bonus_percent ?? booster?.bonusPercent ?? 50,
         );
+        const expiresAt = getGuildBoosterExpiresAt(booster);
 
-        if (!biomeId || guildXpBonus <= 0) {
+        if (
+            !biomeId ||
+            guildXpBonus <= 0 ||
+            (expiresAt !== null && expiresAt <= now)
+        ) {
             continue;
         }
 
@@ -567,6 +591,8 @@ export function createAutoBiomeController({
     let competitionHookTimer = null;
     let competitionHookPending = false;
     let derbyResponse;
+    let guildBoosterExpiryTimer = null;
+    let guildBoosterResponse;
     let guildBoostersByBiome = {};
     let guildResponse;
     let tournamentResponse;
@@ -747,10 +773,30 @@ export function createAutoBiomeController({
             return false;
         }
 
-        guildBoostersByBiome = normalizeGuildBoostersByBiome(payload);
+        guildBoosterResponse = payload;
+        updateGuildBoosters();
+        return true;
+    }
+
+    function updateGuildBoosters() {
+        window.clearTimeout(guildBoosterExpiryTimer);
+        guildBoostersByBiome =
+            normalizeGuildBoostersByBiome(guildBoosterResponse);
+
+        const nextExpiration =
+            getNextGuildBoosterExpiration(guildBoosterResponse);
+
+        if (nextExpiration !== null) {
+            guildBoosterExpiryTimer = window.setTimeout(
+                updateGuildBoosters,
+                Math.max(0, nextExpiration - Date.now()) + 50,
+            );
+        } else {
+            guildBoosterExpiryTimer = null;
+        }
+
         notifyStateChanged();
         void evaluateBestBiome();
-        return true;
     }
 
     function applyDailyQuestResponse(payload, source) {
@@ -1207,6 +1253,7 @@ export function createAutoBiomeController({
     function destroy() {
         window.clearTimeout(fallbackTimer);
         window.clearTimeout(competitionHookTimer);
+        window.clearTimeout(guildBoosterExpiryTimer);
     }
 
     return {

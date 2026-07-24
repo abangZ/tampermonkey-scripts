@@ -1,3 +1,4 @@
+import { userscriptVersion } from '../../userscript.config.js';
 import { EARNINGS_CATEGORY_DISPLAY, PANEL_ID } from '../config.js';
 import {
     AUTO_BIOME_PRIORITY_IDS,
@@ -328,7 +329,10 @@ export function createPanelController({
           启动
         </button>
 
-        <div class="hint">快捷键：Alt + A</div>
+        <div class="hint">
+          <span>快捷键：Alt + A</span>
+          <span class="hint-version">v${userscriptVersion}</span>
+        </div>
       </div>
 
       <div
