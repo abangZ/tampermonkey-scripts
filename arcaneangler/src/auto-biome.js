@@ -21,6 +21,7 @@ const COMPETITION_HOOK_DEBOUNCE = 1000;
 const DAILY_QUEST_FALLBACK_FRESHNESS = 60 * 60 * 1000;
 const ARCANE_SURGE_WEATHER = 'arcane_surge';
 const GOLD_BREEZE_WEATHER = 'gold_breeze';
+const MASTERY_XP_BONUS_PER_LEVEL = 5;
 const WEATHER_FALLBACK_FRESHNESS = 60000;
 
 function normalizeBiomeId(value) {
@@ -264,12 +265,64 @@ export function normalizeGuildBoostersByBiome(payload, now = Date.now()) {
     return guildBoostersByBiome;
 }
 
-export function getBiomeScore(biomeId, xpBonus, biomeWeight, guildXpBonus = 0) {
+export function normalizeMasteryXpBonusesByBiome(payload) {
+    const source = payload?.mastery ?? payload;
+
+    if (!source || typeof source !== 'object') {
+        return {};
+    }
+
+    const masteryEntries = Array.isArray(source)
+        ? source.map((mastery) => [null, mastery])
+        : Object.entries(source);
+    const masteryXpBonusesByBiome = {};
+
+    for (const [rawBiomeId, mastery] of masteryEntries) {
+        if (!mastery || typeof mastery !== 'object') {
+            continue;
+        }
+
+        const biomeId = normalizeBiomeId(
+            mastery.biomeId ?? mastery.biome_id ?? rawBiomeId,
+        );
+        const masteryLevel = Math.max(
+            0,
+            Math.floor(
+                normalizeXpBonus(mastery.masteryLevel ?? mastery.mastery_level),
+            ),
+        );
+        const masteryXpBonus = normalizeXpBonus(
+            mastery.xpBonus ??
+                mastery.xp_bonus ??
+                masteryLevel * MASTERY_XP_BONUS_PER_LEVEL,
+        );
+
+        if (!biomeId || masteryXpBonus <= 0) {
+            continue;
+        }
+
+        masteryXpBonusesByBiome[biomeId] = Math.max(
+            masteryXpBonusesByBiome[biomeId] ?? 0,
+            masteryXpBonus,
+        );
+    }
+
+    return masteryXpBonusesByBiome;
+}
+
+export function getBiomeScore(
+    biomeId,
+    xpBonus,
+    biomeWeight,
+    guildXpBonus = 0,
+    masteryXpBonus = 0,
+) {
     const normalizedBiomeId = normalizeBiomeId(biomeId) ?? 1;
 
     return (
         normalizeXpBonus(xpBonus) +
         normalizeXpBonus(guildXpBonus) +
+        normalizeXpBonus(masteryXpBonus) +
         (normalizedBiomeId - 1) * normalizeXpBonus(biomeWeight)
     );
 }
@@ -343,6 +396,7 @@ export function selectBestBiome({
     competitionBiomes,
     dailyQuests = [],
     guildBoostersByBiome = {},
+    masteryXpBonusesByBiome = {},
     now = Date.now(),
     player,
     priorityOrder,
@@ -375,11 +429,15 @@ export function selectBestBiome({
             : 0;
 
         const guildXpBonus = normalizeXpBonus(guildBoostersByBiome?.[biomeId]);
+        const masteryXpBonus = normalizeXpBonus(
+            masteryXpBonusesByBiome?.[biomeId],
+        );
         const score = getBiomeScore(
             biomeId,
             weather.xpBonus,
             biomeWeight,
             guildXpBonus,
+            masteryXpBonus,
         );
 
         candidates.push({
@@ -387,6 +445,7 @@ export function selectBestBiome({
             biomeId,
             dailyQuestMatchCount,
             guildXpBonus,
+            masteryXpBonus,
             priorityValues: {
                 [AUTO_BIOME_PRIORITY_IDS.guildCompetition]:
                     biomeId ===
@@ -430,8 +489,13 @@ export function selectBestBiome({
         return null;
     }
 
-    const { dailyQuestMatchCount, guildXpBonus, priorityValues, ...bestBiome } =
-        candidates[0];
+    const {
+        dailyQuestMatchCount,
+        guildXpBonus,
+        masteryXpBonus,
+        priorityValues,
+        ...bestBiome
+    } = candidates[0];
     const selectionPriority =
         decisionOrder.find(
             (priorityId) =>
@@ -442,6 +506,7 @@ export function selectBestBiome({
     return {
         ...bestBiome,
         ...(guildXpBonus > 0 ? { guildXpBonus } : {}),
+        ...(masteryXpBonus > 0 ? { masteryXpBonus } : {}),
         selectionPriority,
         ...(selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition
             ? { competitionType: 'guild' }
@@ -475,6 +540,8 @@ function formatTargetSummary(target) {
         target.xpBonus > 0 ? `+${target.xpBonus}` : String(target.xpBonus);
     const guildXpBonusLabel =
         target.guildXpBonus > 0 ? ` · 公会 +${target.guildXpBonus}%` : '';
+    const masteryXpBonusLabel =
+        target.masteryXpBonus > 0 ? ` · 精通 +${target.masteryXpBonus}%` : '';
 
     const priorityLabel =
         target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition
@@ -492,7 +559,7 @@ function formatTargetSummary(target) {
                     ? '每日任务优先 · '
                     : '';
 
-    return `${priorityLabel}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}%${guildXpBonusLabel} · 评分 ${target.score}`;
+    return `${priorityLabel}${formatBiomeTarget(target)} · ${weatherLabel} ${signedXpBonus}%${guildXpBonusLabel}${masteryXpBonusLabel} · 评分 ${target.score}`;
 }
 
 function getErrorMessage(error) {
@@ -613,6 +680,9 @@ export function createAutoBiomeController({
     };
     let lastFullWeatherUpdatedAt = 0;
     let lastUpdatedAt = 0;
+    let masteryLoaded = false;
+    let masteryLoadStarted = false;
+    let masteryXpBonusesByBiome = {};
     let status = '等待天气数据';
     let switching = false;
     let target = null;
@@ -638,6 +708,8 @@ export function createAutoBiomeController({
             autoBiomeDailyQuests: dailyQuestState.quests,
             autoBiomeGuildBoostersByBiome: guildBoostersByBiome,
             autoBiomeLastUpdatedAt: lastUpdatedAt,
+            autoBiomeMasteryLoaded: masteryLoaded,
+            autoBiomeMasteryXpBonusesByBiome: masteryXpBonusesByBiome,
             autoBiomeStatus: status,
             autoBiomeTarget: target,
             autoBiomeWeatherByBiome: weatherByBiome,
@@ -875,6 +947,39 @@ export function createAutoBiomeController({
         return response.json();
     }
 
+    async function loadMasterySnapshot() {
+        if (masteryLoadStarted) {
+            return;
+        }
+
+        masteryLoadStarted = true;
+
+        try {
+            let payload = {};
+
+            if (typeof window.ApiService?.request === 'function') {
+                payload = await window.ApiService.request('/mastery');
+            } else if (typeof window.fetch === 'function') {
+                const response = await window.fetch('/api/mastery');
+
+                if (!response.ok) {
+                    throw new Error(`地图精通接口返回 ${response.status}`);
+                }
+
+                payload = await response.json();
+            }
+
+            masteryXpBonusesByBiome = normalizeMasteryXpBonusesByBiome(payload);
+        } catch (error) {
+            console.warn('[自动换图] 无法读取地图精通加成：', error);
+            masteryXpBonusesByBiome = {};
+        } finally {
+            masteryLoaded = true;
+            notifyStateChanged();
+            void evaluateBestBiome();
+        }
+    }
+
     function applyWeather(payload, source, { merge = false } = {}) {
         const nextWeather = normalizeWeatherResponse(
             source === 'request' ? '/api/game/weather' : source,
@@ -1070,6 +1175,11 @@ export function createAutoBiomeController({
             return;
         }
 
+        if (masteryLoadStarted && !masteryLoaded) {
+            setStatus('等待地图精通数据');
+            return;
+        }
+
         if (switching) {
             return;
         }
@@ -1144,6 +1254,7 @@ export function createAutoBiomeController({
             competitionBiomes,
             dailyQuests: dailyQuestState.quests,
             guildBoostersByBiome,
+            masteryXpBonusesByBiome,
             player,
             priorityOrder: normalizedPriorityOrder,
             weatherByBiome,
@@ -1246,6 +1357,7 @@ export function createAutoBiomeController({
 
     function start() {
         scheduleHourlyFallback();
+        void loadMasterySnapshot();
         void refreshWeather();
         void evaluateBestBiome();
     }

@@ -8,6 +8,7 @@ import {
     getBiomeScore,
     normalizeDailyQuests,
     normalizeGuildBoostersByBiome,
+    normalizeMasteryXpBonusesByBiome,
     normalizeWeatherByBiome,
     normalizeWeatherResponse,
     resolveCompetitionBiomes,
@@ -40,11 +41,12 @@ function createPriorityOrder(...enabledPriorities) {
     ];
 }
 
-test('地图评分会叠加天气经验、公会加成和地图等级权重', () => {
+test('地图评分会叠加天气经验、公会加成、精通加成和地图等级权重', () => {
     assert.equal(getBiomeScore(1, 30, 5), 30);
     assert.equal(getBiomeScore(4, 30, 5), 45);
     assert.equal(getBiomeScore(4, 30, 10), 60);
     assert.equal(getBiomeScore(4, 30, 10, 50), 110);
+    assert.equal(getBiomeScore(4, 30, 10, 50, 5), 115);
 });
 
 test('公会经验加成会按地图归一化', () => {
@@ -73,6 +75,22 @@ test('公会经验加成会按地图归一化', () => {
         {
             2: 50,
             4: 75,
+        },
+    );
+});
+
+test('地图精通经验加成会按地图归一化', () => {
+    assert.deepEqual(
+        normalizeMasteryXpBonusesByBiome({
+            mastery: {
+                1: { biomeId: 1, masteryLevel: 1, xpBonus: 5 },
+                2: { biome_id: '2', mastery_level: 2 },
+                3: { biomeId: 0, masteryLevel: 3, xpBonus: 15 },
+            },
+        }),
+        {
+            1: 5,
+            2: 10,
         },
     );
 });
@@ -237,6 +255,36 @@ test('加权经验对比会把指定地图的公会 buff 算入评分', () => {
             selectionPriority: weightedExperience,
             weather: 'clear',
             xpBonus: 0,
+        },
+    );
+});
+
+test('加权经验对比会把指定地图的精通加成算入评分', () => {
+    const player = {
+        currentBiome: 1,
+        unlockedBiomes: [1, 2],
+    };
+    const weatherByBiome = {
+        1: { weather: 'rain', xpBonus: 30 },
+        2: { weather: 'clear', xpBonus: 27 },
+    };
+
+    assert.deepEqual(
+        selectBestBiome({
+            biomeWeight: 0,
+            masteryXpBonusesByBiome: { 2: 5 },
+            player,
+            priorityOrder: createPriorityOrder(),
+            weatherByBiome,
+        }),
+        {
+            baitId: null,
+            biomeId: 2,
+            masteryXpBonus: 5,
+            score: 32,
+            selectionPriority: weightedExperience,
+            weather: 'clear',
+            xpBonus: 27,
         },
     );
 });
@@ -689,6 +737,89 @@ test('控制器会读取 fetch hook 捕获的公会经验加成', () => {
         controller.destroy();
     } finally {
         Date.now = previousDateNow;
+        globalThis.window = previousWindow;
+    }
+});
+
+test('控制器初始化只读取一次地图精通并用于首次选图', async () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+    const player = {
+        boat: null,
+        currentBiome: 1,
+        unlockedBiomes: [1, 2],
+    };
+
+    globalThis.window = {
+        ApiService: {
+            async changeBiome(biomeId) {
+                calls.push(['changeBiome', biomeId]);
+                player.currentBiome = biomeId;
+                return { success: true };
+            },
+            async getAllBiomeWeather() {
+                return {
+                    weather: {
+                        1: { weather: 'rain', xpBonus: 30 },
+                        2: { weather: 'clear', xpBonus: 27 },
+                    },
+                };
+            },
+            async request(pathname) {
+                calls.push(['request', pathname]);
+                return {
+                    mastery: {
+                        1: { biomeId: 1, masteryLevel: 0, xpBonus: 0 },
+                        2: { biomeId: 2, masteryLevel: 1, xpBonus: 5 },
+                    },
+                };
+            },
+        },
+        BIOMES: {
+            2: { name: 'Misty Pine Lake' },
+        },
+        clearTimeout() {},
+        setTimeout() {
+            return 1;
+        },
+    };
+
+    try {
+        const controller = createAutoBiomeController({
+            getPlayer() {
+                return player;
+            },
+            getState() {
+                return {
+                    autoBiomeSettings: {
+                        biomeWeight: 0,
+                        enabled: true,
+                        priorityOrder: createPriorityOrder(),
+                    },
+                    enabled: true,
+                };
+            },
+        });
+
+        controller.start();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        await controller.handleStateChanged();
+
+        assert.deepEqual(calls, [
+            ['request', '/mastery'],
+            ['changeBiome', 2],
+        ]);
+        assert.deepEqual(
+            controller.getSnapshot().autoBiomeMasteryXpBonusesByBiome,
+            { 2: 5 },
+        );
+        assert.match(
+            controller.getSnapshot().autoBiomeStatus,
+            /精通 \+5%.*评分 32/,
+        );
+        controller.destroy();
+    } finally {
         globalThis.window = previousWindow;
     }
 });

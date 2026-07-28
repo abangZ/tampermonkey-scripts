@@ -1285,6 +1285,7 @@ function initialize() {
             panel?.renderAutoBiomeSettings();
         },
     });
+    autoBiome.start();
 
     for (const response of pendingWeatherResponses.values()) {
         autoBiome.handleWeatherResponse(response);
@@ -1322,7 +1323,6 @@ function initialize() {
     setEnabled(enabled, {
         preserveSchedule: enabled && scheduleSettings.enabled,
     });
-    autoBiome.start();
     autoBoss.start();
 
     console.info('[自动抛竿] 脚本已加载，使用右下角按钮或 Alt + A 控制。');
