@@ -22,7 +22,6 @@ const DAILY_QUEST_FALLBACK_FRESHNESS = 60 * 60 * 1000;
 const ARCANE_SURGE_WEATHER = 'arcane_surge';
 const GOLD_BREEZE_WEATHER = 'gold_breeze';
 const MASTERY_XP_BONUS_PER_LEVEL = 5;
-const WEATHER_FALLBACK_FRESHNESS = 60000;
 
 function normalizeBiomeId(value) {
     const biomeId = Number(value);
@@ -640,10 +639,15 @@ async function autoEquipForBiome(
     }
 }
 
-function getNextHourlyRefreshDelay(now = new Date()) {
+export function getNextHourlyRefreshDelay(now = new Date()) {
     const nextRefresh = new Date(now);
 
-    nextRefresh.setHours(now.getHours() + 1, 0, 5, 0);
+    nextRefresh.setMinutes(0, 30, 0);
+
+    if (nextRefresh.getTime() <= now.getTime()) {
+        nextRefresh.setHours(nextRefresh.getHours() + 1);
+    }
+
     return Math.max(1000, nextRefresh.getTime() - now.getTime());
 }
 
@@ -678,7 +682,6 @@ export function createAutoBiomeController({
         status: '自动换图开启后读取',
         updatedAt: 0,
     };
-    let lastFullWeatherUpdatedAt = 0;
     let lastUpdatedAt = 0;
     let masteryLoaded = false;
     let masteryLoadStarted = false;
@@ -998,10 +1001,6 @@ export function createAutoBiomeController({
             : nextWeather;
         lastUpdatedAt = Date.now();
 
-        if (!merge) {
-            lastFullWeatherUpdatedAt = lastUpdatedAt;
-        }
-
         if (source !== 'request') {
             weatherRevision += 1;
         }
@@ -1087,15 +1086,13 @@ export function createAutoBiomeController({
         window.clearTimeout(fallbackTimer);
         fallbackTimer = window.setTimeout(async () => {
             const refreshes = [];
+            const { autoBiomeSettings = {}, enabled = false } =
+                getState?.() ?? {};
 
-            if (
-                Date.now() - lastFullWeatherUpdatedAt >
-                WEATHER_FALLBACK_FRESHNESS
-            ) {
+            if (enabled === true && autoBiomeSettings.enabled === true) {
                 refreshes.push(refreshWeather());
             }
 
-            const { autoBiomeSettings = {} } = getState?.() ?? {};
             const { dailyQuestEnabled } = getPriorityState(
                 autoBiomeSettings.priorityOrder,
             );

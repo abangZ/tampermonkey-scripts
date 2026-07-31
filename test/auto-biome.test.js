@@ -6,6 +6,7 @@ import {
     findAvailableBaitForBiome,
     findMatchingDailyQuests,
     getBiomeScore,
+    getNextHourlyRefreshDelay,
     normalizeDailyQuests,
     normalizeGuildBoostersByBiome,
     normalizeMasteryXpBonusesByBiome,
@@ -28,6 +29,17 @@ const {
     personalCompetition,
     weightedExperience,
 } = AUTO_BIOME_PRIORITY_IDS;
+
+test('小时天气刷新固定安排在下一次 00 分 30 秒', () => {
+    assert.equal(
+        getNextHourlyRefreshDelay(new Date(2026, 6, 31, 10, 0, 10)),
+        20000,
+    );
+    assert.equal(
+        getNextHourlyRefreshDelay(new Date(2026, 6, 31, 10, 0, 31)),
+        3599000,
+    );
+});
 
 function createPriorityOrder(...enabledPriorities) {
     return [
@@ -923,6 +935,56 @@ test('关闭自动换图后不会因小时兜底或完成任务刷新每日任�
         await new Promise((resolve) => setTimeout(resolve, 0));
 
         assert.equal(questRequestCount, 0);
+        controller.destroy();
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('自动换图开启时每小时主动刷新完整天气，即使现有天气刚更新', async () => {
+    const previousWindow = globalThis.window;
+    const scheduledCallbacks = [];
+    let weatherRequestCount = 0;
+
+    globalThis.window = {
+        ApiService: {
+            async getAllBiomeWeather() {
+                weatherRequestCount += 1;
+                return {
+                    weather: {
+                        1: { weather: 'clear', xpBonus: 0 },
+                    },
+                };
+            },
+        },
+        clearTimeout() {},
+        setTimeout(callback, delay) {
+            scheduledCallbacks.push({ callback, delay });
+            return scheduledCallbacks.length;
+        },
+    };
+
+    try {
+        const controller = createAutoBiomeController({
+            getState() {
+                return {
+                    autoBiomeSettings: {
+                        enabled: true,
+                        priorityOrder: createPriorityOrder(),
+                    },
+                    enabled: true,
+                };
+            },
+        });
+
+        controller.start();
+        await new Promise((resolve) => setTimeout(resolve, 0));
+        assert.equal(weatherRequestCount, 1);
+
+        await scheduledCallbacks[0].callback();
+
+        assert.equal(weatherRequestCount, 2);
+        assert.equal(scheduledCallbacks.length, 2);
         controller.destroy();
     } finally {
         globalThis.window = previousWindow;
