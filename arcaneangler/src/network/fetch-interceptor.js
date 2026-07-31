@@ -411,7 +411,7 @@ async function collectCastResponse(
             pathname,
             payload,
         });
-        onCastResult?.(result);
+        onCastResult?.(result, { pathname });
     } catch (error) {
         console.warn('[收益统计] 无法读取抛竿响应：', error);
     }

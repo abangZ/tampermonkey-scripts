@@ -155,8 +155,8 @@ test('fetch hook 会读取内置自动钓鱼的顶层鱼获响应', async () => 
 
     try {
         installFetchInterceptor({
-            onCastResult(result) {
-                castResults.push(result);
+            onCastResult(result, context) {
+                castResults.push({ context, result });
             },
             onGameStateResponse(response) {
                 stateResponses.push(response);
@@ -173,7 +173,12 @@ test('fetch hook 会读取内置自动钓鱼的顶层鱼获响应', async () => 
 
         await new Promise((resolve) => setTimeout(resolve, 0));
         assert.deepEqual(await response.json(), payload);
-        assert.deepEqual(castResults, [payload]);
+        assert.deepEqual(castResults, [
+            {
+                context: { pathname: '/api/game/auto-cast' },
+                result: payload,
+            },
+        ]);
         assert.deepEqual(stateResponses, [
             {
                 method: 'POST',

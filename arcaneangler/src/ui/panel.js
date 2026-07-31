@@ -151,6 +151,10 @@ export function createPanelController({
               <option value="high">高级饵（+500 幸运）</option>
               <option value="super">超级饵（+1000 幸运）</option>
         `;
+        const gameAutoFishingBaitGradeOptions = `
+              <option value="auto">自动选择（使用自动鱼饵设置）</option>
+              ${baitGradeOptions}
+        `;
         const autoBiomePriorityItems = AUTO_BIOME_PRIORITY_OPTIONS.map(
             ({ id, label }) => `
               <div
@@ -459,12 +463,12 @@ export function createPanelController({
           <label class="field">
             <span class="field-label">游戏内置自动钓鱼鱼饵</span>
             <select id="game-auto-fishing-bait-grade" class="input">
-              ${baitGradeOptions}
+              ${gameAutoFishingBaitGradeOptions}
             </select>
           </label>
 
           <div class="field-help">
-            开启后不再模拟点击抛竿按钮，改由游戏内置功能接管；“自动买鱼饵”开启时，首次启动和每次续期前都会确认独立设置的鱼饵，关闭时保持当前鱼饵不处理。
+            开启后不再模拟点击抛竿按钮，改由游戏内置功能接管；选择“自动选择”时遵循“自动鱼饵设置”的场景规则，明确选择某档鱼饵时则始终使用该档。关闭“自动买鱼饵”时保持当前鱼饵不处理。
           </div>
         </details>
 
@@ -682,7 +686,7 @@ export function createPanelController({
             </div>
 
             <div class="field-help">
-              金风天气优先使用独立鱼饵设置，默认为免费默认饵；其他天气根据当前地图是否为个人赛或公会赛地图选择鱼饵。游戏内置自动钓鱼使用“自动钓鱼方式”中的独立鱼饵。付费鱼饵库存低于设置值时购买，阈值按 100 的倍数保存。
+              金风天气优先使用独立鱼饵设置，默认为免费默认饵；其他天气根据当前地图是否为个人赛或公会赛地图选择鱼饵。游戏内置自动钓鱼选择“自动选择”时也遵循这些设置。付费鱼饵库存低于设置值时购买，阈值按 100 的倍数保存。
             </div>
           </div>
 
@@ -1856,7 +1860,7 @@ export function createPanelController({
         } = getState();
 
         const usesPaidGameAutoFishingBait =
-            gameAutoFishingSettings.baitGrade !== 'default' &&
+            !['auto', 'default'].includes(gameAutoFishingSettings.baitGrade) &&
             (gameAutoFishingSettings.enabled ||
                 scheduleSettings.gameAutoFishingDuringRest);
 

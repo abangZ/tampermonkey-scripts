@@ -60,6 +60,7 @@ import {
     normalizeAutoBaitMinimumQuantity,
     normalizeAutoBaitPurchaseQuantity,
     normalizeAutoBiomeWeight,
+    normalizeGameAutoFishingBaitGrade,
     normalizeIdleReloadMinutes,
     normalizeScheduleMinutes,
     saveAutoBaitSettings,
@@ -136,7 +137,7 @@ function handleWeatherResponse(response) {
     }
 }
 
-function recordCastResult(result) {
+function recordCastResult(result, { pathname } = {}) {
     fishingActivityWatchdog.markFishing();
     earningsStats = updateEarningsStats(
         earningsStats,
@@ -146,7 +147,16 @@ function recordCastResult(result) {
     saveEarningsStats(earningsStats);
     panel?.renderEarningsStats();
     autoBiome?.handleCastResult(result);
-    autoBait?.handleCastResult(result);
+    autoBait?.handleCastResult(
+        result,
+        pathname === '/api/game/auto-cast' &&
+            gameAutoFishingSettings.baitGrade !== 'auto'
+            ? {
+                  baitGrade: gameAutoFishingSettings.baitGrade,
+                  contextLabel: '内置自动钓鱼',
+              }
+            : undefined,
+    );
 }
 
 // 尽早安装 fetch hook，避免漏掉游戏初始化阶段的比赛与公会响应。
@@ -899,7 +909,7 @@ function setGameAutoFishingEnabled(nextEnabled) {
 function setGameAutoFishingBaitGrade(nextGrade) {
     gameAutoFishingSettings = {
         ...gameAutoFishingSettings,
-        baitGrade: normalizeAutoBaitGrade(
+        baitGrade: normalizeGameAutoFishingBaitGrade(
             nextGrade,
             gameAutoFishingSettings.baitGrade,
         ),

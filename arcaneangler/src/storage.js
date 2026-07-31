@@ -26,6 +26,7 @@ import {
 
 export const AUTO_BIOME_WEIGHTS = [0, 5, 10];
 export const AUTO_BAIT_GRADES = ['default', 'low', 'medium', 'high', 'super'];
+export const GAME_AUTO_FISHING_BAIT_GRADES = ['auto', ...AUTO_BAIT_GRADES];
 export const AUTO_BAIT_PURCHASE_QUANTITIES = [100, 1000];
 export const VERIFICATION_HISTORY_LIMIT = 5;
 
@@ -74,7 +75,7 @@ export function saveEnabled(value) {
 
 export function loadGameAutoFishingSettings() {
     const defaults = {
-        baitGrade: 'low',
+        baitGrade: 'auto',
         enabled: false,
     };
 
@@ -88,7 +89,7 @@ export function loadGameAutoFishingSettings() {
         }
 
         return {
-            baitGrade: normalizeAutoBaitGrade(
+            baitGrade: normalizeGameAutoFishingBaitGrade(
                 savedSettings.baitGrade,
                 defaults.baitGrade,
             ),
@@ -305,6 +306,10 @@ export function saveAutoBiomeSettings(autoBiomeSettings) {
 
 export function normalizeAutoBaitGrade(value, fallback = 'low') {
     return AUTO_BAIT_GRADES.includes(value) ? value : fallback;
+}
+
+export function normalizeGameAutoFishingBaitGrade(value, fallback = 'auto') {
+    return GAME_AUTO_FISHING_BAIT_GRADES.includes(value) ? value : fallback;
 }
 
 export function normalizeAutoBaitMinimumQuantity(value, fallback = 100) {

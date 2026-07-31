@@ -280,6 +280,141 @@ test('游戏内置自动钓鱼使用独立鱼饵并只按库存阈值补充一�
     }
 });
 
+test('内置自动钓鱼选择自动时使用自动鱼饵的场景设置', async () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+    let regularBaitGrade = 'super';
+    const player = {
+        baitInventory: {
+            bait_4_medium: 500,
+            bait_4_super: 500,
+        },
+        currentBiome: 4,
+        equippedBait: 'bait_4_low',
+        gold: 100000,
+    };
+
+    globalThis.window = {
+        ApiService: {
+            async buyBait(...args) {
+                calls.push(['buyBait', ...args]);
+                return { success: true };
+            },
+            async equipBait(...args) {
+                calls.push(['equipBait', ...args]);
+                return { success: true };
+            },
+        },
+        BAITS: [],
+    };
+
+    try {
+        const controller = createAutoBaitController({
+            getPlayer: () => player,
+            getState() {
+                return {
+                    autoBaitSettings: {
+                        enabled: true,
+                        minimumQuantity: 20,
+                        purchaseQuantity: 100,
+                        regularBaitGrade,
+                    },
+                    autoBiomeCompetitionBiomes: {},
+                    enabled: true,
+                };
+            },
+        });
+
+        assert.equal(await controller.prepareGameAutoFishing('auto'), true);
+        assert.deepEqual(calls, [['equipBait', 'bait_4_super']]);
+
+        player.equippedBait = 'bait_4_high';
+        controller.handleCastResult({
+            baitQuantity: 500,
+            currentBiome: 4,
+            equippedBait: 'bait_4_high',
+        });
+        regularBaitGrade = 'medium';
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.deepEqual(calls, [
+            ['equipBait', 'bait_4_super'],
+            ['equipBait', 'bait_4_medium'],
+        ]);
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
+test('内置自动钓鱼每次鱼获后继续保持独立鱼饵等级', async () => {
+    const previousWindow = globalThis.window;
+    const calls = [];
+    const player = {
+        baitInventory: {
+            bait_4_high: 119,
+            bait_4_super: 500,
+        },
+        currentBiome: 4,
+        equippedBait: 'bait_4_high',
+        gold: 100000,
+    };
+
+    globalThis.window = {
+        ApiService: {
+            async buyBait(...args) {
+                calls.push(['buyBait', ...args]);
+                return { success: true };
+            },
+            async equipBait(...args) {
+                calls.push(['equipBait', ...args]);
+                return { success: true };
+            },
+        },
+        BAITS: [],
+    };
+
+    try {
+        const controller = createAutoBaitController({
+            getPlayer: () => player,
+            getState() {
+                return {
+                    autoBaitSettings: {
+                        enabled: true,
+                        minimumQuantity: 20,
+                        purchaseQuantity: 100,
+                        regularBaitGrade: 'super',
+                    },
+                    autoBiomeCompetitionBiomes: {},
+                    enabled: true,
+                };
+            },
+        });
+
+        controller.handleCastResult(
+            {
+                baitQuantity: 118,
+                currentBiome: 4,
+                equippedBait: 'bait_4_high',
+            },
+            {
+                baitGrade: 'high',
+                contextLabel: '内置自动钓鱼',
+            },
+        );
+        await new Promise((resolve) => setTimeout(resolve, 0));
+
+        assert.deepEqual(calls, []);
+        assert.equal(
+            controller.getSnapshot().autoBaitCurrentBaitId,
+            'bait_4_high',
+        );
+        assert.equal(controller.getSnapshot().autoBaitCurrentQuantity, 118);
+        assert.match(controller.getSnapshot().autoBaitStatus, /内置自动钓鱼/);
+    } finally {
+        globalThis.window = previousWindow;
+    }
+});
+
 test('自动买鱼饵关闭时内置自动钓鱼保持当前鱼饵', async () => {
     const previousWindow = globalThis.window;
     const calls = [];

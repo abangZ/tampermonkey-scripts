@@ -97,7 +97,7 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         assert.match(host.shadowRoot.textContent, /自动抛竿/);
         assert.equal(
             host.shadowRoot.querySelector('.hint-version')?.textContent,
-            'v2.17.0',
+            'v2.18.0',
         );
         assert.ok(host.shadowRoot.querySelector('#auto-biome-toggle'));
         const autoBiomePriorityList = host.shadowRoot.querySelector(
@@ -201,7 +201,7 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         assert.equal(
             host.shadowRoot.querySelector('#game-auto-fishing-bait-grade')
                 .value,
-            'low',
+            'auto',
         );
         assert.equal(
             host.shadowRoot.querySelector('#game-auto-fishing-status')
@@ -317,6 +317,13 @@ test('生成的 userscript 可以初始化面板和 fetch 拦截器', async () =
         );
         const gameAutoFishingBaitGrade = host.shadowRoot.querySelector(
             '#game-auto-fishing-bait-grade',
+        );
+
+        assert.equal(gameAutoFishingBaitGrade.value, 'auto');
+        assert.equal(
+            gameAutoFishingBaitGrade.querySelector('option[value="auto"]')
+                ?.textContent,
+            '自动选择（使用自动鱼饵设置）',
         );
 
         gameAutoFishingBaitGrade.value = 'high';

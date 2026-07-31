@@ -411,7 +411,13 @@ export function createAutoBaitController({
         return checkQueue;
     }
 
-    function handleCastResult(result) {
+    function handleCastResult(
+        result,
+        {
+            baitGrade: requestedBaitGrade = null,
+            contextLabel: requestedContextLabel = null,
+        } = {},
+    ) {
         const state = getState();
         const { autoBaitSettings, autoBiomeCompetitionBiomes, enabled } = state;
 
@@ -424,30 +430,44 @@ export function createAutoBaitController({
             biomeId,
             autoBiomeCompetitionBiomes,
         );
-        const baitGrade = getBaitGradeForBiome(
-            biomeId,
-            autoBaitSettings,
-            autoBiomeCompetitionBiomes,
-            state,
+        const hasRequestedBaitGrade = Object.hasOwn(
+            BAIT_GRADE_LABELS,
+            requestedBaitGrade,
         );
+        const baitGrade = hasRequestedBaitGrade
+            ? requestedBaitGrade
+            : getBaitGradeForBiome(
+                  biomeId,
+                  autoBaitSettings,
+                  autoBiomeCompetitionBiomes,
+                  state,
+              );
         const baitId = getBaitIdForBiome(biomeId, baitGrade);
+        const nextCheckOptions = hasRequestedBaitGrade
+            ? {
+                  baitGrade,
+                  biomeId,
+                  contextLabel: requestedContextLabel,
+              }
+            : { biomeId };
 
         if (!baitId) {
             return;
         }
 
         if (result?.equippedBait !== baitId) {
-            void checkNow({ biomeId });
+            void checkNow(nextCheckOptions);
             return;
         }
 
         lastCheckedAt = Date.now();
 
         const contextLabel =
-            state.autoBiomeWeatherByBiome?.[biomeId]?.weather ===
+            requestedContextLabel ??
+            (state.autoBiomeWeatherByBiome?.[biomeId]?.weather ===
             GOLD_BREEZE_WEATHER
                 ? '金风'
-                : AUTO_BAIT_CONTEXT_LABELS[baitContext];
+                : AUTO_BAIT_CONTEXT_LABELS[baitContext]);
 
         if (baitGrade === 'default') {
             updateSnapshot({
@@ -475,7 +495,7 @@ export function createAutoBaitController({
                 baitGrade,
             )
         ) {
-            void checkNow({ biomeId });
+            void checkNow(nextCheckOptions);
         }
     }
 
@@ -494,10 +514,14 @@ export function createAutoBaitController({
                 return Promise.resolve(true);
             }
 
-            return checkNow({
-                baitGrade,
-                contextLabel: '内置自动钓鱼',
-            });
+            return checkNow(
+                baitGrade === 'auto'
+                    ? {}
+                    : {
+                          baitGrade,
+                          contextLabel: '内置自动钓鱼',
+                      },
+            );
         },
     };
 }

@@ -14,6 +14,7 @@ import {
 import {
     loadGameAutoFishingSettings,
     loadScheduleSettings,
+    normalizeGameAutoFishingBaitGrade,
 } from '../arcaneangler/src/storage.js';
 
 function createVisibleButton(window, { className = '', icon = '🤖' } = {}) {
@@ -356,9 +357,11 @@ test('内置自动钓鱼与休息期接管设置默认关闭并兼容保存值',
 
     try {
         assert.deepEqual(loadGameAutoFishingSettings(), {
-            baitGrade: 'low',
+            baitGrade: 'auto',
             enabled: false,
         });
+        assert.equal(normalizeGameAutoFishingBaitGrade('auto'), 'auto');
+        assert.equal(normalizeGameAutoFishingBaitGrade('unknown'), 'auto');
         assert.equal(loadScheduleSettings().gameAutoFishingDuringRest, false);
 
         values.set(
