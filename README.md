@@ -1,6 +1,6 @@
-# Tampermonkey Scripts
+# 爱发电
 
-个人使用的 Tampermonkey 脚本合集。
+[爱发电主页](https://afdian.com/a/reelax)
 
 ## Arcane Angler 自动抛竿
 
