@@ -970,6 +970,16 @@ function setAutoBiomeWeight(nextWeight) {
     handleAutomationStateChanged();
 }
 
+function setAutoBiomeMasteryXpBonusEnabled(nextEnabled) {
+    autoBiomeSettings = {
+        ...autoBiomeSettings,
+        includeMasteryXpBonus: Boolean(nextEnabled),
+    };
+    saveAutoBiomeSettings(autoBiomeSettings);
+    panel.renderAutoBiomeSettings();
+    handleAutomationStateChanged();
+}
+
 function setAutoBiomePriorityOrder(nextPriorityOrder) {
     autoBiomeSettings = {
         ...autoBiomeSettings,
@@ -1226,6 +1236,7 @@ function initialize() {
             setAutoBaitPurchaseSettings,
             setAutoBossEnabled,
             setAutoBiomeEnabled,
+            setAutoBiomeMasteryXpBonusEnabled,
             setAutoBiomePriorityOrder,
             setAutoBiomeWeight,
             setCaptchaBypassEnabled,

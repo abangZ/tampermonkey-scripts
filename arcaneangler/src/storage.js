@@ -265,6 +265,7 @@ export function loadAutoBiomeSettings() {
     const defaults = {
         biomeWeight: 5,
         enabled: false,
+        includeMasteryXpBonus: true,
         priorityOrder: [...DEFAULT_AUTO_BIOME_PRIORITY_ORDER],
     };
 
@@ -283,6 +284,8 @@ export function loadAutoBiomeSettings() {
                 defaults.biomeWeight,
             ),
             enabled: savedSettings.enabled === true,
+            includeMasteryXpBonus:
+                savedSettings.includeMasteryXpBonus !== false,
             priorityOrder: Array.isArray(savedSettings.priorityOrder)
                 ? normalizeAutoBiomePriorityOrder(savedSettings.priorityOrder)
                 : migrateLegacyAutoBiomePriorityOrder(savedSettings),

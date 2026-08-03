@@ -315,13 +315,14 @@ export function getBiomeScore(
     biomeWeight,
     guildXpBonus = 0,
     masteryXpBonus = 0,
+    includeMasteryXpBonus = true,
 ) {
     const normalizedBiomeId = normalizeBiomeId(biomeId) ?? 1;
 
     return (
         normalizeXpBonus(xpBonus) +
         normalizeXpBonus(guildXpBonus) +
-        normalizeXpBonus(masteryXpBonus) +
+        (includeMasteryXpBonus ? normalizeXpBonus(masteryXpBonus) : 0) +
         (normalizedBiomeId - 1) * normalizeXpBonus(biomeWeight)
     );
 }
@@ -395,6 +396,7 @@ export function selectBestBiome({
     competitionBiomes,
     dailyQuests = [],
     guildBoostersByBiome = {},
+    includeMasteryXpBonus = true,
     masteryXpBonusesByBiome = {},
     now = Date.now(),
     player,
@@ -437,6 +439,7 @@ export function selectBestBiome({
             biomeWeight,
             guildXpBonus,
             masteryXpBonus,
+            includeMasteryXpBonus,
         );
 
         candidates.push({
@@ -445,6 +448,9 @@ export function selectBestBiome({
             dailyQuestMatchCount,
             guildXpBonus,
             masteryXpBonus,
+            ...(masteryXpBonus > 0 && !includeMasteryXpBonus
+                ? { masteryXpBonusExcluded: true }
+                : {}),
             priorityValues: {
                 [AUTO_BIOME_PRIORITY_IDS.guildCompetition]:
                     biomeId ===
@@ -540,7 +546,11 @@ function formatTargetSummary(target) {
     const guildXpBonusLabel =
         target.guildXpBonus > 0 ? ` · 公会 +${target.guildXpBonus}%` : '';
     const masteryXpBonusLabel =
-        target.masteryXpBonus > 0 ? ` · 精通 +${target.masteryXpBonus}%` : '';
+        target.masteryXpBonus > 0
+            ? ` · 精通 +${target.masteryXpBonus}%${
+                  target.masteryXpBonusExcluded ? '（未计分）' : ''
+              }`
+            : '';
 
     const priorityLabel =
         target.selectionPriority === AUTO_BIOME_PRIORITY_IDS.guildCompetition
@@ -1251,6 +1261,8 @@ export function createAutoBiomeController({
             competitionBiomes,
             dailyQuests: dailyQuestState.quests,
             guildBoostersByBiome,
+            includeMasteryXpBonus:
+                autoBiomeSettings.includeMasteryXpBonus !== false,
             masteryXpBonusesByBiome,
             player,
             priorityOrder: normalizedPriorityOrder,

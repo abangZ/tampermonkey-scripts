@@ -30,6 +30,7 @@ export function createPanelController({
         setAutoBaitPurchaseSettings,
         setAutoBossEnabled,
         setAutoBiomeEnabled,
+        setAutoBiomeMasteryXpBonusEnabled,
         setAutoBiomePriorityOrder,
         setAutoBiomeWeight,
         setCaptchaBypassEnabled,
@@ -611,7 +612,24 @@ export function createPanelController({
           </div>
 
           <div class="field-help">
-            加权经验评分 = 天气经验加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+            加权经验评分 = 天气经验加成 + 公会经验加成 + 可选地图精通加成 +（地图编号 - 1）× 加权量；同分时选择编号最高的已解锁地图。
+          </div>
+
+          <label class="option-row">
+            <span>评分计入地图精通加成</span>
+            <span class="switch">
+              <input
+                id="auto-biome-mastery-xp-bonus-toggle"
+                type="checkbox"
+                role="switch"
+                aria-label="评分计入地图精通加成"
+              />
+              <span class="switch-track" aria-hidden="true"></span>
+            </span>
+          </label>
+
+          <div class="field-help">
+            关闭后选图不计个人地图精通，适合船长按全队共同加成选图。
           </div>
 
           <div class="row">
@@ -912,6 +930,9 @@ export function createPanelController({
             autoBiomeWeightInputs: shadowRoot.querySelectorAll(
                 'input[name="auto-biome-weight"]',
             ),
+            autoBiomeMasteryXpBonusToggle: shadowRoot.querySelector(
+                '#auto-biome-mastery-xp-bonus-toggle',
+            ),
             autoBiomeUpdatedAt: shadowRoot.querySelector(
                 '#auto-biome-updated-at',
             ),
@@ -1038,6 +1059,10 @@ export function createPanelController({
 
         ui.autoBiomeToggle.addEventListener('change', (event) => {
             setAutoBiomeEnabled(event.currentTarget.checked);
+        });
+
+        ui.autoBiomeMasteryXpBonusToggle.addEventListener('change', (event) => {
+            setAutoBiomeMasteryXpBonusEnabled(event.currentTarget.checked);
         });
 
         ui.autoBiomePriorityList.addEventListener('dragstart', (event) => {
@@ -1787,6 +1812,14 @@ export function createPanelController({
         ui.autoBiomeToggle.setAttribute(
             'aria-checked',
             autoBiomeSettings.enabled ? 'true' : 'false',
+        );
+        ui.autoBiomeMasteryXpBonusToggle.checked =
+            autoBiomeSettings.includeMasteryXpBonus !== false;
+        ui.autoBiomeMasteryXpBonusToggle.setAttribute(
+            'aria-checked',
+            autoBiomeSettings.includeMasteryXpBonus !== false
+                ? 'true'
+                : 'false',
         );
         ui.autoBiomeStatus.textContent = autoBiomeStatus;
         ui.autoBiomeCompetitionStatus.textContent = autoBiomeCompetitionStatus;

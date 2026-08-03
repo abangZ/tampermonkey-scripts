@@ -59,6 +59,7 @@ test('地图评分会叠加天气经验、公会加成、精通加成和地图�
     assert.equal(getBiomeScore(4, 30, 10), 60);
     assert.equal(getBiomeScore(4, 30, 10, 50), 110);
     assert.equal(getBiomeScore(4, 30, 10, 50, 5), 115);
+    assert.equal(getBiomeScore(4, 30, 10, 50, 5, false), 110);
 });
 
 test('公会经验加成会按地图归一化', () => {
@@ -297,6 +298,36 @@ test('加权经验对比会把指定地图的精通加成算入评分', () => {
             selectionPriority: weightedExperience,
             weather: 'clear',
             xpBonus: 27,
+        },
+    );
+});
+
+test('关闭精通评分后不会按个人精通加成选图', () => {
+    const player = {
+        currentBiome: 1,
+        unlockedBiomes: [1, 2],
+    };
+    const weatherByBiome = {
+        1: { weather: 'rain', xpBonus: 30 },
+        2: { weather: 'clear', xpBonus: 27 },
+    };
+
+    assert.deepEqual(
+        selectBestBiome({
+            biomeWeight: 0,
+            includeMasteryXpBonus: false,
+            masteryXpBonusesByBiome: { 2: 5 },
+            player,
+            priorityOrder: createPriorityOrder(),
+            weatherByBiome,
+        }),
+        {
+            baitId: null,
+            biomeId: 1,
+            score: 30,
+            selectionPriority: weightedExperience,
+            weather: 'rain',
+            xpBonus: 30,
         },
     );
 });
@@ -594,6 +625,7 @@ test('旧版自动换图设置会迁移到排序列表并保留原开关', () =>
         assert.deepEqual(loadAutoBiomeSettings(), {
             biomeWeight: 10,
             enabled: true,
+            includeMasteryXpBonus: true,
             priorityOrder: createPriorityOrder(
                 guildCompetition,
                 personalCompetition,
@@ -618,6 +650,7 @@ test('首次使用自动换图时采用完整默认优先级', () => {
         assert.deepEqual(loadAutoBiomeSettings(), {
             biomeWeight: 5,
             enabled: false,
+            includeMasteryXpBonus: true,
             priorityOrder: DEFAULT_AUTO_BIOME_PRIORITY_ORDER,
         });
     } finally {
