@@ -175,9 +175,53 @@ export function solveStaffQuestion(question, { currentBiome = null } = {}) {
     return String(Object.is(normalizedResult, -0) ? 0 : normalizedResult);
 }
 
+function collectCaptchaGapCandidates(
+    columnMatches,
+    minimumColumnMatches,
+    minimumRunWidth,
+    maximumRunWidth,
+) {
+    const candidates = [];
+    let runStart = null;
+
+    for (let x = 0; x <= columnMatches.length; x += 1) {
+        const isMatchingColumn =
+            x < columnMatches.length &&
+            columnMatches[x] >= minimumColumnMatches;
+
+        if (isMatchingColumn && runStart == null) {
+            runStart = x;
+        } else if (!isMatchingColumn && runStart != null) {
+            const runWidth = x - runStart;
+
+            if (runWidth >= minimumRunWidth && runWidth <= maximumRunWidth) {
+                candidates.push({
+                    end: x,
+                    start: runStart,
+                    width: runWidth,
+                });
+            }
+
+            runStart = null;
+        }
+    }
+
+    return candidates;
+}
+
+function readPixelLuminance(pixels, offset) {
+    return (
+        pixels[offset] * 0.2126 +
+        pixels[offset + 1] * 0.7152 +
+        pixels[offset + 2] * 0.0722
+    );
+}
+
 /**
- * 新版验证码会把缺口绘制成位于画面垂直中央的纯色矩形。
- * 在拼图高度范围内统计重复颜色，再从连续列中还原缺口左边界。
+ * 图片验证码会把缺口绘制在画面垂直中央。
+ *
+ * 旧题面使用单一纯色，优先保留精确颜色识别；新版题面会让缺口随背景
+ * 纵向渐变，改用每行亮度中位数找出持续偏暗或偏亮的矩形区域。
  */
 export function findCaptchaGapFromPixels(imageData, pieceDimensions) {
     const canvasWidth = Number(imageData?.width);
@@ -256,28 +300,59 @@ export function findCaptchaGapFromPixels(imageData, pieceDimensions) {
     const minimumColumnMatches = Math.floor(sampleHeight * 0.8);
     const minimumRunWidth = Math.floor(gapWidth * 0.6);
     const maximumRunWidth = Math.ceil(gapWidth * 1.2);
-    const candidates = [];
-    let runStart = null;
+    let candidates = collectCaptchaGapCandidates(
+        columnMatches,
+        minimumColumnMatches,
+        minimumRunWidth,
+        maximumRunWidth,
+    );
 
-    for (let x = 0; x <= canvasWidth; x += 1) {
-        const isMatchingColumn =
-            x < canvasWidth && columnMatches[x] >= minimumColumnMatches;
+    if (candidates.length === 0) {
+        const darkColumnMatches = new Uint16Array(canvasWidth);
+        const lightColumnMatches = new Uint16Array(canvasWidth);
+        const rowLuminances = new Float64Array(canvasWidth);
+        const minimumContrast = 28;
 
-        if (isMatchingColumn && runStart == null) {
-            runStart = x;
-        } else if (!isMatchingColumn && runStart != null) {
-            const runWidth = x - runStart;
+        for (let y = sampleTop; y < sampleBottom; y += 1) {
+            for (let x = 0; x < canvasWidth; x += 1) {
+                const offset = (y * canvasWidth + x) * 4;
 
-            if (runWidth >= minimumRunWidth && runWidth <= maximumRunWidth) {
-                candidates.push({
-                    end: x,
-                    start: runStart,
-                    width: runWidth,
-                });
+                rowLuminances[x] = readPixelLuminance(pixels, offset);
             }
 
-            runStart = null;
+            const sortedLuminances = Array.from(rowLuminances).sort(
+                (left, right) => left - right,
+            );
+            const medianLuminance =
+                sortedLuminances[Math.floor(sortedLuminances.length / 2)];
+
+            for (let x = 0; x < canvasWidth; x += 1) {
+                const difference = medianLuminance - rowLuminances[x];
+
+                if (difference >= minimumContrast) {
+                    darkColumnMatches[x] += 1;
+                } else if (difference <= -minimumContrast) {
+                    lightColumnMatches[x] += 1;
+                }
+            }
         }
+
+        const minimumContrastMatches = Math.floor(sampleHeight * 0.75);
+
+        candidates = [
+            ...collectCaptchaGapCandidates(
+                darkColumnMatches,
+                minimumContrastMatches,
+                minimumRunWidth,
+                maximumRunWidth,
+            ),
+            ...collectCaptchaGapCandidates(
+                lightColumnMatches,
+                minimumContrastMatches,
+                minimumRunWidth,
+                maximumRunWidth,
+            ),
+        ];
     }
 
     const gap = candidates.sort(
@@ -301,6 +376,21 @@ export function findCaptchaGapFromPixels(imageData, pieceDimensions) {
         gapX,
         gapWidth,
         ratio: gapX / travelWidth,
+    };
+}
+
+export function createCaptchaInteraction(rangeValue) {
+    const target = Math.round(Number(rangeValue));
+
+    if (!Number.isFinite(target) || target < 0 || target > 100) {
+        throw new Error('验证码滑块位置无效');
+    }
+
+    const correctionDistance = Math.min(randomInt(2, 6), 100 - target);
+
+    return {
+        moveCount: randomInt(8, 16),
+        totalDistance: target + correctionDistance * 2,
     };
 }
 
@@ -715,7 +805,13 @@ export function createCaptchaController({
             return false;
         }
 
-        await api.notifyCaptchaVerified(challenge.token, String(rangeValue));
+        const interaction = createCaptchaInteraction(rangeValue);
+
+        await api.notifyCaptchaVerified(
+            challenge.token,
+            String(rangeValue),
+            interaction,
+        );
 
         if (activeCaptchaChallenge?.token === challenge.token) {
             activeCaptchaChallenge = null;

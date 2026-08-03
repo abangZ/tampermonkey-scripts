@@ -4,6 +4,7 @@ import test from 'node:test';
 import { Window } from 'happy-dom';
 
 import {
+    createCaptchaInteraction,
     createCaptchaController,
     findCaptchaGapFromPixels,
     solveStaffQuestion,
@@ -53,6 +54,61 @@ test('新版图片验证码会从纯色矩形中还原滑块位置', () => {
             ratio: gapX / (width - gapWidth),
         },
     );
+});
+
+test('渐变背景验证码会按逐行亮度对比还原缺口位置', () => {
+    const width = 320;
+    const height = 130;
+    const gapX = 103;
+    const gapY = 18;
+    const gapWidth = 55;
+    const gapHeight = 95;
+    const data = new Uint8ClampedArray(width * height * 4);
+
+    for (let y = 0; y < height; y += 1) {
+        for (let x = 0; x < width; x += 1) {
+            const offset = (y * width + x) * 4;
+
+            data[offset] = 55 + Math.floor(y / 3);
+            data[offset + 1] = 150 - Math.floor(y / 4);
+            data[offset + 2] = 205 - Math.floor(y / 5);
+            data[offset + 3] = 255;
+        }
+    }
+
+    for (let y = gapY + 2; y < gapY + gapHeight - 2; y += 1) {
+        for (let x = gapX + 1; x < gapX + gapWidth - 1; x += 1) {
+            const offset = (y * width + x) * 4;
+
+            data[offset] = 14 + Math.floor(y / 8);
+            data[offset + 1] = 26 + Math.floor(y / 7);
+            data[offset + 2] = 38 + Math.floor(y / 6);
+            data[offset + 3] = 255;
+        }
+    }
+
+    assert.deepEqual(
+        findCaptchaGapFromPixels(
+            { data, height, width },
+            { height: gapHeight, width: gapWidth },
+        ),
+        {
+            canvasWidth: width,
+            gapWidth,
+            gapX,
+            ratio: gapX / (width - gapWidth),
+        },
+    );
+});
+
+test('验证码交互数据覆盖拖动与小幅修正轨迹', () => {
+    const interaction = createCaptchaInteraction(39);
+
+    assert.equal(interaction.moveCount >= 8, true);
+    assert.equal(interaction.moveCount <= 16, true);
+    assert.equal(interaction.totalDistance >= 43, true);
+    assert.equal(interaction.totalDistance <= 51, true);
+    assert.throws(() => createCaptchaInteraction(101), /滑块位置无效/);
 });
 
 test('Staff Question 只解析明确的基础算术题', () => {
