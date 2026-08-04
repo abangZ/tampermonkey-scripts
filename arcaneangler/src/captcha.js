@@ -781,29 +781,10 @@ export function createCaptchaController({
             rangeValue,
         });
 
-        if (
-            !(await waitForCaptchaStep(
-                CONFIG.captchaObserveDelayMin,
-                CONFIG.captchaObserveDelayMax,
-                '正在观察验证题面',
-                '操作滑块',
-                isAttemptActive,
-            ))
-        ) {
-            return false;
-        }
-
-        if (
-            !(await waitForCaptchaStep(
-                CONFIG.captchaDragDelayMin,
-                CONFIG.captchaDragDelayMax,
-                '正在模拟滑块操作',
-                '提交验证',
-                isAttemptActive,
-            ))
-        ) {
-            return false;
-        }
+        // CAPTCHA token 的有效窗口很短。答案计算完成后必须立即提交，
+        // 不能再用模拟观察、拖动的等待时间消耗 challenge 生命周期。
+        setStatus('已识别人机验证，正在立即提交');
+        setNextDelay('提交验证');
 
         const interaction = createCaptchaInteraction(rangeValue);
 

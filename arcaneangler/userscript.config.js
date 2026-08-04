@@ -1,5 +1,5 @@
 export const userscriptFileName = 'arcane-angler-auto-cast.user.js';
-export const userscriptVersion = '3.0.0';
+export const userscriptVersion = '3.0.1';
 
 const installUrl =
     'https://raw.githubusercontent.com/abangZ/tampermonkey-scripts/main/' +

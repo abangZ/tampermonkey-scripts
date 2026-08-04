@@ -16,11 +16,10 @@ export const CONFIG = {
     mouseDownMin: 35,
     mouseDownMax: 90,
 
-    // 自动验证：模拟人观察题面、拖动滑块和确认结果的耗时
+    // 自动验证：Staff Question 观察题面和验证成功后确认结果的耗时。
+    // 图片 CAPTCHA token 时效很短，识别完成后不再额外等待。
     captchaObserveDelayMin: 2200,
     captchaObserveDelayMax: 4200,
-    captchaDragDelayMin: 900,
-    captchaDragDelayMax: 1800,
     captchaConfirmDelayMin: 1400,
     captchaConfirmDelayMax: 2600,
 

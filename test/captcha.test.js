@@ -111,6 +111,97 @@ test('验证码交互数据覆盖拖动与小幅修正轨迹', () => {
     assert.throws(() => createCaptchaInteraction(101), /滑块位置无效/);
 });
 
+test('图片验证码识别完成后立即提交，避免 challenge 在等待中失效', async () => {
+    const previousDocument = globalThis.document;
+    const previousDOMParser = globalThis.DOMParser;
+    const previousHTMLElement = globalThis.HTMLElement;
+    const previousLocalStorage = globalThis.localStorage;
+    const previousWindow = globalThis.window;
+    const previousDelays = {
+        captchaConfirmDelayMax: CONFIG.captchaConfirmDelayMax,
+        captchaConfirmDelayMin: CONFIG.captchaConfirmDelayMin,
+        captchaObserveDelayMax: CONFIG.captchaObserveDelayMax,
+        captchaObserveDelayMin: CONFIG.captchaObserveDelayMin,
+    };
+    const window = new Window({ url: 'https://arcaneangler.com/' });
+    let enabled = true;
+    let resolveSubmission;
+    const submitted = new Promise((resolve) => {
+        resolveSubmission = resolve;
+    });
+
+    CONFIG.captchaObserveDelayMin = 1000;
+    CONFIG.captchaObserveDelayMax = 1000;
+    CONFIG.captchaConfirmDelayMin = 0;
+    CONFIG.captchaConfirmDelayMax = 0;
+    window.ApiService = {
+        async notifyCaptchaVerified(...args) {
+            resolveSubmission(args);
+            return { success: true };
+        },
+    };
+    globalThis.document = window.document;
+    globalThis.DOMParser = window.DOMParser;
+    globalThis.HTMLElement = window.HTMLElement;
+    globalThis.localStorage = window.localStorage;
+    globalThis.window = window;
+
+    const controller = createCaptchaController({
+        getState() {
+            return {
+                captchaBypassEnabled: true,
+                enabled,
+            };
+        },
+        notify() {},
+        onVerificationResult() {},
+        setEnabled(nextEnabled) {
+            enabled = nextEnabled;
+        },
+        setNextDelay() {},
+        setStatus() {},
+    });
+
+    try {
+        const submission = await Promise.race([
+            (async () => {
+                controller.handleChallenge({
+                    bgSvg: [
+                        '<svg xmlns="http://www.w3.org/2000/svg"',
+                        ' viewBox="0 0 300 120" width="300" height="120">',
+                        '<rect width="300" height="120" fill="#172033"/>',
+                        '<rect x="130" y="35" width="40" height="40"',
+                        ' fill="none" stroke="#fff" stroke-dasharray="4 4"/>',
+                        '</svg>',
+                    ].join(''),
+                    token: 'fresh-challenge-token',
+                });
+
+                return submitted;
+            })(),
+            new Promise((_, reject) => {
+                setTimeout(
+                    () => reject(new Error('验证码提交前发生了额外等待')),
+                    100,
+                );
+            }),
+        ]);
+
+        assert.equal(submission[0], 'fresh-challenge-token');
+        assert.equal(submission[1], '50');
+        assert.equal(submission[2].moveCount > 0, true);
+        assert.equal(submission[2].totalDistance > 0, true);
+    } finally {
+        controller.cancel();
+        Object.assign(CONFIG, previousDelays);
+        globalThis.document = previousDocument;
+        globalThis.DOMParser = previousDOMParser;
+        globalThis.HTMLElement = previousHTMLElement;
+        globalThis.localStorage = previousLocalStorage;
+        globalThis.window = previousWindow;
+    }
+});
+
 test('Staff Question 只解析明确的基础算术题', () => {
     assert.equal(solveStaffQuestion('How much is 3x7?'), '21');
     assert.equal(solveStaffQuestion('how much is three plus one'), '4');
